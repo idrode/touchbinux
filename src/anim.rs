@@ -7,6 +7,70 @@ use std::{
     time::Duration,
 };
 
+/// Fast start, gentle stop: 1 - (1 - k)^3, `k` in 0..=1.
+pub fn ease_out(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    1.0 - (1.0 - k).powi(3)
+}
+
+/// Inverse of `ease_out`: the `k` at which it reaches `v`.
+pub fn ease_out_inverse(v: f32) -> f32 {
+    1.0 - (1.0 - v.clamp(0.0, 1.0)).cbrt()
+}
+
+/// A number moving from `from` to `to` over `dur` (ease-out), as a pure function of
+/// time: what it shows at `t` never depends on how often it was drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tween {
+    from: f32,
+    to: f32,
+    start: Duration,
+    dur: Duration,
+}
+
+impl Tween {
+    /// Resting at `v`.
+    pub fn still(v: f32) -> Tween {
+        Tween {
+            from: v,
+            to: v,
+            start: Duration::ZERO,
+            dur: Duration::ZERO,
+        }
+    }
+
+    pub fn value(&self, t: Duration) -> f32 {
+        if self.dur.is_zero() || t >= self.start + self.dur {
+            return self.to;
+        }
+        let k = t.saturating_sub(self.start).as_secs_f32() / self.dur.as_secs_f32();
+        self.from + (self.to - self.from) * ease_out(k)
+    }
+
+    /// Where it is going (or resting).
+    pub fn target(&self) -> f32 {
+        self.to
+    }
+
+    pub fn running(&self, t: Duration) -> bool {
+        self.from != self.to && t < self.start + self.dur
+    }
+
+    /// Heads for `to` from wherever it is at `t`, taking `dur`. No-op if already
+    /// heading there, so calling it every frame doesn't restart it.
+    pub fn retarget(&mut self, t: Duration, to: f32, dur: Duration) {
+        if to == self.to {
+            return;
+        }
+        *self = Tween {
+            from: self.value(t),
+            to,
+            start: t,
+            dur,
+        };
+    }
+}
+
 pub trait Animated {
     /// Paints the item inside `rect` as it looks at time `t` (since the scene started).
     fn draw(&self, canvas: &mut Canvas, rect: Rect, t: Duration);
@@ -16,6 +80,12 @@ pub trait Animated {
     /// `None` means it will not change on its own (no frames scheduled).
     fn next_change(&self, t: Duration) -> Option<Duration> {
         Some(t)
+    }
+
+    /// The button it sits in was tapped at `t` (e.g. the folder opens). Returns
+    /// whether that changed anything.
+    fn on_tap(&mut self, _t: Duration) -> bool {
+        false
     }
 }
 
@@ -58,5 +128,54 @@ impl Animated for Pulse {
         let x = (cx - self.mask.width() as f32 / 2.0).round() as i32;
         let y = (cy - self.mask.height() as f32 / 2.0).round() as i32;
         canvas.draw_mask(&self.mask, x, y, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    #[test]
+    fn ease_out_shape() {
+        assert_eq!(ease_out(0.0), 0.0);
+        assert_eq!(ease_out(1.0), 1.0);
+        assert_eq!(ease_out(2.0), 1.0);
+        // Ahead of linear all the way (decelerating), and monotonic.
+        let mut prev = 0.0;
+        for i in 1..100 {
+            let k = i as f32 / 100.0;
+            assert!(ease_out(k) > k);
+            assert!(ease_out(k) > prev);
+            prev = ease_out(k);
+        }
+        for v in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            assert!((ease_out(ease_out_inverse(v)) - v).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn tween_follows_time_and_retargets_smoothly() {
+        let mut tw = Tween::still(0.0);
+        assert!(!tw.running(MS(0)));
+        tw.retarget(MS(1000), 1.0, MS(200));
+        assert_eq!(tw.value(MS(1000)), 0.0);
+        assert!(tw.running(MS(1100)));
+        let mid = tw.value(MS(1100));
+        assert!(mid > 0.5 && mid < 1.0, "{mid}"); // ease-out: past half at half time
+        assert_eq!(tw.value(MS(1200)), 1.0);
+        assert!(!tw.running(MS(1200)));
+        // Same target again: nothing restarts.
+        tw.retarget(MS(1100), 1.0, MS(200));
+        assert_eq!(tw.value(MS(1100)), mid);
+        // Reversing mid-way starts from where it is, without a jump.
+        tw.retarget(MS(1100), 0.0, MS(200));
+        assert_eq!(tw.value(MS(1100)), mid);
+        assert_eq!(tw.value(MS(1300)), 0.0);
+        // Zero duration: instant.
+        tw.retarget(MS(2000), 1.0, Duration::ZERO);
+        assert_eq!(tw.value(MS(2000)), 1.0);
+        assert!(!tw.running(MS(2000)));
     }
 }

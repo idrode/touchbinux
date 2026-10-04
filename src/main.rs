@@ -947,6 +947,7 @@ fn run(
                     touches.clear();
                     ui_events.clear();
                     touch.read(&mut touches)?;
+                    let scene_t = Instant::now() - start;
                     for t in &touches {
                         let (x, y) = touch.to_canvas(t.x, t.y, w, h);
                         if debug_touch {
@@ -955,9 +956,13 @@ fn run(
                                 t.phase, t.x, t.y
                             );
                         }
-                        dirty |= app
-                            .scene
-                            .handle_touch(t.phase, x, y, &app.font, &mut ui_events);
+                        dirty |= app.scene.handle_touch(
+                            t.phase,
+                            (x, y),
+                            scene_t,
+                            &app.font,
+                            &mut ui_events,
+                        );
                     }
                     for e in &ui_events {
                         let msg = ui_event_json(e);

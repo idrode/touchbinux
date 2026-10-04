@@ -17,6 +17,8 @@ pub const DEFAULT_CLOCK_FORMAT: &str = "%H:%M";
 const LEGACY_LAYER: &str = "buttons";
 /// Sanity limit for `width`, `margin` and `gap` (the bar is ~2000 px wide).
 const MAX_PX: f32 = 4000.0;
+/// Longest accepted animation; anything slower would feel broken.
+const MAX_ANIM_MS: u64 = 2000;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,6 +116,9 @@ pub struct ItemConfig {
     /// Share of the free space, by weight (spacers default to 1).
     #[serde(default)]
     pub stretch: Option<f32>,
+    /// Animation length: the `builtin:folder` opening (and closing).
+    #[serde(default)]
+    pub anim_ms: Option<u64>,
 }
 
 /// "#rrggbb" or "#rrggbbaa".
@@ -168,6 +173,10 @@ impl ItemConfig {
         self.format.as_deref().unwrap_or(DEFAULT_CLOCK_FORMAT)
     }
 
+    pub fn anim(&self) -> Option<Duration> {
+        self.anim_ms.map(Duration::from_millis)
+    }
+
     pub fn battery_icon_dir(&self) -> &str {
         self.icon_dir.as_deref().unwrap_or(ICON_DIR)
     }
@@ -180,7 +189,7 @@ impl ItemConfig {
         };
         // Fields each type accepts, besides type/width/stretch.
         let allowed: &[&str] = match self.kind {
-            ItemKind::Button => &["id", "icon", "label", "color", "action"],
+            ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
             ItemKind::Clock => &["id", "format", "action"],
             ItemKind::Battery => &["id", "icon_dir", "action"],
             ItemKind::Volume | ItemKind::Brightness => &["id", "action"],
@@ -194,6 +203,7 @@ impl ItemConfig {
             ("format", self.format.is_some()),
             ("icon_dir", self.icon_dir.is_some()),
             ("action", self.action.is_some()),
+            ("anim_ms", self.anim_ms.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) {
@@ -227,12 +237,18 @@ impl ItemConfig {
             {
                 bail!("{what}: unknown built-in icon {icon:?} (there is {BUILTIN_FOLDER:?})");
             }
+            if self.anim_ms.is_some() && self.icon.as_deref() != Some(BUILTIN_FOLDER) {
+                bail!("{what}: `anim_ms` only applies to icon = {BUILTIN_FOLDER:?}");
+            }
         }
         if self.kind == ItemKind::Clock {
             let fmt = self.clock_format();
             if fmt.is_empty() || chrono::format::StrftimeItems::new(fmt).parse().is_err() {
                 bail!("{what}: invalid strftime format {fmt:?}");
             }
+        }
+        if self.anim_ms.is_some_and(|ms| ms > MAX_ANIM_MS) {
+            bail!("{what}: anim_ms must be 0..={MAX_ANIM_MS}");
         }
         if let Some(action) = &self.action {
             validate_action(&what, action)?;
@@ -441,6 +457,7 @@ impl Config {
                 action: Some(b.action.clone()),
                 width: None,
                 stretch: Some(1.0),
+                anim_ms: None,
             })
             .collect();
         Some(Cow::Owned(LayerConfig {
@@ -577,6 +594,7 @@ mod tests {
         type = "button"
         id = "wallpaper"
         icon = "builtin:folder"
+        anim_ms = 250
         action = { type = "key", key = "KEY_F14" }
 
         [[layers.items]]
@@ -694,6 +712,9 @@ mod tests {
             "type='clock'\nformat=''",
             "type='clock'\naction={type='key',key='KEY_NOPE'}",
             "type='button'\nid='b'\nicon='builtin:rocket'\naction={type='socket'}",
+            "type='button'\nid='b'\nicon='x'\nanim_ms=300\naction={type='socket'}",
+            "type='button'\nid='b'\nicon='builtin:folder'\nanim_ms=99999\naction={type='socket'}",
+            "type='clock'\nanim_ms=100",
         ];
         for body in bad {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");

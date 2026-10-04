@@ -4,7 +4,7 @@
 //! (folder opening on tap, sliders unfolding) without changing the structure.
 
 use crate::{
-    anim::Animated,
+    anim::{Animated, ease_out, ease_out_inverse},
     battery::BatteryStatus,
     canvas::{Canvas, Font, Image, Rect, Rgba, Svg},
     scenes::icon_side,
@@ -370,23 +370,73 @@ pub fn draw_sun(canvas: &mut Canvas, icon: Rect, percent: u8) {
 
 // --- Folder -------------------------------------------------------------------------
 
-/// What the folder is doing. In 8a it is always closed; 8b sets `opened_at` on tap.
-#[derive(Default)]
+/// The folder's tap animation: opens (ease-out), stays open a moment, closes by
+/// itself. A pure function of `t` and the tap time.
 pub struct FolderState {
-    pub opened_at: Option<Duration>,
+    opened_at: Option<Duration>,
+    open: Duration,
+    hold: Duration,
+    close: Duration,
 }
 
-/// Time the folder takes to open fully once tapped.
-const FOLDER_OPEN: Duration = Duration::from_millis(250);
+/// Default opening (and closing) time; config `anim_ms`.
+pub const FOLDER_ANIM: Duration = Duration::from_millis(300);
 
 impl FolderState {
-    /// 0 = closed, 1 = fully open, eased.
+    /// Opens in `anim`, stays open half that, closes in `anim`.
+    pub fn new(anim: Duration) -> FolderState {
+        FolderState {
+            opened_at: None,
+            open: anim,
+            hold: anim / 2,
+            close: anim,
+        }
+    }
+
+    fn total(&self) -> Duration {
+        self.open + self.hold + self.close
+    }
+
+    /// 0 = closed, 1 = fully open.
     pub fn openness(&self, t: Duration) -> f32 {
         let Some(at) = self.opened_at else {
             return 0.0;
         };
-        let k = (t.saturating_sub(at).as_secs_f32() / FOLDER_OPEN.as_secs_f32()).min(1.0);
-        1.0 - (1.0 - k) * (1.0 - k)
+        let e = t.saturating_sub(at);
+        let frac = |d: Duration, of: Duration| {
+            if of.is_zero() {
+                1.0
+            } else {
+                d.as_secs_f32() / of.as_secs_f32()
+            }
+        };
+        if e < self.open {
+            ease_out(frac(e, self.open))
+        } else if e < self.open + self.hold {
+            1.0
+        } else if e < self.total() {
+            1.0 - ease_out(frac(e - self.open - self.hold, self.close))
+        } else {
+            0.0
+        }
+    }
+
+    /// Starts the animation. While opening or open it just carries on; while
+    /// closing it reopens from where it is, without a jump.
+    pub fn tap(&mut self, t: Duration) {
+        let busy = self.opened_at.map(|at| t.saturating_sub(at));
+        match busy {
+            Some(e) if e < self.open + self.hold => {}
+            Some(e) if e < self.total() => {
+                let k = ease_out_inverse(self.openness(t));
+                self.opened_at = Some(t.saturating_sub(self.open.mul_f32(k)));
+            }
+            _ => self.opened_at = Some(t),
+        }
+    }
+
+    pub fn animating(&self, t: Duration) -> bool {
+        self.opened_at.is_some_and(|at| t < at + self.total())
     }
 }
 
@@ -402,8 +452,12 @@ impl Animated for Folder {
     }
 
     fn next_change(&self, t: Duration) -> Option<Duration> {
-        let at = self.state.opened_at?;
-        (t < at + FOLDER_OPEN).then_some(t)
+        self.state.animating(t).then_some(t)
+    }
+
+    fn on_tap(&mut self, t: Duration) -> bool {
+        self.state.tap(t);
+        true
     }
 }
 
@@ -474,17 +528,41 @@ mod tests {
     }
 
     #[test]
-    fn folder_closed_until_opened() {
-        let mut st = FolderState::default();
-        assert_eq!(st.openness(Duration::from_secs(5)), 0.0);
-        st.opened_at = Some(Duration::from_secs(1));
-        assert_eq!(st.openness(Duration::from_secs(1)), 0.0);
-        assert_eq!(st.openness(Duration::from_secs(2)), 1.0);
-        let folder = Folder {
+    fn folder_opens_holds_and_closes() {
+        let ms = Duration::from_millis;
+        let mut st = FolderState::new(ms(300));
+        assert_eq!(st.openness(ms(5000)), 0.0);
+        assert!(!st.animating(ms(0)));
+        st.tap(ms(1000));
+        assert_eq!(st.openness(ms(1000)), 0.0);
+        // Ease-out: well past half way at half the opening time.
+        assert!(st.openness(ms(1150)) > 0.8);
+        assert_eq!(st.openness(ms(1300)), 1.0);
+        assert_eq!(st.openness(ms(1440)), 1.0); // the pause (150 ms)
+        let closing = st.openness(ms(1500));
+        assert!(closing > 0.0 && closing < 1.0);
+        assert_eq!(st.openness(ms(1750)), 0.0);
+        assert!(st.animating(ms(1749)));
+        assert!(!st.animating(ms(1750)));
+        // A tap while opening doesn't restart it.
+        st.tap(ms(2000));
+        st.tap(ms(2100));
+        assert_eq!(st.openness(ms(2300)), 1.0);
+        // A tap while closing reopens from the current openness, no jump.
+        let at = ms(2500);
+        let before = st.openness(at);
+        st.tap(at);
+        assert!((st.openness(at) - before).abs() < 1e-3);
+        assert_eq!(st.openness(at + ms(300)), 1.0);
+
+        let mut folder = Folder {
             color: ICON,
-            state: FolderState::default(),
+            state: FolderState::new(ms(300)),
         };
         assert_eq!(folder.next_change(Duration::ZERO), None);
+        assert!(folder.on_tap(ms(10)));
+        assert_eq!(folder.next_change(ms(20)), Some(ms(20)));
+        assert_eq!(folder.next_change(ms(10) + ms(750)), None);
     }
 
     #[test]

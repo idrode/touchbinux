@@ -11,8 +11,8 @@ use crate::{
     layout,
     touch::Phase,
     widgets::{
-        BatteryIcons, BatteryWidget, Clock, DrawCx, Folder, FolderState, Level, LevelWidget, Live,
-        Widget,
+        BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, Level,
+        LevelWidget, Live, Widget,
     },
 };
 use anyhow::Result;
@@ -96,6 +96,8 @@ pub enum UiEvent {
 struct Button {
     id: String,
     rect: Rect,
+    /// Index in `Scene::animated` of its icon, told about taps (`Animated::on_tap`).
+    anim: Option<usize>,
 }
 
 /// Horizontal slider showing an integer 0-100.
@@ -305,13 +307,14 @@ impl Scene {
             .min()
     }
 
-    /// Feeds one event of the followed finger (canvas coordinates). Appends taps and
-    /// slider changes to `out`; returns whether the scene needs a redraw.
+    /// Feeds one event of the followed finger (canvas coordinates) at scene time `t`.
+    /// Appends taps and slider changes to `out`; returns whether the scene needs a
+    /// redraw.
     pub fn handle_touch(
         &mut self,
         phase: Phase,
-        x: f32,
-        y: f32,
+        (x, y): (f32, f32),
+        t: Duration,
         font: &Font,
         out: &mut Vec<UiEvent>,
     ) -> bool {
@@ -358,7 +361,11 @@ impl Scene {
                     Capture::Button(i, _) => {
                         let b = &self.buttons[i];
                         if phase == Phase::Up && contains(b.rect, x, y) {
+                            // The action goes out now; the icon animates meanwhile.
                             out.push(UiEvent::Tap(b.id.clone()));
+                            if let Some(a) = b.anim {
+                                changed |= self.animated[a].1.on_tap(t);
+                            }
                         }
                     }
                     Capture::Slider(i) => {
@@ -447,6 +454,7 @@ impl Scene {
         let label_w = font.measure(&spec.label, px);
         let gx = (x + (w - (icon_w + gap + label_w)) / 2.0).round();
         let icon_y = (cy - icon_h / 2.0).round();
+        let mut anim = None;
         match spec.icon {
             Icon::Svg(svg) => bg.draw_svg(&svg, gx, icon_y, icon_h),
             Icon::Raster(img) => {
@@ -468,9 +476,11 @@ impl Scene {
                 let iy = icon_y + (icon_h - mask.height() as f32) / 2.0;
                 bg.draw_mask(&mask, ix.round() as i32, iy.round() as i32, color);
             }
-            Icon::Animated { item, .. } => self
-                .animated
-                .push((Rect::new(gx, icon_y, icon_w, icon_h), item)),
+            Icon::Animated { item, .. } => {
+                anim = Some(self.animated.len());
+                self.animated
+                    .push((Rect::new(gx, icon_y, icon_w, icon_h), item));
+            }
             Icon::None => {}
         }
         self.background.draw_text(
@@ -481,7 +491,11 @@ impl Scene {
             px,
             spec.style.text,
         );
-        self.buttons.push(Button { id: spec.id, rect });
+        self.buttons.push(Button {
+            id: spec.id,
+            rect,
+            anim,
+        });
     }
 
     /// Equally sized buttons filling `area`.
@@ -512,6 +526,7 @@ impl Scene {
         self.buttons.push(Button {
             id: id.into(),
             rect,
+            anim: None,
         });
     }
 
@@ -868,7 +883,7 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
     if name == crate::config::BUILTIN_FOLDER {
         let folder = Folder {
             color: color.unwrap_or(FOLDER_YELLOW),
-            state: FolderState::default(),
+            state: FolderState::new(item.anim().unwrap_or(FOLDER_ANIM)),
         };
         return Icon::Animated {
             item: Box::new(folder),

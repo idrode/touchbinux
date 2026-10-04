@@ -1,6 +1,6 @@
 //! TOML configuration: buttons, layers of bar items, and their actions.
 
-use crate::{canvas::Rgba, hyprctl::HyprAction, layout::Size};
+use crate::{canvas::Rgba, gif::Play, hyprctl::HyprAction, layout::Size};
 use anyhow::{Context, Result, bail};
 use evdev::KeyCode;
 use serde::Deserialize;
@@ -68,6 +68,7 @@ pub enum ItemKind {
     Battery,
     Volume,
     Brightness,
+    Gif,
     Spacer,
 }
 
@@ -79,6 +80,7 @@ impl ItemKind {
             ItemKind::Battery => "battery",
             ItemKind::Volume => "volume",
             ItemKind::Brightness => "brightness",
+            ItemKind::Gif => "gif",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -128,6 +130,12 @@ pub struct ItemConfig {
     /// volume/brightness: fold back after this long without touches.
     #[serde(default)]
     pub collapse_after_ms: Option<u64>,
+    /// gif: absolute path of the .gif.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// gif: "on_tap" (default) or "loop".
+    #[serde(default)]
+    pub play: Option<Play>,
 }
 
 /// "#rrggbb" or "#rrggbbaa".
@@ -173,6 +181,7 @@ impl ItemConfig {
                 ItemKind::Button => 160.0,
                 ItemKind::Clock => 120.0,
                 ItemKind::Battery => 80.0,
+                ItemKind::Gif => 60.0,
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
             }),
         }
@@ -213,6 +222,7 @@ impl ItemConfig {
                 "expand_width",
                 "collapse_after_ms",
             ],
+            ItemKind::Gif => &["id", "path", "play", "action"],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -226,6 +236,8 @@ impl ItemConfig {
             ("anim_ms", self.anim_ms.is_some()),
             ("expand_width", self.expand_width.is_some()),
             ("collapse_after_ms", self.collapse_after_ms.is_some()),
+            ("path", self.path.is_some()),
+            ("play", self.play.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) {
@@ -262,6 +274,14 @@ impl ItemConfig {
             if self.anim_ms.is_some() && self.icon.as_deref() != Some(BUILTIN_FOLDER) {
                 bail!("{what}: `anim_ms` only applies to icon = {BUILTIN_FOLDER:?}");
             }
+        }
+        if self.kind == ItemKind::Gif
+            && !self
+                .path
+                .as_deref()
+                .is_some_and(|p| Path::new(p).is_absolute())
+        {
+            bail!("{what}: a gif needs `path`, an absolute path to the .gif");
         }
         if self.kind == ItemKind::Clock {
             let fmt = self.clock_format();
@@ -491,6 +511,8 @@ impl Config {
                 anim_ms: None,
                 expand_width: None,
                 collapse_after_ms: None,
+                path: None,
+                play: None,
             })
             .collect();
         Some(Cow::Owned(LayerConfig {
@@ -634,6 +656,12 @@ mod tests {
         type = "spacer"
 
         [[layers.items]]
+        type = "gif"
+        path = "/etc/touchbinux/gifs/bongosmash.gif"
+        play = "on_tap"
+        width = 60
+
+        [[layers.items]]
         type = "brightness"
 
         [[layers.items]]
@@ -677,6 +705,7 @@ mod tests {
                 Some("launcher"),
                 Some("wallpaper"),
                 None,
+                Some("gif"),
                 Some("brightness"),
                 Some("volume"),
                 Some("battery"),
@@ -687,14 +716,22 @@ mod tests {
         assert_eq!(sizes[0], Size::Fixed(80.0));
         assert_eq!(sizes[1], Size::Fixed(80.0)); // icon-only button default
         assert_eq!(sizes[2], Size::Stretch(1.0)); // spacer default
-        assert_eq!(sizes[4], Size::Fixed(140.0));
-        assert_eq!(sizes[6], Size::Stretch(2.0));
-        let vol = &main.items[4];
+        assert_eq!(sizes[3], Size::Fixed(60.0));
+        assert_eq!(sizes[5], Size::Fixed(140.0));
+        assert_eq!(sizes[7], Size::Stretch(2.0));
+        let gif = &main.items[3];
+        assert_eq!(gif.play, Some(Play::OnTap));
+        assert_eq!(
+            gif.path.as_deref(),
+            Some("/etc/touchbinux/gifs/bongosmash.gif")
+        );
+        assert!(c.action("gif").is_none()); // taps only go to the socket
+        let vol = &main.items[5];
         assert_eq!(vol.expand_width, Some(900.0));
         assert_eq!(vol.collapse_after(), Some(Duration::from_millis(2500)));
         assert_eq!(vol.anim(), Some(Duration::from_millis(150)));
         assert!(matches!(vol.color, Some(Color(Rgba(0xff, 0, 0, 0xff)))));
-        assert_eq!(main.items[3].expand_width, None); // brightness: defaults
+        assert_eq!(main.items[4].expand_width, None); // brightness: defaults
         let launcher = &main.items[0];
         assert!(matches!(
             launcher.color,
@@ -765,6 +802,11 @@ mod tests {
             "type='volume'\ncollapse_after_ms=999999",
             "type='brightness'\nanim_ms=5000",
             "type='volume'\ncolor='#00ffb'",
+            "type='gif'",
+            "type='gif'\npath='gifs/a.gif'",
+            "type='gif'\npath='/a.gif'\nplay='always'",
+            "type='gif'\npath='/a.gif'\nicon='x'",
+            "type='button'\nid='b'\nlabel='x'\npath='/a.gif'\naction={type='socket'}",
         ];
         for body in bad {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");

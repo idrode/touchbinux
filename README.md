@@ -61,6 +61,11 @@ reactiva. La carpeta del fondo de pantalla se abre y se cierra al tocarla (la
 tecla sale enseguida). Duraciones con `anim_ms`; todo está en
 `config.example.toml`.
 
+Los elementos `gif` se escalan al cargar para caber en su hueco (con su proporción)
+y se dibujan centrados; con `play = "on_tap"` (por defecto) muestran el primer
+fotograma y se reproducen una vez por toque, y con `"loop"` siempre (eso sí gasta
+CPU de forma continua).
+
 Mientras algo se anima o se arrastra el bucle dibuja a ~30 fps; al terminar el
 temporizador de frames se desarma. Con un slider desplegado y quieto solo queda
 programado el despertar del plegado automático.

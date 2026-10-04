@@ -7,6 +7,7 @@ use crate::{
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{ItemConfig, ItemKind, LayerConfig},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
+    gif::{Gif, GifPlayer, Play},
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
@@ -1027,10 +1028,35 @@ pub fn bar(
                     .expanders
                     .push(Expander::new(id, level, rect, open, color, fold));
             }
+            ItemKind::Gif => {
+                let icon = gif_icon(item, rect);
+                scene.add_button(rect, font, ButtonSpec::new(id, icon, ""));
+            }
             ItemKind::Spacer => {}
         }
     }
     Ok(scene)
+}
+
+/// A gif item: as large as fits in its slot (2 px clear of the edges), centred.
+/// Decoded and scaled once here; if that fails, a "?" tile and a log line.
+fn gif_icon(item: &ItemConfig, rect: Rect) -> Icon {
+    let path = Path::new(item.path.as_deref().unwrap_or_default());
+    let (max_w, max_h) = ((rect.w - 4.0).max(1.0), (rect.h - 2.0).max(1.0));
+    match Gif::load_fit(path, max_w as u32, max_h as u32) {
+        Ok(gif) => {
+            let width = gif.width() as f32;
+            let player = GifPlayer::new(gif, item.play.unwrap_or(Play::OnTap));
+            Icon::Animated {
+                item: Box::new(player),
+                width,
+            }
+        }
+        Err(e) => {
+            eprintln!("bar: gif: {e:#}");
+            Icon::Letter('?')
+        }
+    }
 }
 
 /// A button's icon: built in, or from a file/theme, optionally painted in `color`.
@@ -1215,7 +1241,13 @@ mod tests {
         let mut canvas = Canvas::new(W, H).unwrap();
         let vol = s.expanders[0].rect;
         let mut out = Vec::new();
-        s.handle_touch(Phase::Down, (vol.x + 5.0, vol.y + 5.0), MS(0), &font, &mut out);
+        s.handle_touch(
+            Phase::Down,
+            (vol.x + 5.0, vol.y + 5.0),
+            MS(0),
+            &font,
+            &mut out,
+        );
         let n = 300;
         let start = std::time::Instant::now();
         for i in 0..n {

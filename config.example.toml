@@ -19,6 +19,7 @@
 #   battery     id, icon_dir (default /etc/touchbinux/icons), action
 #   volume      id, action, color, anim_ms, expand_width, collapse_after_ms
 #   brightness  (same as volume)
+#   gif         id, path (absolute), play ("on_tap" or "loop"), action
 #   spacer      (nothing)             empty space
 # Every type also takes `width = <px>` (fixed) or `stretch = <weight>` (a share of
 # what is left). Spacers default to stretch = 1, the others to a fixed width.
@@ -35,6 +36,10 @@
 #   collapse_after_ms  fold back after this long untouched  [3000]  (500-60000)
 #   anim_ms            unfolding/folding time               [200]   (0-2000)
 #   color              filled part of the slider            ["#00ffb7"]
+# A gif is scaled once at start to fit its slot (keeping its proportions) and
+# centred. play = "on_tap" [default] shows the first frame and plays once per tap
+# (no CPU while idle); "loop" plays all the time, so the bar keeps redrawing.
+#
 # The "builtin:folder" icon opens and closes when tapped: anim_ms is the opening
 # time [300]; it stays open half that, then closes. The action fires at once.
 # Without `action` a widget's taps only go to the socket. Taps are always reported
@@ -62,7 +67,7 @@
 
 default_layer = "main"
 
-# [launcher] [wallpaper] ···········  [hype] [docker] [brightness] [volume] [battery] [clock]
+# [launcher] [wallpaper] ···········  [gif] [hype] [docker] [brightness] [volume] [battery] [clock]
 [[layers]]
 id = "main"
 margin = 4
@@ -87,6 +92,13 @@ action = { type = "key", key = "KEY_F14" }
 
 [[layers.items]]
 type = "spacer"
+
+# 220x220 GIF in a 60 px slot: drawn about 50 px tall, centred.
+[[layers.items]]
+type = "gif"
+path = "/etc/touchbinux/gifs/bongosmash.gif"
+width = 60
+play = "on_tap"
 
 [[layers.items]]
 type = "button"

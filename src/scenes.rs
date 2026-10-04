@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use anyhow::Result;
-use std::{path::Path, rc::Rc, time::Duration};
+use std::{collections::HashMap, path::Path, rc::Rc, time::Duration};
 
 const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
 const GREEN: Rgba = Rgba(0x20, 0xe0, 0x40, 0xff);
@@ -978,6 +978,7 @@ pub fn bar(
     let sizes: Vec<_> = layer.items.iter().map(ItemConfig::size).collect();
     let slots = layout::distribute(area.x, area.w, layer.gap, &sizes);
     let size = icon_side(area.h);
+    let mut scaled_gifs = HashMap::new();
     for (item, (x, iw)) in layer.items.iter().zip(slots) {
         let Some(id) = item.id() else {
             continue; // spacer
@@ -1029,7 +1030,7 @@ pub fn bar(
                     .push(Expander::new(id, level, rect, open, color, fold));
             }
             ItemKind::Gif => {
-                let icon = gif_icon(item, rect);
+                let icon = gif_icon(item, rect, &mut scaled_gifs);
                 scene.add_button(rect, font, ButtonSpec::new(id, icon, ""));
             }
             ItemKind::Spacer => {}
@@ -1039,23 +1040,33 @@ pub fn bar(
 }
 
 /// A gif item: as large as fits in its slot (2 px clear of the edges), centred.
-/// Decoded and scaled once here; if that fails, a "?" tile and a log line.
-fn gif_icon(item: &ItemConfig, rect: Rect) -> Icon {
-    let path = Path::new(item.path.as_deref().unwrap_or_default());
-    let (max_w, max_h) = ((rect.w - 4.0).max(1.0), (rect.h - 2.0).max(1.0));
-    match Gif::load_fit(path, max_w as u32, max_h as u32) {
-        Ok(gif) => {
-            let width = gif.width() as f32;
-            let player = GifPlayer::new(gif, item.play.unwrap_or(Play::OnTap));
-            Icon::Animated {
-                item: Box::new(player),
-                width,
+/// Items showing the same file at the same size share the scaled frames.
+fn gif_icon(item: &ItemConfig, rect: Rect, scaled: &mut HashMap<(usize, u32, u32), Gif>) -> Icon {
+    // Only `Config::load` fills this in (tests parse without it).
+    let Some(decoded) = &item.gif else {
+        eprintln!("bar: gif {:?}: not loaded", item.id().unwrap_or(""));
+        return Icon::Letter('?');
+    };
+    let (max_w, max_h) = (
+        (rect.w - 4.0).max(1.0) as u32,
+        (rect.h - 2.0).max(1.0) as u32,
+    );
+    let key = (Rc::as_ptr(decoded) as usize, max_w, max_h);
+    let gif = match scaled.get(&key) {
+        Some(g) => g.clone(),
+        None => match decoded.fit(max_w, max_h) {
+            Ok(g) => scaled.entry(key).or_insert(g).clone(),
+            Err(e) => {
+                eprintln!("bar: gif {:?}: {e:#}", item.id().unwrap_or(""));
+                return Icon::Letter('?');
             }
-        }
-        Err(e) => {
-            eprintln!("bar: gif: {e:#}");
-            Icon::Letter('?')
-        }
+        },
+    };
+    let width = gif.width() as f32;
+    let player = GifPlayer::new(gif, item.play.unwrap_or(Play::OnTap));
+    Icon::Animated {
+        item: Box::new(player),
+        width,
     }
 }
 

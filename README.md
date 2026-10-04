@@ -61,10 +61,14 @@ reactiva. La carpeta del fondo de pantalla se abre y se cierra al tocarla (la
 tecla sale enseguida). Duraciones con `anim_ms`; todo está en
 `config.example.toml`.
 
-Los elementos `gif` se escalan al cargar para caber en su hueco (con su proporción)
-y se dibujan centrados; con `play = "on_tap"` (por defecto) muestran el primer
-fotograma y se reproducen una vez por toque, y con `"loop"` siempre (eso sí gasta
-CPU de forma continua).
+Los elementos `gif` se leen al cargar la configuración (si el archivo no existe o
+no es un GIF válido, es un error de configuración y la recarga conserva la
+anterior) y se escalan una sola vez a su hueco, con su proporción y centrados. Con
+`play = "on_tap"` (por defecto) muestran el primer fotograma y se reproducen enteros
+una vez por toque; al acabar la barra vuelve a no tener nada programado. Con
+`"always"` se animan siempre, despertando justo al acabar el retardo de cada
+fotograma (eso sí gasta CPU de forma continua). Si tienen `action`, el toque la
+lanza como en un botón.
 
 Mientras algo se anima o se arrastra el bucle dibuja a ~30 fps; al terminar el
 temporizador de frames se desarma. Con un slider desplegado y quieto solo queda

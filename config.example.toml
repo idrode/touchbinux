@@ -19,7 +19,7 @@
 #   battery     id, icon_dir (default /etc/touchbinux/icons), action
 #   volume      id, action, color, anim_ms, expand_width, collapse_after_ms
 #   brightness  (same as volume)
-#   gif         id, path (absolute), play ("on_tap" or "loop"), action
+#   gif         id, path (absolute), play ("on_tap" or "always"), action
 #   spacer      (nothing)             empty space
 # Every type also takes `width = <px>` (fixed) or `stretch = <weight>` (a share of
 # what is left). Spacers default to stretch = 1, the others to a fixed width.
@@ -36,9 +36,14 @@
 #   collapse_after_ms  fold back after this long untouched  [3000]  (500-60000)
 #   anim_ms            unfolding/folding time               [200]   (0-2000)
 #   color              filled part of the slider            ["#00ffb7"]
-# A gif is scaled once at start to fit its slot (keeping its proportions) and
-# centred. play = "on_tap" [default] shows the first frame and plays once per tap
-# (no CPU while idle); "loop" plays all the time, so the bar keeps redrawing.
+# A gif is read when the config is loaded: a missing file or one that isn't a valid
+# GIF is a config error (on reload, the previous config stays). Its frames are
+# scaled once to the bar's inner height, or to the slot's width if the GIF is wider,
+# keeping its proportions, and centred. play = "on_tap" [default] shows the first
+# frame and plays the whole animation once per tap, then rests (no frames, no CPU);
+# "always" plays all the time, redrawing exactly when each frame's delay ends (up
+# to the loop's ~30 fps cap). With `action`, a tap also runs it, as on a button.
+# Several gifs share one frame timer, and items on the same file one decoding.
 #
 # The "builtin:folder" icon opens and closes when tapped: anim_ms is the opening
 # time [300]; it stays open half that, then closes. The action fires at once.

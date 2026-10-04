@@ -10,45 +10,42 @@ use image::{
     codecs::gif::GifDecoder,
     imageops::{self, FilterType},
 };
-use std::{fs::File, io::BufReader, path::Path, time::Duration};
+use std::{fs::File, io::BufReader, path::Path, rc::Rc, time::Duration};
 
 /// Browsers treat tiny GIF delays (0-10 ms, common in old files) as 100 ms; so do we.
 const MIN_DELAY: Duration = Duration::from_millis(20);
 const DEFAULT_DELAY: Duration = Duration::from_millis(100);
 
-pub struct Gif {
-    frames: Vec<Image>,
+/// A GIF's frames as decoded: full size, composited (disposal handled), straight
+/// alpha. Kept by the config so each file is read once; scaled per slot by `fit`.
+pub struct Decoded {
+    frames: Vec<RgbaImage>,
     /// End time of each frame within one loop, cumulative.
     ends: Vec<Duration>,
     total: Duration,
 }
 
-impl Gif {
-    /// Decodes every frame and scales it to `height` px, keeping the aspect ratio.
-    pub fn load(path: &Path, height: u32) -> Result<Gif> {
-        Gif::load_with(path, |_, _| height)
+impl std::fmt::Debug for Decoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (w, h) = self.frames[0].dimensions();
+        write!(
+            f,
+            "Decoded({} frames, {w}x{h}, {:?})",
+            self.frames.len(),
+            self.total
+        )
     }
+}
 
-    /// Like `load`, but as large as fits in `max_w`x`max_h`, keeping the aspect ratio.
-    pub fn load_fit(path: &Path, max_w: u32, max_h: u32) -> Result<Gif> {
-        Gif::load_with(path, |w, h| {
-            let by_width = (max_w as f32 * h as f32 / w.max(1) as f32).floor() as u32;
-            max_h.min(by_width).max(1)
-        })
-    }
-
-    /// `height_for(w, h)` picks the scaled height from the GIF's own size.
-    fn load_with(path: &Path, height_for: impl Fn(u32, u32) -> u32) -> Result<Gif> {
+impl Decoded {
+    /// Reads and decodes every frame. Fails if the file is missing or not a GIF.
+    pub fn load(path: &Path) -> Result<Decoded> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let decoder = GifDecoder::new(BufReader::new(file))
             .with_context(|| format!("decoding {}", path.display()))?;
-
         let mut frames = Vec::new();
         let mut ends = Vec::new();
         let mut total = Duration::ZERO;
-        let mut height = None;
-        // The decoder yields full-size, already composited frames (disposal handled),
-        // one at a time, so big GIFs never sit fully decoded in memory.
         for frame in decoder.into_frames() {
             let frame = frame.with_context(|| format!("decoding {}", path.display()))?;
             let (num, den) = frame.delay().numer_denom_ms();
@@ -62,20 +59,55 @@ impl Gif {
             } else {
                 delay
             };
-            let buf = frame.into_buffer();
-            let height = *height.get_or_insert_with(|| height_for(buf.width(), buf.height()));
-            frames.push(scale_premultiplied(buf, height)?);
+            frames.push(frame.into_buffer());
             total += delay;
             ends.push(total);
         }
         if frames.is_empty() {
             return Err(anyhow!("{} has no frames", path.display()));
         }
-        Ok(Gif {
+        Ok(Decoded {
             frames,
             ends,
             total,
         })
+    }
+
+    /// Scaled to `height` px, keeping the aspect ratio.
+    pub fn scaled(&self, height: u32) -> Result<Gif> {
+        let frames = self
+            .frames
+            .iter()
+            .map(|f| scale_premultiplied(f.clone(), height))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Gif {
+            frames: frames.into(),
+            ends: self.ends.clone().into(),
+            total: self.total,
+        })
+    }
+
+    /// As large as fits in `max_w`x`max_h`, keeping the aspect ratio.
+    pub fn fit(&self, max_w: u32, max_h: u32) -> Result<Gif> {
+        let (w, h) = self.frames[0].dimensions();
+        let by_width = (max_w as f32 * h as f32 / w.max(1) as f32).floor() as u32;
+        self.scaled(max_h.min(by_width).max(1))
+    }
+}
+
+/// Frames scaled for the bar, premultiplied, ready to blit. Cloning shares them.
+#[derive(Clone)]
+pub struct Gif {
+    frames: Rc<[Image]>,
+    /// End time of each frame within one loop, cumulative.
+    ends: Rc<[Duration]>,
+    total: Duration,
+}
+
+impl Gif {
+    /// Decodes every frame and scales it to `height` px, keeping the aspect ratio.
+    pub fn load(path: &Path, height: u32) -> Result<Gif> {
+        Decoded::load(path)?.scaled(height)
     }
 
     pub fn width(&self) -> u32 {
@@ -124,8 +156,8 @@ impl Animated for Gif {
 pub enum Play {
     /// First frame at rest; one run through on each tap. No frames while idle.
     OnTap,
-    /// All the time (the bar redraws at the GIF's own pace, forever).
-    Loop,
+    /// All the time: the bar redraws at the GIF's own pace (each frame's delay), forever.
+    Always,
 }
 
 /// A GIF in the bar, playing as `play` says.
@@ -153,7 +185,7 @@ impl GifPlayer {
     /// Frame index at `t` and when it changes next (`None`: it won't by itself).
     fn frame(&self, t: Duration) -> (usize, Option<Duration>) {
         match self.play {
-            Play::Loop => match self.gif.frame_at(t) {
+            Play::Always => match self.gif.frame_at(t) {
                 (i, Duration::MAX) => (i, None),
                 (i, end) => (i, Some(end)),
             },
@@ -229,10 +261,25 @@ mod tests {
             frames.push(Image::from_premultiplied(1, 1, vec![0; 4]).unwrap());
         }
         Gif {
-            frames,
-            ends,
+            frames: frames.into(),
+            ends: ends.into(),
             total,
         }
+    }
+
+    #[test]
+    fn fit_keeps_proportions_inside_the_slot() {
+        let decoded = |w, h| Decoded {
+            frames: vec![RgbaImage::new(w, h)],
+            ends: vec![Duration::from_millis(100)],
+            total: Duration::from_millis(100),
+        };
+        // Square 220x220 in a 60 px slot of a 60 px bar (56x50 usable): 50x50.
+        let g = decoded(220, 220).fit(56, 50).unwrap();
+        assert_eq!((g.width(), g.frames[0].height()), (50, 50));
+        // Wider than the slot: limited by the width instead.
+        let g = decoded(400, 100).fit(56, 50).unwrap();
+        assert_eq!((g.width(), g.frames[0].height()), (56, 14));
     }
 
     #[test]
@@ -253,8 +300,11 @@ mod tests {
         assert!(p.on_tap(ms(2000)));
         assert_eq!(p.frame(ms(2100)), (1, Some(ms(2150))));
 
-        let mut l = GifPlayer::new(fake(&[100, 50]), Play::Loop);
+        // always: each wake-up is exactly when the current frame's delay ends.
+        let mut l = GifPlayer::new(fake(&[100, 50]), Play::Always);
         assert!(!l.on_tap(ms(0)));
+        assert_eq!(l.next_change(ms(0)), Some(ms(100)));
+        assert_eq!(l.next_change(ms(120)), Some(ms(150)));
         assert_eq!(l.frame(ms(160)), (0, Some(ms(250))));
         let mut one = GifPlayer::new(fake(&[100]), Play::OnTap);
         assert!(!one.on_tap(ms(0))); // nothing to play

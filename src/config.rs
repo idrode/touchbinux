@@ -1,10 +1,23 @@
 //! TOML configuration: buttons, layers of bar items, and their actions.
 
-use crate::{canvas::Rgba, gif::Play, hyprctl::HyprAction, layout::Size};
+use crate::{
+    canvas::Rgba,
+    gif::{Decoded, Play},
+    hyprctl::HyprAction,
+    layout::Size,
+};
 use anyhow::{Context, Result, bail};
 use evdev::KeyCode;
 use serde::Deserialize;
-use std::{borrow::Cow, collections::HashSet, fs, path::Path, str::FromStr, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    rc::Rc,
+    str::FromStr,
+    time::Duration,
+};
 
 pub const DEFAULT_PATH: &str = "/etc/touchbinux/config.toml";
 const MAX_TIMEOUT_MS: u64 = 60_000;
@@ -133,9 +146,13 @@ pub struct ItemConfig {
     /// gif: absolute path of the .gif.
     #[serde(default)]
     pub path: Option<String>,
-    /// gif: "on_tap" (default) or "loop".
+    /// gif: "on_tap" (default) or "always".
     #[serde(default)]
     pub play: Option<Play>,
+    /// gif: the file's frames, decoded by `Config::load` (shared by items with the
+    /// same `path`). Not part of the TOML.
+    #[serde(skip)]
+    pub gif: Option<Rc<Decoded>>,
 }
 
 /// "#rrggbb" or "#rrggbbaa".
@@ -430,7 +447,10 @@ impl Config {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut cfg = cfg;
         cfg.validate()
+            .with_context(|| format!("validating {}", path.display()))?;
+        cfg.load_gifs()
             .with_context(|| format!("validating {}", path.display()))?;
         Ok(cfg)
     }
@@ -465,6 +485,29 @@ impl Config {
             && !layer_ids.contains(d.as_str())
         {
             bail!("default_layer {d:?} is not one of the [[layers]]");
+        }
+        Ok(())
+    }
+
+    /// Decodes every gif item's file, once per distinct path. A missing file or one
+    /// that isn't a valid GIF is a config error, like any other.
+    fn load_gifs(&mut self) -> Result<()> {
+        let mut by_path: HashMap<String, Rc<Decoded>> = HashMap::new();
+        for layer in &mut self.layers {
+            for item in layer.items.iter_mut().filter(|i| i.kind == ItemKind::Gif) {
+                let path = item.path.clone().unwrap_or_default();
+                let decoded = match by_path.get(&path) {
+                    Some(d) => d.clone(),
+                    None => {
+                        let d = Rc::new(Decoded::load(Path::new(&path)).with_context(|| {
+                            format!("layer {:?}: gif {:?}", layer.id, item.id().unwrap_or(""))
+                        })?);
+                        by_path.insert(path, d.clone());
+                        d
+                    }
+                };
+                item.gif = Some(decoded);
+            }
         }
         Ok(())
     }
@@ -513,6 +556,7 @@ impl Config {
                 collapse_after_ms: None,
                 path: None,
                 play: None,
+                gif: None,
             })
             .collect();
         Some(Cow::Owned(LayerConfig {
@@ -804,7 +848,7 @@ mod tests {
             "type='volume'\ncolor='#00ffb'",
             "type='gif'",
             "type='gif'\npath='gifs/a.gif'",
-            "type='gif'\npath='/a.gif'\nplay='always'",
+            "type='gif'\npath='/a.gif'\nplay='loop'",
             "type='gif'\npath='/a.gif'\nicon='x'",
             "type='button'\nid='b'\nlabel='x'\npath='/a.gif'\naction={type='socket'}",
         ];
@@ -838,5 +882,62 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    /// A real 2-frame GIF (6x3) in a fresh temporary directory.
+    fn temp_gif(name: &str) -> std::path::PathBuf {
+        use image::{Delay, Frame, RgbaImage, codecs::gif::GifEncoder};
+        let dir =
+            std::env::temp_dir().join(format!("touchbinux-test-{}-{name}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.gif");
+        let file = fs::File::create(&path).unwrap();
+        let mut enc = GifEncoder::new(file);
+        for shade in [0u8, 255] {
+            let img = RgbaImage::from_pixel(6, 3, image::Rgba([shade, 0, 0, 255]));
+            let delay = Delay::from_numer_denom_ms(50, 1);
+            enc.encode_frame(Frame::from_parts(img, 0, 0, delay))
+                .unwrap();
+        }
+        drop(enc);
+        path
+    }
+
+    #[test]
+    fn gif_files_are_checked_and_shared_on_load() {
+        let gif = temp_gif("load");
+        let dir = gif.parent().unwrap();
+        let conf = dir.join("config.toml");
+        let item = |id: &str, path: &str| {
+            format!("[[layers.items]]\ntype='gif'\nid='{id}'\npath='{path}'\n")
+        };
+        let write = |body: String| fs::write(&conf, format!("[[layers]]\nid='m'\n{body}")).unwrap();
+
+        // Two items on the same file: decoded once, shared; action and play parsed.
+        let g = gif.to_str().unwrap();
+        write(format!(
+            "{}play='always'\naction={{type='socket'}}\n{}",
+            item("a", g),
+            item("b", g)
+        ));
+        let c = Config::load(&conf).unwrap();
+        let items = &c.layers[0].items;
+        assert_eq!(items[0].play, Some(Play::Always));
+        assert!(matches!(c.action("a"), Some(Action::Socket)));
+        let (a, b) = (
+            items[0].gif.as_ref().unwrap(),
+            items[1].gif.as_ref().unwrap(),
+        );
+        assert!(Rc::ptr_eq(a, b));
+
+        // Missing file, or not a GIF: the whole config is rejected.
+        write(item("a", dir.join("nope.gif").to_str().unwrap()));
+        assert!(Config::load(&conf).is_err());
+        let not_gif = dir.join("not.gif");
+        fs::write(&not_gif, "hello").unwrap();
+        write(item("a", not_gif.to_str().unwrap()));
+        let err = format!("{:#}", Config::load(&conf).unwrap_err());
+        assert!(err.contains("gif \"a\""), "{err}");
+        fs::remove_dir_all(dir).unwrap();
     }
 }

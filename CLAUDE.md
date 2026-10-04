@@ -10,6 +10,7 @@ Daemon propio para la Touch Bar de un MacBook Pro M2 con Asahi Arch Linux. Susti
 - La Touch Bar es una pantalla DRM (~2170x60 px) más un dispositivo táctil (evdev). No es una salida de Wayland: Hyprland no la ve.
 - Solo un proceso puede controlar la pantalla a la vez. Antes de probar hay que parar el servicio original: `sudo systemctl stop tiny-dfr`. Para volver a la normalidad: `sudo systemctl start tiny-dfr`.
 - Durante el desarrollo se ejecuta con `sudo ./target/debug/<binario>` (tiny-dfr corre como root). No afinar permisos/udev hasta el final.
+- Instalado como servicio (hito 7, ver `README.md`): antes de probar a mano, `sudo systemctl stop touchbinux` (tiny-dfr queda enmascarado). Logs: `journalctl -u touchbinux`. Archivos de systemd/udev en `dist/`, instalación con `install.sh` / `uninstall.sh`.
 
 ## Referencia
 

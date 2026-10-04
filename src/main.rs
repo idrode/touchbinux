@@ -9,6 +9,7 @@ mod hyprwatch;
 mod icons;
 mod ipc;
 mod keys;
+mod layout;
 mod levels;
 mod runner;
 mod scenes;
@@ -418,7 +419,7 @@ impl App {
             self.hyprctl(&HyprAction::FocusWindow(addr.into()));
             return;
         }
-        let Some(action) = self.config.button(id).map(|b| b.action.clone()) else {
+        let Some(action) = self.config.action(id).cloned() else {
             return;
         };
         match &action {

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 drm = "0.14"
 evdev = "0.13.2"
 fontdue = "0.9"

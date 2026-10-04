@@ -94,8 +94,9 @@ impl Runner {
         self.hypr = hypr;
     }
 
-    pub fn has_user(&self) -> bool {
-        self.user.is_some()
+    /// The session user's `XDG_RUNTIME_DIR` (which may not exist yet).
+    pub fn runtime_dir(&self) -> Option<std::path::PathBuf> {
+        self.user.as_ref().map(SessionUser::runtime_dir)
     }
 
     pub fn has_hypr(&self) -> bool {

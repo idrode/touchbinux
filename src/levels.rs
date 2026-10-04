@@ -48,6 +48,8 @@ impl Throttle {
 }
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
+/// pipewire-pulse's socket under the user's runtime dir, used by `pactl`.
+const PULSE_SOCKET: &str = "pulse/native";
 
 pub struct Volume {
     throttle: Throttle,
@@ -85,11 +87,19 @@ impl Volume {
     /// Starts whatever is due: the external-change monitor, a pending set, a get.
     /// At most one wpctl at a time, so sets apply in order.
     pub fn poll(&mut self, now: Instant, runner: &mut Runner) {
-        if !runner.has_user() {
+        // Before login (started at boot) there is no sound server yet: wait for its
+        // socket rather than start a monitor that would die at once and not be
+        // retried. The loop runs this again on its next wakeup.
+        let Some(runtime) = runner.runtime_dir() else {
+            return;
+        };
+        if !runtime.join(PULSE_SOCKET).exists() {
             return;
         }
         if self.monitor.is_none() && self.monitor_started.is_none() {
             self.monitor_started = Some(now);
+            // A new monitor may follow a sound server (re)start: read the volume again.
+            self.want_get = true;
             let argv = ["pactl", "subscribe"].map(String::from);
             match runner.spawn_streaming(&argv, Purpose::VolumeMonitor) {
                 Ok(out) => self.monitor = Some(out),

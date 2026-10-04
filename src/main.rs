@@ -5,6 +5,7 @@ mod display;
 mod gif;
 mod hypr;
 mod hyprctl;
+mod hyprwatch;
 mod icons;
 mod ipc;
 mod keys;
@@ -23,6 +24,7 @@ use display::DrmBackend;
 use evdev::KeyCode;
 use hypr::{Hypr, ReadOutcome};
 use hyprctl::HyprAction;
+use hyprwatch::InstanceWatch;
 use icons::IconResolver;
 use ipc::{Incoming, IpcServer};
 use keys::VirtualKeyboard;
@@ -54,8 +56,12 @@ use user::SessionUser;
 
 /// Frame cap for animations and touch-driven redraws (~30 fps).
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
-/// How often to look for Hyprland again while it isn't there.
+/// Fallback only, if the instance watch can't be set up: how often to look for
+/// Hyprland again while it isn't there.
 const HYPR_RETRY: Duration = Duration::from_secs(3);
+/// After a filesystem event that didn't lead to a connection, try once more this
+/// much later: the socket may exist a moment before Hyprland answers on it.
+const HYPR_SETTLE: Duration = Duration::from_secs(1);
 const HYPRCTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Our socket. Under /run so it exists before any login session (systemd, milestone
@@ -97,6 +103,8 @@ const TOKEN_HYPR_RETRY: u64 = 4;
 const TOKEN_IPC_LISTEN: u64 = 5;
 const TOKEN_VOLUME_MONITOR: u64 = 6;
 const TOKEN_BACKLIGHT: u64 = 7;
+const TOKEN_HYPR_WATCH: u64 = 8;
+const TOKEN_HYPR_MOUNTS: u64 = 9;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -535,7 +543,7 @@ fn main() -> Result<()> {
         let brightness = backlight.as_mut().and_then(|b| b.read_percent().ok());
         let mut hypr = Hypr::new(session.as_ref().map(|u| u.uid));
         if let Err(e) = hypr.connect() {
-            eprintln!("hyprland: {e:#}; retrying every {}s", HYPR_RETRY.as_secs());
+            eprintln!("hyprland: {e:#}; waiting for it to start");
         }
         let parts = AppParts {
             args,
@@ -614,20 +622,48 @@ fn drain_timer(timer: &TimerFd) -> Result<()> {
     }
 }
 
-/// Starts/stops watching Hyprland: the event socket while connected, the retry timer
-/// while not. (A closed socket leaves the epoll set by itself.) Also tells the runner
-/// which instance commands should talk to.
-fn watch_hypr(epoll: &Epoll, app: &mut App, retry: &TimerFd) -> Result<()> {
-    app.runner.set_hypr(app.hypr.session_env());
-    match app.hypr.event_fd() {
-        Some(fd) => {
-            epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_HYPR))?;
-            retry.unset()?;
+/// Starts/stops watching Hyprland: the event socket while connected; while not, the
+/// directories a new instance would appear in (or, if that can't be set up, a retry
+/// timer). Closed fds leave the epoll set by themselves. Also tells the runner which
+/// instance commands should talk to.
+fn watch_hypr(
+    epoll: &Epoll,
+    app: &mut App,
+    retry: &TimerFd,
+    watch: &mut Option<InstanceWatch>,
+) -> Result<()> {
+    if app.hypr.event_fd().is_none() && watch.is_none() {
+        match InstanceWatch::new(Path::new(hyprwatch::RUN_USER)) {
+            Ok(w) => {
+                epoll.add(
+                    w.inotify_fd(),
+                    EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_HYPR_WATCH),
+                )?;
+                epoll.add(
+                    w.mounts_fd(),
+                    EpollEvent::new(EpollFlags::EPOLLPRI, TOKEN_HYPR_MOUNTS),
+                )?;
+                *watch = Some(w);
+                // It may have started between the last attempt and the watch.
+                let _ = app.hypr.connect();
+            }
+            Err(e) => {
+                eprintln!(
+                    "hyprland: can't watch for it ({e:#}); retrying every {}s",
+                    HYPR_RETRY.as_secs()
+                );
+                retry.set(
+                    Expiration::Interval(TimeSpec::from_duration(HYPR_RETRY)),
+                    TimerSetTimeFlags::empty(),
+                )?;
+            }
         }
-        None => retry.set(
-            Expiration::Interval(TimeSpec::from_duration(HYPR_RETRY)),
-            TimerSetTimeFlags::empty(),
-        )?,
+    }
+    app.runner.set_hypr(app.hypr.session_env());
+    if let Some(fd) = app.hypr.event_fd() {
+        epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_HYPR))?;
+        retry.unset()?;
+        *watch = None;
     }
     Ok(())
 }
@@ -644,7 +680,8 @@ fn ui_event_json(ev: &UiEvent) -> Value {
 ///
 /// With nothing animating, nothing throttled and no command running, the wake timer
 /// is disarmed and `epoll_wait` blocks until something happens; an idle bar costs no
-/// CPU. The only periodic wakeup is the Hyprland retry, and only while it is absent.
+/// CPU. Hyprland's absence costs nothing either: we wait on inotify and the mount
+/// table (see `hyprwatch`), and only fall back to a periodic retry if that fails.
 fn run(
     drm: &mut DrmBackend,
     sigfd: &SignalFd,
@@ -679,7 +716,8 @@ fn run(
             EpollEvent::new(EpollFlags::EPOLLPRI, TOKEN_BACKLIGHT),
         )?;
     }
-    watch_hypr(&epoll, app, &retry)?;
+    let mut hypr_watch: Option<InstanceWatch> = None;
+    watch_hypr(&epoll, app, &retry, &mut hypr_watch)?;
 
     let (w, h) = drm.canvas_size();
     let mut canvas = Canvas::new(w, h)?;
@@ -834,19 +872,32 @@ fn run(
                     }
                     ReadOutcome::Unchanged => {}
                     ReadOutcome::Disconnected => {
-                        eprintln!("hyprland: lost, retrying every {}s", HYPR_RETRY.as_secs());
-                        watch_hypr(&epoll, app, &retry)?;
+                        eprintln!("hyprland: lost, waiting for it to start again");
+                        watch_hypr(&epoll, app, &retry, &mut hypr_watch)?;
                         app.rebuild()?;
                         dirty = true;
                     }
                 },
                 TOKEN_HYPR_RETRY => {
                     drain_timer(&retry)?;
-                    // Quiet on failure: this runs every few seconds while Hyprland is away.
+                    // Quiet on failure: in fallback mode this runs every few seconds.
                     if app.hypr.connect().is_ok() {
-                        watch_hypr(&epoll, app, &retry)?;
+                        watch_hypr(&epoll, app, &retry, &mut hypr_watch)?;
                         app.rebuild()?;
                         dirty = true;
+                    }
+                }
+                TOKEN_HYPR_WATCH | TOKEN_HYPR_MOUNTS => {
+                    let Some(watch) = &hypr_watch else {
+                        continue;
+                    };
+                    watch.refresh();
+                    if app.hypr.connect().is_ok() {
+                        watch_hypr(&epoll, app, &retry, &mut hypr_watch)?;
+                        app.rebuild()?;
+                        dirty = true;
+                    } else {
+                        arm_once(&retry, HYPR_SETTLE)?;
                     }
                 }
                 TOKEN_VOLUME_MONITOR => {

@@ -27,6 +27,8 @@ const ICON_TEXT_GAP: f32 = 8.0;
 /// the scene is not rebuilt.
 pub struct Live {
     pub volume: u8,
+    /// The default sink is muted (wpctl's "[MUTED]").
+    pub muted: bool,
     pub brightness: Option<u8>,
     pub battery: Option<BatteryStatus>,
     pub now: DateTime<Local>,

@@ -55,6 +55,8 @@ pub struct Volume {
     throttle: Throttle,
     /// Read the current volume when the running wpctl (if any) finishes.
     want_get: bool,
+    /// A mute toggle to send when no other wpctl is running.
+    want_mute_toggle: bool,
     monitor: Option<ChildStdout>,
     monitor_started: Option<Instant>,
     monitor_buf: Vec<u8>,
@@ -65,10 +67,16 @@ impl Volume {
         Volume {
             throttle: Throttle::default(),
             want_get: true,
+            want_mute_toggle: false,
             monitor: None,
             monitor_started: None,
             monitor_buf: Vec::new(),
         }
+    }
+
+    /// Mutes or unmutes the default sink. The new state is read back afterwards.
+    pub fn toggle_mute(&mut self) {
+        self.want_mute_toggle = true;
     }
 
     pub fn request(&mut self, percent: u8) {
@@ -80,6 +88,9 @@ impl Volume {
     pub fn next_deadline(&self, now: Instant, runner: &Runner) -> Option<Instant> {
         if runner.is_running(Purpose::VolumeSet) || runner.is_running(Purpose::VolumeGet) {
             return None;
+        }
+        if self.want_mute_toggle {
+            return Some(now);
         }
         self.throttle.ready_at(now)
     }
@@ -115,6 +126,13 @@ impl Volume {
             if let Err(e) = runner.spawn(&argv, Some(WPCTL_TIMEOUT), Purpose::VolumeSet, false) {
                 eprintln!("volume: {e:#}");
             }
+        } else if self.want_mute_toggle {
+            self.want_mute_toggle = false;
+            self.want_get = true;
+            let argv = ["wpctl", "set-mute", SINK, "toggle"].map(String::from);
+            if let Err(e) = runner.spawn(&argv, Some(WPCTL_TIMEOUT), Purpose::VolumeSet, false) {
+                eprintln!("volume: {e:#}");
+            }
         } else if self.want_get && self.throttle.pending.is_none() {
             self.want_get = false;
             let argv = ["wpctl", "get-volume", SINK].map(String::from);
@@ -124,8 +142,9 @@ impl Volume {
         }
     }
 
-    /// Handles a finished child of ours; returns the volume if one was read.
-    pub fn on_finished(&mut self, f: &Finished, now: Instant) -> Option<u8> {
+    /// Handles a finished child of ours; returns the volume and mute state if they
+    /// were read.
+    pub fn on_finished(&mut self, f: &Finished, now: Instant) -> Option<(u8, bool)> {
         match f.purpose {
             Purpose::VolumeGet if f.ok => parse_wpctl_volume(&f.stdout),
             Purpose::VolumeMonitor => {
@@ -181,16 +200,12 @@ impl Volume {
     }
 }
 
-/// "Volume: 0.57" or "Volume: 0.57 [MUTED]" -> 57.
-fn parse_wpctl_volume(s: &str) -> Option<u8> {
-    let v: f64 = s
-        .trim()
-        .strip_prefix("Volume:")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    Some((v * 100.0).round().clamp(0.0, 100.0) as u8)
+/// "Volume: 0.57" -> (57, false); "Volume: 0.57 [MUTED]" -> (57, true).
+fn parse_wpctl_volume(s: &str) -> Option<(u8, bool)> {
+    let mut words = s.trim().strip_prefix("Volume:")?.split_whitespace();
+    let v: f64 = words.next()?.parse().ok()?;
+    let muted = words.any(|w| w == "[MUTED]");
+    Some(((v * 100.0).round().clamp(0.0, 100.0) as u8, muted))
 }
 
 /// Display backlight in /sys/class/backlight. We are root, so we write the sysfs file
@@ -285,9 +300,12 @@ mod tests {
 
     #[test]
     fn wpctl_output() {
-        assert_eq!(parse_wpctl_volume("Volume: 0.25\n"), Some(25));
-        assert_eq!(parse_wpctl_volume("Volume: 0.57 [MUTED]\n"), Some(57));
-        assert_eq!(parse_wpctl_volume("Volume: 1.30"), Some(100));
+        assert_eq!(parse_wpctl_volume("Volume: 0.25\n"), Some((25, false)));
+        assert_eq!(
+            parse_wpctl_volume("Volume: 0.57 [MUTED]\n"),
+            Some((57, true))
+        );
+        assert_eq!(parse_wpctl_volume("Volume: 1.30"), Some((100, false)));
         assert_eq!(parse_wpctl_volume("garbage"), None);
     }
 

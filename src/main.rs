@@ -175,6 +175,7 @@ struct App {
     /// Keys set by clients (`{"type":"set"}`), besides volume.
     store: BTreeMap<String, Value>,
     volume: u8,
+    muted: bool,
     brightness: Option<u8>,
     runner: Runner,
     vol: Volume,
@@ -190,6 +191,7 @@ impl App {
     fn live(&self) -> Live {
         Live {
             volume: self.volume,
+            muted: self.muted,
             brightness: self.brightness,
             battery: self.battery_status,
             now: chrono::Local::now(),
@@ -644,6 +646,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         icons: IconResolver::new(home, scenes::icon_size(h)),
         store: BTreeMap::new(),
         volume: 50,
+        muted: false,
         brightness: p.brightness,
         runner,
         vol: Volume::new(),
@@ -909,9 +912,12 @@ fn run(
                                     if f.purpose == Purpose::Hyprctl {
                                         App::on_hyprctl_finished(&f);
                                     }
-                                    if let Some(v) = app.vol.on_finished(&f, Instant::now()) {
-                                        dirty |= v != app.volume;
+                                    if let Some((v, muted)) =
+                                        app.vol.on_finished(&f, Instant::now())
+                                    {
+                                        dirty |= v != app.volume || muted != app.muted;
                                         app.volume = v;
+                                        app.muted = muted;
                                         dirty |= app.scene.set_slider("vol", v);
                                     }
                                 }

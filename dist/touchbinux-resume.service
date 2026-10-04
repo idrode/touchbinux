@@ -1,0 +1,14 @@
+[Unit]
+Description=Redraw the Touch Bar after resume (touchbinux)
+# Runs once the system is back from sleep (these targets are reached on the way down
+# and this unit is ordered after them, i.e. after the resume).
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+# `reload` sends SIGHUP: the daemon re-reads its config and redraws the whole bar.
+# The leading "-" ignores the error when touchbinux isn't running.
+ExecStart=-/usr/bin/systemctl reload touchbinux.service
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

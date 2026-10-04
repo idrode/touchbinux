@@ -1,0 +1,17 @@
+# touchbinux: systemd device units for the Touch Bar, so touchbinux.service can be
+# started when the digitizer appears and ordered after the display.
+#
+# Runs after tiny-dfr's 99-touchbar-*.rules (rules files are read in lexical order,
+# "touchba" < "touchbi"), which set SYSTEMD_ALIAS on the display with "=": we append
+# with "+=" so both aliases exist.
+
+# Display (adp on Apple Silicon, appletbdrm on T2).
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="adp|appletbdrm", TAG+="systemd", ENV{SYSTEMD_ALIAS}+="/dev/touchbinux_display"
+
+# Digitizer: the event node touchbinux opens. tiny-dfr's rules match the parent
+# inputN device (by its own `name` attribute), so there is no clash here.
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ATTRS{name}=="Mac14,7 Touch Bar|MacBookPro17,1 Touch Bar|Apple Inc. Touch Bar Display Touchpad", TAG+="systemd", ENV{SYSTEMD_ALIAS}+="/dev/touchbinux_touch"
+
+# Seat isolation (keeping the bar away from Hyprland on seat0) is NOT done here: it
+# comes from tiny-dfr's 99-touchbar-seat.rules, which stays installed as the fallback.
+# If tiny-dfr is ever uninstalled, copy that file to /etc/udev/rules.d/ first.

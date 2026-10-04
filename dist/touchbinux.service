@@ -1,0 +1,80 @@
+[Unit]
+Description=touchbinux Touch Bar daemon
+
+# Never alongside tiny-dfr: starting one stops the other (both want DRM master on
+# the bar and an exclusive grab on the digitizer). The ordering makes tiny-dfr's
+# stop finish before we start. tiny-dfr is also pulled in by its own udev rule
+# (SYSTEMD_WANTS), so it must be masked as well; see README.md.
+Conflicts=tiny-dfr.service
+After=tiny-dfr.service
+
+# Same ordering as tiny-dfr: after logind and after plymouth has let go of DRM.
+After=systemd-logind.service systemd-user-sessions.service plymouth-quit.service
+
+# Display and digitizer, named by 99-touchbinux.rules. Started when the digitizer
+# appears (see [Install]), stopped if either goes away.
+BindsTo=dev-touchbinux_display.device dev-touchbinux_touch.device
+After=dev-touchbinux_display.device dev-touchbinux_touch.device
+
+# Restart=on-failure, but give up after 5 failures in 60 s instead of looping.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/touchbinux buttons --config /etc/touchbinux/config.toml
+# SIGHUP re-reads the config (and redraws); a broken config keeps the old one.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM to the daemon only: it blanks the bar, removes /run/touchbinux.sock,
+# destroys the virtual keyboard and kills its own children. Whatever is left after
+# that (or after TimeoutStopSec) gets SIGKILL.
+KillMode=mixed
+TimeoutStopSec=5
+
+# --- Hardening ------------------------------------------------------------------
+# Everything here also applies to the commands the daemon starts for buttons (they
+# run as run_as, but inside this service's sandbox). Only options that neither the
+# daemon nor ordinary session commands notice are enabled.
+
+# /usr, /boot, /efi and /etc read-only. The daemon only reads /etc/touchbinux and
+# /etc/tiny-dfr; button commands run as a normal user, who can't write there anyway.
+# /run (socket), /dev and /sys (backlight) stay writable.
+ProtectSystem=full
+# /proc/sys and similar read-only. On this systemd (262) /sys itself stays writable:
+# tiny-dfr runs with the same option and writes its backlight in /sys/class/backlight.
+ProtectKernelTunables=true
+# No module loading (uinput is loaded at boot by modules-load.d/touchbinux.conf).
+ProtectKernelModules=true
+# No access to the kernel log (/dev/kmsg, /proc/kmsg).
+ProtectKernelLogs=true
+# cgroupfs read-only.
+ProtectControlGroups=true
+# Can't create setuid/setgid files.
+RestrictSUIDSGID=true
+
+# Considered and left out, because the daemon or button commands need what they take
+# away:
+# ProtectHome=true          # /home and /run/user hidden: no Hyprland sockets, no
+#                           # icons from ~/.local/share/icons, commands lose $HOME.
+# ProtectSystem=strict      # makes /home read-only for commands too.
+# PrivateTmp=true           # commands would get a private /tmp, invisible to the session.
+# PrivateDevices=true       # hides /dev/dri, /dev/input and /dev/uinput.
+# NoNewPrivileges=true      # commands couldn't use sudo, pkexec, fusermount3...
+# ProtectHostname=true      # commands would not see later hostname changes.
+# ProtectClock=true         # adds a device allow-list; untested with DRM/input.
+# LockPersonality=true      # may break x86 emulation (FEX/muvm) started from a button.
+# PrivateIPC=true           # Xwayland apps started from a button lose MIT-SHM.
+# RestrictAddressFamilies=AF_UNIX AF_NETLINK   # commands couldn't use the network.
+# RestrictNamespaces=true   # breaks flatpak/bwrap apps started from a button.
+# MemoryDenyWriteExecute=true                  # breaks JITs (browsers, node...).
+# SystemCallFilter=@system-service             # same: inherited by every command.
+# CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL CAP_SYS_ADMIN
+#                           # plausible, but DRM master and uinput need checking first.
+
+[Install]
+# Started whenever the Touch Bar digitizer shows up (boot, or a driver rebind),
+# but only while enabled: `systemctl disable` removes this link.
+WantedBy=dev-touchbinux_touch.device

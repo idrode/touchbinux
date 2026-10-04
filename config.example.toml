@@ -1,6 +1,7 @@
 # touchbinux configuration.
 # Default location: /etc/touchbinux/config.toml (or pass --config <file>).
-# Reload without restarting: sudo kill -HUP $(pidof touchbinux)
+# Reload without restarting: sudo systemctl reload touchbinux
+# (or, when started by hand: sudo kill -HUP $(pidof touchbinux))
 
 # Who commands run as when the daemon is NOT started with sudo (e.g. as a systemd
 # service). Only honoured if this file is owned by root and not group/world-writable,

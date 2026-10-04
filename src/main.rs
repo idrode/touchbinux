@@ -3,6 +3,7 @@ mod battery;
 mod canvas;
 mod config;
 mod display;
+mod expander;
 mod gif;
 mod hypr;
 mod hyprctl;
@@ -55,9 +56,9 @@ use std::{
     str::FromStr,
     time::{Duration, Instant, SystemTime},
 };
-use touch::{RawTouch, TouchDevice};
+use touch::{Phase, RawTouch, TouchDevice};
 use user::SessionUser;
-use widgets::Live;
+use widgets::{Level, Live};
 
 /// Frame cap for animations and touch-driven redraws (~30 fps).
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
@@ -502,6 +503,13 @@ impl App {
         }
     }
 
+    fn on_level(&mut self, level: Level, value: u8) {
+        match level {
+            Level::Volume => self.on_slider("vol", value),
+            Level::Brightness => self.on_slider("bright", value),
+        }
+    }
+
     fn on_slider(&mut self, id: &str, value: u8) {
         match id {
             "vol" => {
@@ -751,7 +759,10 @@ fn watch_hypr(
 fn ui_event_json(ev: &UiEvent) -> Value {
     match ev {
         UiEvent::Tap(id) => json!({"type": "tap", "id": id}),
-        UiEvent::Slider(id, v) => json!({"type": "slider", "id": id, "value": v}),
+        UiEvent::Slider(id, v) | UiEvent::Level(id, _, v) => {
+            json!({"type": "slider", "id": id, "value": v})
+        }
+        UiEvent::ToggleMute(id) => json!({"type": "mute", "id": id}),
     }
 }
 
@@ -860,7 +871,9 @@ fn run(
 
         if frame_due.is_some_and(|d| d <= now) {
             let t = now - start;
-            app.scene.draw(&mut canvas, t, &app.font, &app.live())?;
+            let live = app.live();
+            app.scene.advance(t, &live);
+            app.scene.draw(&mut canvas, t, &app.font, &live)?;
             let drawn = Instant::now();
             drm.present(&canvas)?;
             stats.record(drawn - now, drawn.elapsed());
@@ -954,7 +967,16 @@ fn run(
                     ui_events.clear();
                     touch.read(&mut touches)?;
                     let scene_t = Instant::now() - start;
-                    for t in &touches {
+                    // E.g. an automatic fold that is due but not drawn yet: the touch
+                    // must see the scene as it is now.
+                    dirty |= app.scene.advance(scene_t, &app.live());
+                    // While present() blocks (~33 ms) moves pile up; only the last of
+                    // each run matters, so a drag never lags behind the finger.
+                    for (i, t) in touches.iter().enumerate() {
+                        let next = touches.get(i + 1).map(|n| n.phase);
+                        if t.phase == Phase::Move && next == Some(Phase::Move) {
+                            continue;
+                        }
                         let (x, y) = touch.to_canvas(t.x, t.y, w, h);
                         if debug_touch {
                             eprintln!(
@@ -977,6 +999,8 @@ fn run(
                         match e {
                             UiEvent::Tap(id) => app.on_tap(id),
                             UiEvent::Slider(id, v) => app.on_slider(id, *v),
+                            UiEvent::Level(_, level, v) => app.on_level(*level, *v),
+                            UiEvent::ToggleMute(_) => app.vol.toggle_mute(),
                         }
                     }
                 }

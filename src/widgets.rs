@@ -15,9 +15,9 @@ use chrono::{
 };
 use std::{path::Path, time::Duration};
 
-const TEXT: Rgba = Rgba::WHITE;
-const DIM: Rgba = Rgba(0x90, 0x90, 0x90, 0xff);
-const ICON: Rgba = Rgba(0xe8, 0xe8, 0xe8, 0xff);
+pub const TEXT: Rgba = Rgba::WHITE;
+pub const DIM: Rgba = Rgba(0x90, 0x90, 0x90, 0xff);
+pub const ICON: Rgba = Rgba(0xe8, 0xe8, 0xe8, 0xff);
 const BATTERY_LOW: Rgba = Rgba(0xff, 0x45, 0x3a, 0xff);
 const BATTERY_CHARGING: Rgba = Rgba(0x30, 0xd1, 0x58, 0xff);
 /// Gap between a widget's icon and its value.
@@ -278,37 +278,27 @@ fn draw_battery(canvas: &mut Canvas, icon: Rect, status: Option<BatteryStatus>) 
 
 // --- Volume and brightness ----------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Volume,
     Brightness,
 }
 
-/// Icon and current value. In 8b this unfolds into a slider when touched.
-pub struct LevelWidget {
-    pub level: Level,
+/// What the speaker icon shows besides the time: how much of each wave is there
+/// (0..=1, tweened by the caller), whether the sink is muted, and whether a finger is
+/// dragging the volume (the waves then sway a little).
+pub struct SpeakerLook {
+    pub waves: [f32; 3],
+    pub muted: bool,
+    pub swaying: bool,
 }
 
-impl Widget for LevelWidget {
-    fn draw(&self, canvas: &mut Canvas, rect: Rect, _t: Duration, cx: &DrawCx) {
-        let value = match self.level {
-            Level::Volume => Some(cx.live.volume),
-            Level::Brightness => cx.live.brightness,
-        };
-        let (text, color) = match value {
-            Some(v) => (v.to_string(), TEXT),
-            None => ("–".to_string(), DIM),
-        };
-        let level = self.level;
-        icon_and_text(canvas, rect, cx, &text, color, |c, r| match level {
-            Level::Volume => draw_speaker(c, r, value.unwrap_or(0)),
-            Level::Brightness => draw_sun(c, r, value.unwrap_or(0)),
-        });
-    }
-}
+/// Volume above which each wave shows: 0 waves at 0, up to 3.
+pub const WAVE_THRESHOLDS: [u8; 3] = [0, 33, 66];
 
-/// Speaker with 0-3 sound waves by level; a cross when at 0.
-pub fn draw_speaker(canvas: &mut Canvas, icon: Rect, percent: u8) {
+/// Speaker with up to three sound waves. A wave grows out of the cone as it appears
+/// (and shrinks back as it goes); muted, a cross takes their place.
+pub fn draw_speaker(canvas: &mut Canvas, icon: Rect, t: Duration, look: &SpeakerLook, color: Rgba) {
     let s = icon.w;
     let (x, cy) = (icon.x, icon.y + icon.h / 2.0);
     let line = (s * 0.08).max(1.5);
@@ -319,7 +309,7 @@ pub fn draw_speaker(canvas: &mut Canvas, icon: Rect, percent: u8) {
         s * 0.18,
         s * 0.26,
         s * 0.03,
-        ICON,
+        color,
     );
     canvas.fill_polygon(
         &[
@@ -328,34 +318,47 @@ pub fn draw_speaker(canvas: &mut Canvas, icon: Rect, percent: u8) {
             (x + s * 0.46, cy + s * 0.32),
             (x + s * 0.22, cy + s * 0.13),
         ],
-        ICON,
+        color,
     );
-    if percent == 0 {
+    if look.muted {
         let (mx, d) = (x + s * 0.72, s * 0.13);
-        canvas.stroke_line(mx - d, cy - d, mx + d, cy + d, line, ICON);
-        canvas.stroke_line(mx - d, cy + d, mx + d, cy - d, line, ICON);
-        return;
+        canvas.stroke_line(mx - d, cy - d, mx + d, cy + d, line, color);
+        canvas.stroke_line(mx - d, cy + d, mx + d, cy - d, line, color);
     }
-    let waves = match percent {
-        1..=33 => 1,
-        34..=66 => 2,
-        _ => 3,
-    };
     let span = std::f32::consts::FRAC_PI_4 * 1.1;
-    for i in 0..waves {
-        let r = s * (0.16 + 0.13 * i as f32);
-        canvas.stroke_arc(x + s * 0.46, cy, r, -span, 2.0 * span, line, ICON);
+    let secs = t.as_secs_f32();
+    for (i, &k) in look.waves.iter().enumerate() {
+        if k <= 0.01 {
+            continue;
+        }
+        let k = k.min(1.0);
+        let mut r = s * (0.16 + 0.13 * i as f32) * (0.55 + 0.45 * k);
+        if look.swaying {
+            // A slow ripple outwards, each wave a little behind the previous one.
+            r += s * 0.025 * (secs * std::f32::consts::TAU * 1.5 - i as f32 * 0.9).sin();
+        }
+        let alpha = (color.3 as f32 * k).round() as u8;
+        canvas.stroke_arc(
+            x + s * 0.46,
+            cy,
+            r,
+            -span,
+            2.0 * span,
+            line,
+            color.with_alpha(alpha),
+        );
     }
 }
 
-/// Sun whose rays grow with the brightness.
-pub fn draw_sun(canvas: &mut Canvas, icon: Rect, percent: u8) {
+/// Sun whose rays grow with the brightness (`level` 0..=100, may be fractional while
+/// it is being tweened).
+pub fn draw_sun(canvas: &mut Canvas, icon: Rect, level: f32, color: Rgba) {
     let s = icon.w;
     let (cx, cy) = icon.center();
     let line = (s * 0.08).max(1.5);
-    canvas.fill_circle(cx, cy, s * 0.17, ICON);
+    canvas.fill_circle(cx, cy, s * 0.17, color);
     let r0 = s * 0.27;
-    let r1 = r0 + s * (0.06 + 0.12 * percent as f32 / 100.0);
+    let r1 = r0 + s * (0.04 + 0.16 * level.clamp(0.0, 100.0) / 100.0);
     for i in 0..8 {
         let a = i as f32 * std::f32::consts::FRAC_PI_4;
         let (dx, dy) = (a.cos(), a.sin());
@@ -365,7 +368,7 @@ pub fn draw_sun(canvas: &mut Canvas, icon: Rect, percent: u8) {
             cx + dx * r1,
             cy + dy * r1,
             line,
-            ICON,
+            color,
         );
     }
 }

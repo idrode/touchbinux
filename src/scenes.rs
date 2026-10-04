@@ -6,13 +6,14 @@ use crate::{
     anim::Animated,
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{ItemConfig, ItemKind, LayerConfig},
+    expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
     touch::Phase,
     widgets::{
-        BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, Level,
-        LevelWidget, Live, Widget,
+        BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, Level, Live,
+        Widget,
     },
 };
 use anyhow::Result;
@@ -22,7 +23,7 @@ const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
 const GREEN: Rgba = Rgba(0x20, 0xe0, 0x40, 0xff);
 const YELLOW: Rgba = Rgba(0xff, 0xd0, 0x00, 0xff);
 const GREY: Rgba = Rgba(0x80, 0x80, 0x80, 0xff);
-const BUTTON_GREY: Rgba = Rgba(0x3a, 0x3a, 0x3c, 0xff);
+pub const BUTTON_GREY: Rgba = Rgba(0x3a, 0x3a, 0x3c, 0xff);
 const PRESSED_OVERLAY: Rgba = Rgba(0xff, 0xff, 0xff, 0x50);
 const ACCENT: Rgba = Rgba(0x40, 0xa0, 0xff, 0xff);
 const FOCUSED_GREY: Rgba = Rgba(0x5a, 0x5a, 0x60, 0xff);
@@ -91,6 +92,10 @@ pub fn touch_grid(canvas: &mut Canvas, font: &Font) {
 pub enum UiEvent {
     Tap(String),
     Slider(String, u8),
+    /// An unfolded volume/brightness slider (by item id) was dragged to a value.
+    Level(String, Level, u8),
+    /// The speaker icon of the unfolded volume slider was tapped.
+    ToggleMute(String),
 }
 
 struct Button {
@@ -221,6 +226,14 @@ enum Capture {
     /// Button index and whether the finger is currently inside it.
     Button(usize, bool),
     Slider(usize),
+    /// Tap on a folded expander (it unfolds); whether the finger is still on it.
+    ExpanderTap(usize, bool),
+    /// Dragging an unfolded expander's slider, wherever the finger goes.
+    ExpanderDrag(usize),
+    /// On the unfolded volume slider's icon; whether the finger is still on it.
+    ExpanderMute(usize, bool),
+    /// A touch outside an unfolded expander: it folds, and the touch does nothing else.
+    Blocked,
 }
 
 pub struct Scene {
@@ -229,6 +242,8 @@ pub struct Scene {
     animated: Vec<(Rect, Box<dyn Animated>)>,
     /// Live widgets, repainted every frame over their (static) button background.
     widgets: Vec<(Rect, Box<dyn Widget>)>,
+    /// Volume/brightness items that unfold into sliders (drawn every frame).
+    expanders: Vec<Expander>,
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
     texts: Vec<TextItem>,
@@ -252,6 +267,7 @@ impl Scene {
             background,
             animated: Vec::new(),
             widgets: Vec::new(),
+            expanders: Vec::new(),
             buttons: Vec::new(),
             sliders: Vec::new(),
             texts: Vec::new(),
@@ -278,6 +294,29 @@ impl Scene {
         for (rect, w) in &self.widgets {
             w.draw(canvas, *rect, t, &cx);
         }
+        let active = self.active_expander(t);
+        for (i, e) in self.expanders.iter().enumerate() {
+            if Some(i) != active {
+                e.draw(canvas, t, font, live);
+            }
+        }
+        if let Some(i) = active {
+            // What the slider will cover fades out (to the black of the bar) as it
+            // unfolds, and back in as it folds.
+            let e = &self.expanders[i];
+            let k = e.fold.progress(t);
+            let veil = Rgba::BLACK.with_alpha((k * 255.0).round() as u8);
+            let others = self.expanders.iter().enumerate().filter(|&(j, _)| j != i);
+            let rects = self
+                .buttons
+                .iter()
+                .map(|b| b.rect)
+                .chain(others.map(|(_, o)| o.rect));
+            for r in rects.filter(|r| overlaps(*r, e.open_rect)) {
+                canvas.fill_rect(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, veil);
+            }
+            e.draw(canvas, t, font, live);
+        }
         for s in &self.sliders {
             s.draw(canvas, font);
         }
@@ -296,7 +335,59 @@ impl Scene {
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
         let animated = self.animated.iter().map(|(_, a)| a.next_change(t));
         let widgets = self.widgets.iter().map(|(_, w)| w.next_change(t));
-        animated.chain(widgets).flatten().min()
+        let expanders = self.expanders.iter().map(|e| e.next_change(t));
+        animated.chain(widgets).chain(expanders).flatten().min()
+    }
+
+    /// Brings time-driven state up to `t` (automatic folds, icons following the live
+    /// levels). Call before drawing and before feeding touches. Returns whether
+    /// something started moving.
+    pub fn advance(&mut self, t: Duration, live: &Live) -> bool {
+        let mut changed = false;
+        for e in &mut self.expanders {
+            changed |= e.advance(t, live);
+        }
+        changed
+    }
+
+    /// The expander that is unfolded or still moving, if any (at most one: while it
+    /// is, it takes all touches).
+    fn active_expander(&self, t: Duration) -> Option<usize> {
+        self.expanders.iter().position(|e| e.fold.is_active(t))
+    }
+
+    /// A finger comes down while an expander is unfolded, or on a folded one.
+    /// Returns what it captures, or `None` if no expander is involved.
+    fn expander_down(
+        &mut self,
+        (x, y): (f32, f32),
+        t: Duration,
+        font: &Font,
+        out: &mut Vec<UiEvent>,
+    ) -> Option<Capture> {
+        if let Some(i) = self.active_expander(t) {
+            let e = &mut self.expanders[i];
+            if !contains(e.open_rect, x, y) {
+                e.fold.collapse(t);
+                return Some(Capture::Blocked);
+            }
+            e.fold.touch_down();
+            e.fold.expand(t); // in case it was folding
+            if e.in_mute_zone(x, y, font) {
+                return Some(Capture::ExpanderMute(i, true));
+            }
+            let v = e.value_at(x, font);
+            e.drag = Some(v);
+            out.push(UiEvent::Level(e.id.clone(), e.level, v));
+            return Some(Capture::ExpanderDrag(i));
+        }
+        let i = self.expanders.iter().position(|e| contains(e.rect, x, y))?;
+        let e = &mut self.expanders[i];
+        e.fold.touch_down();
+        if e.available {
+            e.fold.expand(t);
+        }
+        Some(Capture::ExpanderTap(i, true))
     }
 
     /// Shortest wall-clock period any widget follows (see `Widget::wall_period`).
@@ -329,9 +420,10 @@ impl Scene {
         let before = self.capture;
         match (phase, self.capture) {
             (Phase::Down, _) => {
-                self.capture = if let Some(i) =
-                    self.buttons.iter().position(|b| contains(b.rect, x, y))
-                {
+                self.capture = if let Some(c) = self.expander_down((x, y), t, font, out) {
+                    changed = true;
+                    c
+                } else if let Some(i) = self.buttons.iter().position(|b| contains(b.rect, x, y)) {
                     Capture::Button(i, true)
                 } else if let Some(i) = self.sliders.iter().position(|s| contains(s.rect, x, y)) {
                     let s = &mut self.sliders[i];
@@ -356,6 +448,22 @@ impl Scene {
                     changed = true;
                 }
             }
+            (Phase::Move, Capture::ExpanderDrag(i)) => {
+                let e = &mut self.expanders[i];
+                let v = e.value_at(x, font);
+                if e.drag != Some(v) {
+                    e.drag = Some(v);
+                    out.push(UiEvent::Level(e.id.clone(), e.level, v));
+                    changed = true;
+                }
+            }
+            (Phase::Move, Capture::ExpanderTap(i, _)) => {
+                self.capture = Capture::ExpanderTap(i, contains(self.expanders[i].rect, x, y));
+            }
+            (Phase::Move, Capture::ExpanderMute(i, _)) => {
+                let inside = self.expanders[i].in_mute_zone(x, y, font);
+                self.capture = Capture::ExpanderMute(i, inside);
+            }
             (Phase::Up | Phase::Cancel, capture) => {
                 match capture {
                     Capture::Button(i, _) => {
@@ -372,11 +480,31 @@ impl Scene {
                         self.sliders[i].dragging = false;
                         changed = true;
                     }
-                    Capture::None => {}
+                    Capture::ExpanderTap(i, inside) => {
+                        let e = &mut self.expanders[i];
+                        e.fold.touch_up(t);
+                        if phase == Phase::Up && inside {
+                            out.push(UiEvent::Tap(e.id.clone()));
+                        }
+                    }
+                    Capture::ExpanderDrag(i) => {
+                        let e = &mut self.expanders[i];
+                        e.drag = None;
+                        e.fold.touch_up(t);
+                        changed = true;
+                    }
+                    Capture::ExpanderMute(i, inside) => {
+                        let e = &mut self.expanders[i];
+                        e.fold.touch_up(t);
+                        if phase == Phase::Up && inside {
+                            out.push(UiEvent::ToggleMute(e.id.clone()));
+                        }
+                    }
+                    Capture::None | Capture::Blocked => {}
                 }
                 self.capture = Capture::None;
             }
-            (Phase::Move, Capture::None) => {}
+            (Phase::Move, Capture::None | Capture::Blocked) => {}
         }
         changed || self.capture != before
     }
@@ -385,6 +513,15 @@ impl Scene {
     /// (matched by id), so a rebuild under the finger doesn't drop it.
     pub fn inherit_interaction(&mut self, old: &Scene) {
         self.finger = old.finger;
+        for e in &mut self.expanders {
+            if let Some(o) = old.expanders.iter().find(|o| o.id == e.id) {
+                e.inherit(o);
+            }
+        }
+        let expander = |i: usize| {
+            let id = &old.expanders[i].id;
+            self.expanders.iter().position(|e| &e.id == id)
+        };
         self.capture = match old.capture {
             Capture::Button(i, inside) => self
                 .buttons
@@ -402,6 +539,14 @@ impl Scene {
                     None => Capture::None,
                 }
             }
+            Capture::ExpanderTap(i, inside) => {
+                expander(i).map_or(Capture::None, |j| Capture::ExpanderTap(j, inside))
+            }
+            Capture::ExpanderDrag(i) => expander(i).map_or(Capture::None, Capture::ExpanderDrag),
+            Capture::ExpanderMute(i, inside) => {
+                expander(i).map_or(Capture::None, |j| Capture::ExpanderMute(j, inside))
+            }
+            Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
     }
@@ -553,6 +698,10 @@ fn contains(r: Rect, x: f32, y: f32) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
 
+fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
 pub enum Icon {
     Svg(Rc<Svg>),
     Raster(Rc<Image>),
@@ -615,8 +764,8 @@ impl ButtonSpec {
 
 pub const MARGIN: f32 = 4.0;
 pub const GAP: f32 = 12.0;
-const RADIUS: f32 = 8.0;
-const PADDING: f32 = 8.0;
+pub const RADIUS: f32 = 8.0;
+pub const PADDING: f32 = 8.0;
 const ICON_LABEL_GAP: f32 = 10.0;
 
 /// Icon height (px) used by buttons on a canvas `canvas_h` px tall. Animated and
@@ -866,7 +1015,17 @@ pub fn bar(
                 } else {
                     Level::Brightness
                 };
-                scene.add_widget(rect, id, Box::new(LevelWidget { level }));
+                // Default: half the bar.
+                let width = item.expand_width.unwrap_or(w as f32 / 2.0);
+                let fold = Fold::new(
+                    item.anim().unwrap_or(DEFAULT_ANIM),
+                    item.collapse_after().unwrap_or(DEFAULT_COLLAPSE_AFTER),
+                );
+                let color = item.color.map_or(DEFAULT_FILL, |c| c.0);
+                let open = expanded_rect(rect, area, width);
+                scene
+                    .expanders
+                    .push(Expander::new(id, level, rect, open, color, fold));
             }
             ItemKind::Spacer => {}
         }
@@ -905,5 +1064,243 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
             eprintln!("bar: tinting {name:?}: {e:#}");
             found.into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+    const W: u32 = 2008;
+    const H: u32 = 60;
+
+    /// [btn] [spacer] [volume] [brightness] [clock]; volume unfolds to 1000 px.
+    const LAYER: &str = r#"
+        [[layers]]
+        id = "main"
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "spacer"
+        [[layers.items]]
+        type = "volume"
+        expand_width = 1000
+        [[layers.items]]
+        type = "brightness"
+        [[layers.items]]
+        type = "clock"
+    "#;
+
+    fn font() -> Option<Font> {
+        // Same list as the daemon; skip the test on a machine without these fonts.
+        Font::load_first(&[
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        ])
+        .ok()
+    }
+
+    fn live() -> Live {
+        Live {
+            volume: 40,
+            muted: false,
+            brightness: Some(70),
+            battery: None,
+            now: chrono::Local::now(),
+        }
+    }
+
+    fn scene(font: &Font) -> Scene {
+        let cfg: Config = toml::from_str(LAYER).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        bar(W, H, font, &layer, &mut icons).unwrap()
+    }
+
+    fn tap(s: &mut Scene, at: (f32, f32), t: Duration, font: &Font) -> (bool, Vec<UiEvent>) {
+        let mut out = Vec::new();
+        let a = s.handle_touch(Phase::Down, at, t, font, &mut out);
+        let b = s.handle_touch(Phase::Up, at, t, font, &mut out);
+        (a || b, out)
+    }
+
+    #[test]
+    fn volume_unfolds_drags_mutes_and_folds_back() {
+        let Some(font) = font() else { return };
+        let mut s = scene(&font);
+        let live = live();
+        s.advance(MS(0), &live);
+        assert_eq!(s.next_change(MS(0)), None, "idle bar schedules nothing");
+        let (vol, open, btn) = {
+            let e = &s.expanders[0];
+            (e.rect, e.open_rect, s.buttons[0].rect)
+        };
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+
+        // Tap on the folded volume: unfolds, reports the tap, animates ~200 ms.
+        let (changed, ev) = tap(&mut s, mid(vol), MS(1000), &font);
+        assert!(changed);
+        assert_eq!(ev, vec![UiEvent::Tap("volume".into())]);
+        assert_eq!(s.next_change(MS(1100)), Some(MS(1100)));
+        s.advance(MS(1300), &live);
+        assert_eq!(s.expanders[0].fold.progress(MS(1300)), 1.0);
+        // Open and idle: one wake-up, for the automatic fold 3 s after the tap.
+        assert_eq!(s.next_change(MS(1300)), Some(MS(4000)));
+
+        // Drag: starts at the right end of the slider, follows the finger even
+        // outside it, and the left end is 0.
+        let mut out = Vec::new();
+        let right = (open.x + open.w - 60.0, open.y + 10.0);
+        s.handle_touch(Phase::Down, right, MS(1500), &font, &mut out);
+        s.handle_touch(Phase::Move, (0.0, 0.0), MS(1600), &font, &mut out);
+        assert!(matches!(out[0], UiEvent::Level(_, Level::Volume, v) if v == 100));
+        assert_eq!(out[1], UiEvent::Level("volume".into(), Level::Volume, 0));
+        // While dragging: continuous frames (the waves sway), no automatic fold.
+        assert_eq!(s.next_change(MS(9000)), Some(MS(9000)));
+        assert!(!s.advance(MS(9000), &live));
+        s.handle_touch(Phase::Up, (0.0, 0.0), MS(9000), &font, &mut out);
+        assert_eq!(s.expanders[0].drag, None);
+
+        // Tap on the speaker icon: mute toggle, nothing else.
+        let icon = (open.x + 20.0, open.y + open.h / 2.0);
+        let (_, ev) = tap(&mut s, icon, MS(9100), &font);
+        assert_eq!(ev, vec![UiEvent::ToggleMute("volume".into())]);
+
+        // A tap on the button while unfolded: the button doesn't fire, the slider folds.
+        let (_, ev) = tap(&mut s, mid(btn), MS(9200), &font);
+        assert!(ev.is_empty());
+        assert!(!s.expanders[0].fold.is_open());
+        // (The icon also eases back from the dragged 0 to the live 40 meanwhile.)
+        s.advance(MS(9500), &live);
+        assert_eq!(s.next_change(MS(9800)), None);
+        // Folded again: the button works.
+        let (_, ev) = tap(&mut s, mid(btn), MS(9600), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("btn".into())]);
+
+        // Automatic fold: unfold, leave it alone, it folds 3 s after the last touch.
+        tap(&mut s, mid(vol), MS(10_000), &font);
+        assert!(!s.advance(MS(12_999), &live));
+        assert!(s.advance(MS(13_000), &live));
+        assert_eq!(s.next_change(MS(13_100)), Some(MS(13_100)));
+        assert_eq!(s.next_change(MS(13_300)), None);
+    }
+
+    #[test]
+    fn no_backlight_no_unfolding() {
+        let Some(font) = font() else { return };
+        let mut s = scene(&font);
+        let mut live = live();
+        live.brightness = None;
+        s.advance(MS(0), &live);
+        let r = s.expanders[1].rect;
+        let (_, ev) = tap(&mut s, (r.x + 5.0, r.y + 5.0), MS(10), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("brightness".into())]);
+        assert!(!s.expanders[1].fold.is_active(MS(10)));
+    }
+
+    /// Not a check: time to draw one frame with the volume slider unfolding and the
+    /// waves swaying (run with --release --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn draw_cost() {
+        let font = font().unwrap();
+        let mut s = scene(&font);
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let vol = s.expanders[0].rect;
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (vol.x + 5.0, vol.y + 5.0), MS(0), &font, &mut out);
+        let n = 300;
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            let t = MS(i * 2); // spans the unfolding
+            s.advance(t, &live);
+            s.draw(&mut canvas, t, &font, &live).unwrap();
+        }
+        let per = start.elapsed() / n as u32;
+        eprintln!("draw: {:.2} ms per frame", per.as_secs_f64() * 1000.0);
+    }
+
+    /// Not a check: writes frames of the animations to $TOUCHBINUX_FRAMES for a look.
+    #[test]
+    #[ignore]
+    fn dump_frames() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = scene(&font);
+        let mut live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, live: &Live, t: Duration, name: &str| {
+            s.advance(t, live);
+            s.draw(&mut canvas, t, &font, live).unwrap();
+            canvas
+                .save_png(Path::new(&format!("{dir}/{name}.png")))
+                .unwrap();
+        };
+        shot(&mut s, &live, MS(0), "0-folded");
+        let vol = s.expanders[0].rect;
+        let mut out = Vec::new();
+        s.handle_touch(
+            Phase::Down,
+            (vol.x + 5.0, vol.y + 5.0),
+            MS(100),
+            &font,
+            &mut out,
+        );
+        s.handle_touch(
+            Phase::Up,
+            (vol.x + 5.0, vol.y + 5.0),
+            MS(100),
+            &font,
+            &mut out,
+        );
+        shot(&mut s, &live, MS(150), "1-unfolding");
+        shot(&mut s, &live, MS(400), "2-open");
+        let open = s.expanders[0].open_rect;
+        s.handle_touch(
+            Phase::Down,
+            (open.x + open.w * 0.8, 20.0),
+            MS(500),
+            &font,
+            &mut out,
+        );
+        live.volume = 80;
+        shot(&mut s, &live, MS(520), "3-dragging-80-wave-appearing");
+        shot(&mut s, &live, MS(800), "4-dragging-80");
+        s.handle_touch(
+            Phase::Up,
+            (open.x + open.w * 0.8, 20.0),
+            MS(900),
+            &font,
+            &mut out,
+        );
+        live.muted = true;
+        shot(&mut s, &live, MS(1500), "5-muted");
+        s.handle_touch(Phase::Down, (10.0, 10.0), MS(2000), &font, &mut out);
+        shot(&mut s, &live, MS(2080), "6-folding");
+        s.handle_touch(Phase::Up, (10.0, 10.0), MS(2100), &font, &mut out);
+        live.muted = false;
+        let bri = s.expanders[1].rect;
+        s.handle_touch(
+            Phase::Down,
+            (bri.x + 5.0, bri.y + 5.0),
+            MS(3000),
+            &font,
+            &mut out,
+        );
+        s.handle_touch(
+            Phase::Up,
+            (bri.x + 5.0, bri.y + 5.0),
+            MS(3000),
+            &font,
+            &mut out,
+        );
+        shot(&mut s, &live, MS(3500), "7-brightness-open");
     }
 }

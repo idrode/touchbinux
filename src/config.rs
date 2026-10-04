@@ -19,6 +19,8 @@ const LEGACY_LAYER: &str = "buttons";
 const MAX_PX: f32 = 4000.0;
 /// Longest accepted animation; anything slower would feel broken.
 const MAX_ANIM_MS: u64 = 2000;
+/// Shorter than this, a slider would fold before you could aim at it.
+const MIN_COLLAPSE_MS: u64 = 500;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,9 +118,16 @@ pub struct ItemConfig {
     /// Share of the free space, by weight (spacers default to 1).
     #[serde(default)]
     pub stretch: Option<f32>,
-    /// Animation length: the `builtin:folder` opening (and closing).
+    /// Animation length: the `builtin:folder` opening (and closing), or a
+    /// volume/brightness slider unfolding (and folding).
     #[serde(default)]
     pub anim_ms: Option<u64>,
+    /// volume/brightness: width of the unfolded slider, px (default half the bar).
+    #[serde(default)]
+    pub expand_width: Option<f32>,
+    /// volume/brightness: fold back after this long without touches.
+    #[serde(default)]
+    pub collapse_after_ms: Option<u64>,
 }
 
 /// "#rrggbb" or "#rrggbbaa".
@@ -177,6 +186,10 @@ impl ItemConfig {
         self.anim_ms.map(Duration::from_millis)
     }
 
+    pub fn collapse_after(&self) -> Option<Duration> {
+        self.collapse_after_ms.map(Duration::from_millis)
+    }
+
     pub fn battery_icon_dir(&self) -> &str {
         self.icon_dir.as_deref().unwrap_or(ICON_DIR)
     }
@@ -192,7 +205,14 @@ impl ItemConfig {
             ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
             ItemKind::Clock => &["id", "format", "action"],
             ItemKind::Battery => &["id", "icon_dir", "action"],
-            ItemKind::Volume | ItemKind::Brightness => &["id", "action"],
+            ItemKind::Volume | ItemKind::Brightness => &[
+                "id",
+                "action",
+                "color",
+                "anim_ms",
+                "expand_width",
+                "collapse_after_ms",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -204,6 +224,8 @@ impl ItemConfig {
             ("icon_dir", self.icon_dir.is_some()),
             ("action", self.action.is_some()),
             ("anim_ms", self.anim_ms.is_some()),
+            ("expand_width", self.expand_width.is_some()),
+            ("collapse_after_ms", self.collapse_after_ms.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) {
@@ -249,6 +271,15 @@ impl ItemConfig {
         }
         if self.anim_ms.is_some_and(|ms| ms > MAX_ANIM_MS) {
             bail!("{what}: anim_ms must be 0..={MAX_ANIM_MS}");
+        }
+        if self.expand_width.is_some_and(|w| !(w > 0.0 && w <= MAX_PX)) {
+            bail!("{what}: expand_width must be in (0, {MAX_PX}]");
+        }
+        if self
+            .collapse_after_ms
+            .is_some_and(|ms| !(MIN_COLLAPSE_MS..=MAX_TIMEOUT_MS).contains(&ms))
+        {
+            bail!("{what}: collapse_after_ms must be {MIN_COLLAPSE_MS}..={MAX_TIMEOUT_MS}");
         }
         if let Some(action) = &self.action {
             validate_action(&what, action)?;
@@ -458,6 +489,8 @@ impl Config {
                 width: None,
                 stretch: Some(1.0),
                 anim_ms: None,
+                expand_width: None,
+                collapse_after_ms: None,
             })
             .collect();
         Some(Cow::Owned(LayerConfig {
@@ -606,6 +639,10 @@ mod tests {
         [[layers.items]]
         type = "volume"
         width = 140
+        expand_width = 900
+        collapse_after_ms = 2500
+        anim_ms = 150
+        color = "#ff0000"
 
         [[layers.items]]
         type = "battery"
@@ -652,6 +689,12 @@ mod tests {
         assert_eq!(sizes[2], Size::Stretch(1.0)); // spacer default
         assert_eq!(sizes[4], Size::Fixed(140.0));
         assert_eq!(sizes[6], Size::Stretch(2.0));
+        let vol = &main.items[4];
+        assert_eq!(vol.expand_width, Some(900.0));
+        assert_eq!(vol.collapse_after(), Some(Duration::from_millis(2500)));
+        assert_eq!(vol.anim(), Some(Duration::from_millis(150)));
+        assert!(matches!(vol.color, Some(Color(Rgba(0xff, 0, 0, 0xff)))));
+        assert_eq!(main.items[3].expand_width, None); // brightness: defaults
         let launcher = &main.items[0];
         assert!(matches!(
             launcher.color,
@@ -715,6 +758,13 @@ mod tests {
             "type='button'\nid='b'\nicon='x'\nanim_ms=300\naction={type='socket'}",
             "type='button'\nid='b'\nicon='builtin:folder'\nanim_ms=99999\naction={type='socket'}",
             "type='clock'\nanim_ms=100",
+            "type='clock'\nexpand_width=500",
+            "type='battery'\ncollapse_after_ms=3000",
+            "type='volume'\nexpand_width=0",
+            "type='volume'\ncollapse_after_ms=100",
+            "type='volume'\ncollapse_after_ms=999999",
+            "type='brightness'\nanim_ms=5000",
+            "type='volume'\ncolor='#00ffb'",
         ];
         for body in bad {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");

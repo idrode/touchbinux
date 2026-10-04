@@ -74,6 +74,14 @@ action = { type = "key", key = "KEY_F14" }
 [[layers.items]]
 type = "spacer"
 
+
+[[layers.items]]
+type = "gif"
+id = "bongo"
+path = "/etc/touchbinux/gifs/bongosmash.gif"
+width = 80
+play = "always"
+
 [[layers.items]]
 type = "button"
 id = "hype"
@@ -91,15 +99,23 @@ action = { type = "key", key = "KEY_F19" }
 [[layers.items]]
 type = "brightness"
 width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
 
 [[layers.items]]
 type = "volume"
 width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
 
 # Same command as the XF86Battery bind in hyprland.lua.
 [[layers.items]]
 type = "battery"
-width = 80
+width = 120
 action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "battery", "toggle"] }
 
 # Same command as the XF86Time bind. Redrawn once a minute (every second only if
@@ -107,5 +123,5 @@ action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "batt
 [[layers.items]]
 type = "clock"
 format = "%H:%M"
-width = 120
+width = 200
 action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "calendar", "toggle"] }

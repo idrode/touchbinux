@@ -22,7 +22,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/touchbinux buttons --config /etc/touchbinux/config.toml
+ExecStart=/usr/local/bin/touchbinux bar --config /etc/touchbinux/config.toml
 # SIGHUP re-reads the config (and redraws); a broken config keeps the old one.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
@@ -39,8 +39,8 @@ TimeoutStopSec=5
 # run as run_as, but inside this service's sandbox). Only options that neither the
 # daemon nor ordinary session commands notice are enabled.
 
-# /usr, /boot, /efi and /etc read-only. The daemon only reads /etc/touchbinux and
-# /etc/tiny-dfr; button commands run as a normal user, who can't write there anyway.
+# /usr, /boot, /efi and /etc read-only. The daemon only reads /etc/touchbinux (and
+# whatever icon paths the config names); button commands run as a normal user, who can't write there anyway.
 # /run (socket), /dev and /sys (backlight) stay writable.
 ProtectSystem=full
 # /proc/sys and similar read-only. On this systemd (262) /sys itself stays writable:

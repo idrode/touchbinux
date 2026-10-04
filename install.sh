@@ -17,6 +17,10 @@ UDEV_RULE=/etc/udev/rules.d/99-touchbinux.rules
 MODULES=/etc/modules-load.d/touchbinux.conf
 CONF_DIR=/etc/touchbinux
 CONF=$CONF_DIR/config.toml
+ICONS=$CONF_DIR/icons
+# tiny-dfr's icons (arch, hype, docker, battery_*...) are copied so touchbinux no
+# longer depends on that directory. Only missing files: edited icons are kept.
+TINY_DFR_ICONS=/etc/tiny-dfr
 
 SRC_CONF=${1:-config.example.toml}
 
@@ -49,6 +53,13 @@ if [[ ! -e $CONF ]]; then
     fi
 fi
 
+NEW_ICONS=()
+if [[ -d $TINY_DFR_ICONS ]]; then
+    for f in "$TINY_DFR_ICONS"/*.svg; do
+        if [[ -e $f && ! -e $ICONS/$(basename "$f") ]]; then NEW_ICONS+=("$f"); fi
+    done
+fi
+
 row() { printf '  %-46s %s\n' "$1" "$2"; }
 echo
 echo "touchbinux will be installed as follows (nothing is enabled or started):"
@@ -65,6 +76,13 @@ if [[ -n $NEW_CONF ]]; then
 else
     row "$CONF" "exists: left as it is"
 fi
+if ((${#NEW_ICONS[@]})); then
+    row "$ICONS/" "<- ${#NEW_ICONS[@]} new .svg from $TINY_DFR_ICONS (existing kept)"
+elif [[ -d $TINY_DFR_ICONS ]]; then
+    row "$ICONS/" "up to date with $TINY_DFR_ICONS"
+else
+    row "$ICONS/" "$TINY_DFR_ICONS not found: no icons copied"
+fi
 echo
 read -r -p "Proceed? [y/N] " answer
 [[ $answer == [yY]* ]] || { echo "Nothing installed."; exit 0; }
@@ -78,6 +96,10 @@ sudo install -Dm644 dist/modules-load.conf "$MODULES"
 if [[ -n $NEW_CONF ]]; then
     sudo install -d -m755 -o root -g root "$CONF_DIR"
     sudo install -m644 -o root -g root "$NEW_CONF" "$CONF"
+fi
+if ((${#NEW_ICONS[@]})); then
+    sudo install -d -m755 -o root -g root "$ICONS"
+    sudo install -m644 -o root -g root "${NEW_ICONS[@]}" "$ICONS/"
 fi
 set +x
 

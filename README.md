@@ -21,6 +21,7 @@ copia con `sudo`:
 | `/etc/udev/rules.d/99-touchbinux.rules` | unidades de dispositivo para la pantalla y el táctil |
 | `/etc/modules-load.d/touchbinux.conf` | carga `uinput` al arrancar |
 | `/etc/touchbinux/config.toml` | solo si no existe; con `run_as` = tu usuario, root:root 0644 |
+| `/etc/touchbinux/icons/*.svg` | los SVG de `/etc/tiny-dfr` que falten (no pisa los que ya estén) |
 
 No activa ni arranca nada. Al terminar imprime los comandos para el cambio:
 
@@ -40,13 +41,35 @@ táctil) cada vez que aparece el dispositivo. `disable` no hace nada; solo `mask
 lo impide. Además el servicio lleva `Conflicts=tiny-dfr.service`: si alguien
 arranca tiny-dfr, touchbinux se para, y al revés. Nunca corren los dos a la vez.
 
+## La barra (escena `bar`)
+
+El servicio arranca `touchbinux bar`, que muestra la capa por defecto del config
+(`default_layer`, o la primera `[[layers]]`). Cada capa es una lista de elementos
+de izquierda a derecha: `button`, `clock`, `battery`, `volume`, `brightness` y
+`spacer`, con ancho fijo (`width`) o proporcional (`stretch`), y `margin`/`gap` por
+capa. Los campos de cada tipo están en `config.example.toml`; uno que no toca es
+un error (y la recarga se queda con la configuración anterior).
+
+Si el config solo tiene `[[buttons]]` (formato antiguo), esos botones forman la
+capa por defecto, a partes iguales. La escena `buttons` sigue igual que antes.
+
+En reposo no consume CPU: la hora se redibuja con un temporizador de tiempo real
+al cambiar de minuto (cada segundo solo si el formato lleva segundos), la batería
+se relee en ese mismo tick y cuando el kernel avisa de un cambio (enchufar el
+cargador), y volumen y brillo cuando cambian.
+
+Para actualizar desde la escena `buttons`: `./install.sh` (copia los iconos y el
+servicio nuevo, no toca tu config), añade `[[layers]]` a
+`/etc/touchbinux/config.toml` tomando como modelo `config.example.toml`, y después
+`sudo systemctl daemon-reload && sudo systemctl restart touchbinux`.
+
 ## Uso diario
 
 - Logs: `journalctl -u touchbinux -b` (este arranque), `journalctl -u touchbinux -f`
   (en vivo).
 - Estado: `systemctl status touchbinux`.
 - Recargar la configuración: `sudo systemctl reload touchbinux` (manda SIGHUP).
-  Relee botones y acciones y redibuja; si el archivo nuevo tiene errores, se queda
+  Relee capas, botones y acciones y redibuja; si el archivo nuevo tiene errores, se queda
   con el anterior y lo dice en el log. Cambiar `run_as` necesita
   `sudo systemctl restart touchbinux` (el dueño del socket se fija al arrancar).
 - Reiniciar: `sudo systemctl restart touchbinux`.
@@ -104,7 +127,12 @@ teclado funcionan. Ojo: **las teclas F1-F12 están en la propia Touch Bar**, as�
 ## Suspensión
 
 tiny-dfr no hace nada especial al suspender (solo tolera `EINTR` en `epoll_wait`) y
-redibuja a menudo por el reloj. touchbinux, en reposo, no redibuja nunca, así que:
+redibuja a menudo por el reloj. touchbinux, en reposo, solo redibuja la hora una
+vez por minuto, así que:
+
+- El temporizador de la hora es absoluto sobre el reloj real (`CLOCK_REALTIME`):
+  al volver de la suspensión salta enseguida si el minuto ya pasó, y se rearma si
+  cambia la hora del sistema.
 
 - `touchbinux-resume.service` hace `systemctl reload touchbinux` al reanudar, que
   redibuja la barra entera.

@@ -53,6 +53,18 @@ un error (y la recarga se queda con la configuración anterior).
 Si el config solo tiene `[[buttons]]` (formato antiguo), esos botones forman la
 capa por defecto, a partes iguales. La escena `buttons` sigue igual que antes.
 
+Volumen y brillo se despliegan al tocarlos en un slider ancho (`expand_width`, por
+defecto media barra) que cambia el nivel real al arrastrar; lo que queda debajo se
+desvanece y no responde. Se pliegan solos tras `collapse_after_ms` sin tocar
+(3 s por defecto) o al tocar fuera. En el de volumen, tocar el altavoz silencia o
+reactiva. La carpeta del fondo de pantalla se abre y se cierra al tocarla (la
+tecla sale enseguida). Duraciones con `anim_ms`; todo está en
+`config.example.toml`.
+
+Mientras algo se anima o se arrastra el bucle dibuja a ~30 fps; al terminar el
+temporizador de frames se desarma. Con un slider desplegado y quieto solo queda
+programado el despertar del plegado automático.
+
 En reposo no consume CPU: la hora se redibuja con un temporizador de tiempo real
 al cambiar de minuto (cada segundo solo si el formato lleva segundos), la batería
 se relee en ese mismo tick y cuando el kernel avisa de un cambio (enchufar el

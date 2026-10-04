@@ -14,16 +14,29 @@
 #
 # Item types and their fields (anything else is an error):
 #   button      id, icon and/or label, action, color   (no label: icon alone, centred)
+#               anim_ms                 only with icon = "builtin:folder"
 #   clock       id, format (strftime, default "%H:%M"), action
 #   battery     id, icon_dir (default /etc/touchbinux/icons), action
-#   volume      id, action            icon + current value
-#   brightness  id, action            icon + current value
+#   volume      id, action, color, anim_ms, expand_width, collapse_after_ms
+#   brightness  (same as volume)
 #   spacer      (nothing)             empty space
 # Every type also takes `width = <px>` (fixed) or `stretch = <weight>` (a share of
 # what is left). Spacers default to stretch = 1, the others to a fixed width.
 # Widgets' ids default to their type ("clock", "battery"...); ids must be unique.
 # `icon` is an absolute .svg/.png path, an icon theme name, or "builtin:folder".
-# `color` ("#rrggbb") paints the icon in that one colour.
+# `color` ("#rrggbb" or "#rrggbbaa") paints a button's icon in that one colour.
+#
+# volume and brightness show an icon and the current value. A tap unfolds them into
+# a slider over the bar; dragging anywhere on it changes the real level (the finger
+# is followed even if it leaves the slider). On the volume slider, a tap on the
+# speaker mutes/unmutes. While unfolded the other items don't respond: a touch
+# elsewhere just folds it. Options (defaults in brackets):
+#   expand_width       width of the unfolded slider, px     [half the bar]
+#   collapse_after_ms  fold back after this long untouched  [3000]  (500-60000)
+#   anim_ms            unfolding/folding time               [200]   (0-2000)
+#   color              filled part of the slider            ["#00ffb7"]
+# The "builtin:folder" icon opens and closes when tapped: anim_ms is the opening
+# time [300]; it stays open half that, then closes. The action fires at once.
 # Without `action` a widget's taps only go to the socket. Taps are always reported
 # on the socket as well.
 #
@@ -63,12 +76,13 @@ color = "#1793d1"
 width = 80
 action = { type = "key", key = "KEY_F13" }
 
-# Folder drawn by code (it will open when tapped, milestone 8b).
+# Folder drawn by code; it opens and closes when tapped.
 [[layers.items]]
 type = "button"
 id = "wallpaper"
 icon = "builtin:folder"
 width = 80
+anim_ms = 300
 action = { type = "key", key = "KEY_F14" }
 
 [[layers.items]]
@@ -91,10 +105,18 @@ action = { type = "key", key = "KEY_F19" }
 [[layers.items]]
 type = "brightness"
 width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
 
 [[layers.items]]
 type = "volume"
 width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
 
 # Same command as the XF86Battery bind in hyprland.lua.
 [[layers.items]]

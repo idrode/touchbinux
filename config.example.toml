@@ -1,0 +1,79 @@
+# touchbinux configuration.
+# Default location: /etc/touchbinux/config.toml (or pass --config <file>).
+# Reload without restarting: sudo kill -HUP $(pidof touchbinux)
+
+# Who commands run as when the daemon is NOT started with sudo (e.g. as a systemd
+# service). Only honoured if this file is owned by root and not group/world-writable,
+# and never root itself. With sudo, SUDO_UID always wins.
+# run_as = "ander"
+
+# Each button: id (unique), label, icon (theme name or absolute .svg/.png path), action.
+# Shown by the `buttons` scene. Taps are always reported on the socket as well.
+#
+# Action types:
+#   { type = "command", argv = ["prog", "arg", ...], timeout_ms = 5000 }  # no shell
+#   { type = "hyprctl", workspace = 2 }                     # or "name:web", "+1"
+#   { type = "hyprctl", focus_window = "0xaaab33103270" }   # window address
+#   { type = "hyprctl", exec = ["kitty", "-e", "htop"] }     # argv, no shell expansion
+#   { type = "hyprctl", raw = 'hl.dsp.focus({ workspace = "e+1" })' }  # literal, advanced
+#     (hyprctl actions are written in the syntax of Hyprland's config provider,
+#      Lua or classic hyprlang, detected at connection. `raw` is NOT translated:
+#      write it for your provider. The old `args = [...]` still works, translated
+#      when it is workspace/focuswindow/exec.)
+#   { type = "key", key = "KEY_PLAYPAUSE" }                            # virtual keyboard
+#   { type = "socket" }                                                # only notify Quickshell
+#
+# To launch GUI apps prefer `hyprctl` with `exec`: Hyprland starts them, so the
+# command's timeout doesn't kill the app.
+
+[[buttons]]
+id = "terminal"
+label = "Kitty"
+icon = "kitty"
+action = { type = "hyprctl", exec = ["kitty"] }
+
+[[buttons]]
+id = "ws1"
+label = "WS 1"
+icon = "utilities-terminal"
+action = { type = "hyprctl", workspace = 1 }
+
+[[buttons]]
+id = "playpause"
+label = "Play"
+icon = "media-playback-start"
+action = { type = "key", key = "KEY_PLAYPAUSE" }
+
+[[buttons]]
+id = "mute"
+label = "Mute"
+icon = "audio-volume-muted"
+action = { type = "key", key = "KEY_MUTE" }
+
+[[buttons]]
+id = "f5"
+label = "F5"
+action = { type = "key", key = "KEY_F5" }
+
+[[buttons]]
+id = "notify"
+label = "Notify"
+icon = "dialog-information"
+action = { type = "command", argv = ["notify-send", "touchbinux", "hello from the touch bar"], timeout_ms = 3000 }
+
+# Here the config chooses a shell explicitly; the daemon never adds one.
+# Writes the uid/groups and environment the command really got.
+[[buttons]]
+id = "whoami"
+label = "whoami"
+action = { type = "command", argv = ["sh", "-c", "id > /tmp/touchbinux-whoami.txt; env >> /tmp/touchbinux-whoami.txt"] }
+
+[[buttons]]
+id = "slow"
+label = "Timeout"
+action = { type = "command", argv = ["sleep", "30"], timeout_ms = 2000 }
+
+[[buttons]]
+id = "quickshell"
+label = "QS"
+action = { type = "socket" }

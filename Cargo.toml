@@ -1,0 +1,21 @@
+[package]
+name = "touchbinux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+drm = "0.14"
+evdev = "0.13.2"
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["gif", "png"] }
+nix = { version = "0.31", features = ["event", "time", "signal", "resource", "socket", "fs", "user"] }
+resvg = { version = "0.48", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+
+# Optimise dependencies (image scaling, tiny-skia, resvg) even in debug builds;
+# our own code stays unoptimised for fast rebuilds.
+[profile.dev.package."*"]
+opt-level = 3

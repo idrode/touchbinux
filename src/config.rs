@@ -10,6 +10,8 @@ pub const DEFAULT_PATH: &str = "/etc/touchbinux/config.toml";
 const MAX_TIMEOUT_MS: u64 = 60_000;
 /// Where install.sh copies the icons; also where the battery looks for its own.
 pub const ICON_DIR: &str = "/etc/touchbinux/icons";
+/// The only built-in icon so far: a folder drawn by code (see `widgets::Folder`).
+pub const BUILTIN_FOLDER: &str = "builtin:folder";
 pub const DEFAULT_CLOCK_FORMAT: &str = "%H:%M";
 /// Layer built from `[[buttons]]` when there are no `[[layers]]`.
 const LEGACY_LAYER: &str = "buttons";
@@ -218,6 +220,12 @@ impl ItemConfig {
             let label = self.label.as_deref().unwrap_or("");
             if self.icon.as_deref().is_none_or(str::is_empty) && label.is_empty() {
                 bail!("{what}: a button needs an `icon`, a `label` or both");
+            }
+            if let Some(icon) = self.icon.as_deref()
+                && icon.starts_with("builtin:")
+                && icon != BUILTIN_FOLDER
+            {
+                bail!("{what}: unknown built-in icon {icon:?} (there is {BUILTIN_FOLDER:?})");
             }
         }
         if self.kind == ItemKind::Clock {
@@ -685,6 +693,7 @@ mod tests {
             "type='clock'\nformat='%Q'",
             "type='clock'\nformat=''",
             "type='clock'\naction={type='key',key='KEY_NOPE'}",
+            "type='button'\nid='b'\nicon='builtin:rocket'\naction={type='socket'}",
         ];
         for body in bad {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");

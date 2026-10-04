@@ -217,6 +217,28 @@ impl Canvas {
         }
     }
 
+    /// Straight line with round caps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stroke_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgba) {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y1);
+        if let Some(path) = pb.finish() {
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Round,
+                ..Stroke::default()
+            };
+            self.pixmap.stroke_path(
+                &path,
+                &Self::paint(color),
+                &stroke,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
     /// Draws `svg` scaled to fit (keeping aspect ratio) and centred in a `size`x`size` box.
     pub fn draw_svg(&mut self, svg: &Svg, x: f32, y: f32, size: f32) {
         let s = svg.tree.size();
@@ -327,6 +349,22 @@ impl Image {
     pub fn height(&self) -> u32 {
         self.pixmap.height()
     }
+
+    /// The image's alpha as a coverage mask, to repaint its shape in one colour.
+    pub fn to_mask(&self) -> AlphaMask {
+        AlphaMask {
+            width: self.width() as usize,
+            height: self.height() as usize,
+            data: self
+                .pixmap
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|px| px[3])
+                .collect(),
+        }
+    }
 }
 
 /// 8-bit coverage mask, used to paint a shape in any colour (e.g. tinted icons).
@@ -404,6 +442,14 @@ impl Svg {
         let tree = usvg::Tree::from_data(&data, &usvg::Options::default())
             .with_context(|| format!("parsing SVG {}", path.display()))?;
         Ok(Svg { tree })
+    }
+
+    /// Rasterises the icon once into a `size`x`size` image, so drawing it every frame
+    /// is a plain copy instead of a full SVG render.
+    pub fn to_image(&self, size: u32) -> Result<Image> {
+        let mut tmp = Canvas::new(size, size)?;
+        tmp.draw_svg(self, 0.0, 0.0, size as f32);
+        Image::from_premultiplied(size, size, tmp.data().to_vec())
     }
 
     /// Rasterises the icon once into a `size`x`size` coverage mask (its own colours are

@@ -4,13 +4,19 @@
 
 use crate::{
     anim::Animated,
-    canvas::{Canvas, Font, Image, Rect, Rgba, Svg},
+    canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
+    config::{ItemConfig, ItemKind, LayerConfig},
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
+    layout,
     touch::Phase,
+    widgets::{
+        BatteryIcons, BatteryWidget, Clock, DrawCx, Folder, FolderState, Level, LevelWidget, Live,
+        Widget,
+    },
 };
 use anyhow::Result;
-use std::{rc::Rc, time::Duration};
+use std::{path::Path, rc::Rc, time::Duration};
 
 const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
 const GREEN: Rgba = Rgba(0x20, 0xe0, 0x40, 0xff);
@@ -21,6 +27,8 @@ const PRESSED_OVERLAY: Rgba = Rgba(0xff, 0xff, 0xff, 0x50);
 const ACCENT: Rgba = Rgba(0x40, 0xa0, 0xff, 0xff);
 const FOCUSED_GREY: Rgba = Rgba(0x5a, 0x5a, 0x60, 0xff);
 const DIM_TEXT: Rgba = Rgba(0xb0, 0xb0, 0xb0, 0xff);
+/// `builtin:folder` without a `color`.
+const FOLDER_YELLOW: Rgba = Rgba(0xf2, 0xb7, 0x3f, 0xff);
 
 /// Orientation check: red square top-left, green square bottom-right, a frame
 /// around the edges, and "TOP LEFT ->" followed by an arrow pointing right.
@@ -217,6 +225,8 @@ pub struct Scene {
     /// Everything that never changes, rendered once.
     background: Canvas,
     animated: Vec<(Rect, Box<dyn Animated>)>,
+    /// Live widgets, repainted every frame over their (static) button background.
+    widgets: Vec<(Rect, Box<dyn Widget>)>,
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
     texts: Vec<TextItem>,
@@ -239,6 +249,7 @@ impl Scene {
         Scene {
             background,
             animated: Vec::new(),
+            widgets: Vec::new(),
             buttons: Vec::new(),
             sliders: Vec::new(),
             texts: Vec::new(),
@@ -252,7 +263,7 @@ impl Scene {
         self.show_finger = true;
     }
 
-    pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font) -> Result<()> {
+    pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, live: &Live) -> Result<()> {
         canvas.copy_from(&self.background)?;
         if let Capture::Button(i, true) = self.capture {
             let r = self.buttons[i].rect;
@@ -260,6 +271,10 @@ impl Scene {
         }
         for (rect, item) in &self.animated {
             item.draw(canvas, *rect, t);
+        }
+        let cx = DrawCx { font, live };
+        for (rect, w) in &self.widgets {
+            w.draw(canvas, *rect, t, &cx);
         }
         for s in &self.sliders {
             s.draw(canvas, font);
@@ -277,9 +292,16 @@ impl Scene {
 
     /// Earliest time any item changes, or `None` if the scene is static.
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
-        self.animated
+        let animated = self.animated.iter().map(|(_, a)| a.next_change(t));
+        let widgets = self.widgets.iter().map(|(_, w)| w.next_change(t));
+        animated.chain(widgets).flatten().min()
+    }
+
+    /// Shortest wall-clock period any widget follows (see `Widget::wall_period`).
+    pub fn wall_period(&self) -> Option<u64> {
+        self.widgets
             .iter()
-            .filter_map(|(_, item)| item.next_change(t))
+            .filter_map(|(_, w)| w.wall_period())
             .min()
     }
 
@@ -408,12 +430,12 @@ impl Scene {
             bg.fill_rounded_rect(x + RADIUS, y + h - 4.0, w - 2.0 * RADIUS, 3.0, 1.5, accent);
         }
 
-        let icon_h = icon_size(bg.height()) as f32;
+        let icon_h = icon_side(h);
         let px = h * 0.42;
         let cy = y + h / 2.0;
         let baseline = font.centered_baseline(cy, px);
         let icon_w = match &spec.icon {
-            Icon::Svg(_) | Icon::Raster(_) | Icon::Letter(_) => icon_h,
+            Icon::Svg(_) | Icon::Raster(_) | Icon::Letter(_) | Icon::Tinted(..) => icon_h,
             Icon::Animated { width, .. } => *width,
             Icon::None => 0.0,
         };
@@ -440,6 +462,11 @@ impl Scene {
                 let lw = font.measure(&s, lpx);
                 let lb = font.centered_baseline(cy, lpx);
                 bg.draw_text(font, &s, gx + (icon_h - lw) / 2.0, lb, lpx, Rgba::WHITE);
+            }
+            Icon::Tinted(mask, color) => {
+                let ix = gx + (icon_h - mask.width() as f32) / 2.0;
+                let iy = icon_y + (icon_h - mask.height() as f32) / 2.0;
+                bg.draw_mask(&mask, ix.round() as i32, iy.round() as i32, color);
             }
             Icon::Animated { item, .. } => self
                 .animated
@@ -475,6 +502,19 @@ impl Scene {
         }
     }
 
+    /// A live widget: its button background goes to the static layer, the widget is
+    /// painted over it every frame. Taps on it are reported as `id`.
+    pub fn add_widget(&mut self, rect: Rect, id: &str, widget: Box<dyn Widget>) {
+        let Rect { x, y, w, h } = rect;
+        self.background
+            .fill_rounded_rect(x, y, w, h, RADIUS, BUTTON_GREY);
+        self.widgets.push((rect, widget));
+        self.buttons.push(Button {
+            id: id.into(),
+            rect,
+        });
+    }
+
     pub fn add_slider(&mut self, area: Rect, id: &str, label: &str, value: u8) {
         self.sliders.push(Slider {
             id: id.into(),
@@ -503,6 +543,8 @@ pub enum Icon {
     Raster(Rc<Image>),
     /// Generic fallback: a tile with this letter.
     Letter(char),
+    /// An icon's shape painted in one colour (config `color`).
+    Tinted(AlphaMask, Rgba),
     /// `width` is the space reserved for it; the height is always `icon_size`.
     Animated {
         item: Box<dyn Animated>,
@@ -565,7 +607,12 @@ const ICON_LABEL_GAP: f32 = 10.0;
 /// Icon height (px) used by buttons on a canvas `canvas_h` px tall. Animated and
 /// app icons should be rasterised at this size.
 pub fn icon_size(canvas_h: u32) -> u32 {
-    (canvas_h as f32 - 2.0 * MARGIN - 2.0 * PADDING).max(1.0) as u32
+    icon_side(canvas_h as f32 - 2.0 * MARGIN) as u32
+}
+
+/// Side of the square icon drawn in a button `button_h` px tall.
+pub fn icon_side(button_h: f32) -> f32 {
+    (button_h - 2.0 * PADDING).max(1.0).floor()
 }
 
 /// The usable row: the whole canvas minus `MARGIN` on every side.
@@ -745,4 +792,103 @@ pub fn windows(
             .draw_text(font, &s, x + 4.0, baseline, px, DIM_TEXT);
     }
     Ok(scene)
+}
+
+/// A layer from the config: its items laid out left to right (see `layout`).
+pub fn bar(
+    w: u32,
+    h: u32,
+    font: &Font,
+    layer: &LayerConfig,
+    icons: &mut IconResolver,
+) -> Result<Scene> {
+    let mut scene = Scene::new(w, h)?;
+    let m = layer.margin;
+    let area = Rect::new(
+        m,
+        m,
+        (w as f32 - 2.0 * m).max(0.0),
+        (h as f32 - 2.0 * m).max(1.0),
+    );
+    let sizes: Vec<_> = layer.items.iter().map(ItemConfig::size).collect();
+    let slots = layout::distribute(area.x, area.w, layer.gap, &sizes);
+    let size = icon_side(area.h);
+    for (item, (x, iw)) in layer.items.iter().zip(slots) {
+        let Some(id) = item.id() else {
+            continue; // spacer
+        };
+        if iw < 1.0 {
+            eprintln!("bar: layer {:?}: no room left for {id:?}", layer.id);
+            continue;
+        }
+        if x + iw > area.x + area.w + 0.5 {
+            eprintln!(
+                "bar: layer {:?}: {id:?} doesn't fit in {} px, hidden",
+                layer.id, area.w
+            );
+            continue;
+        }
+        let rect = Rect { x, w: iw, ..area };
+        match item.kind {
+            ItemKind::Button => {
+                let icon = button_icon(item, icons, size);
+                let label = item.label.as_deref().unwrap_or("");
+                scene.add_button(rect, font, ButtonSpec::new(id, icon, label));
+            }
+            ItemKind::Clock => {
+                scene.add_widget(rect, id, Box::new(Clock::new(item.clock_format())));
+            }
+            ItemKind::Battery => {
+                let dir = Path::new(item.battery_icon_dir());
+                let icons = BatteryIcons::load(dir, size as u32)
+                    .inspect_err(|e| eprintln!("bar: battery icons: {e:#}; drawing my own"))
+                    .ok();
+                scene.add_widget(rect, id, Box::new(BatteryWidget { icons }));
+            }
+            ItemKind::Volume | ItemKind::Brightness => {
+                let level = if item.kind == ItemKind::Volume {
+                    Level::Volume
+                } else {
+                    Level::Brightness
+                };
+                scene.add_widget(rect, id, Box::new(LevelWidget { level }));
+            }
+            ItemKind::Spacer => {}
+        }
+    }
+    Ok(scene)
+}
+
+/// A button's icon: built in, or from a file/theme, optionally painted in `color`.
+fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
+    let Some(name) = item.icon.as_deref().filter(|n| !n.is_empty()) else {
+        return Icon::None;
+    };
+    let color = item.color.map(|c| c.0);
+    if name == crate::config::BUILTIN_FOLDER {
+        let folder = Folder {
+            color: color.unwrap_or(FOLDER_YELLOW),
+            state: FolderState::default(),
+        };
+        return Icon::Animated {
+            item: Box::new(folder),
+            width: size,
+        };
+    }
+    let found = icons.named(name);
+    let Some(color) = color else {
+        return found.into();
+    };
+    let mask = match &found {
+        Some(AppIcon::Svg(svg)) => svg.to_mask(size as u32),
+        Some(AppIcon::Raster(img)) => Ok(img.to_mask()),
+        None => return found.into(),
+    };
+    match mask {
+        Ok(m) => Icon::Tinted(m, color),
+        Err(e) => {
+            eprintln!("bar: tinting {name:?}: {e:#}");
+            found.into()
+        }
+    }
 }

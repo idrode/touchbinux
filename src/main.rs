@@ -1,4 +1,5 @@
 mod anim;
+mod battery;
 mod canvas;
 mod config;
 mod display;
@@ -16,9 +17,11 @@ mod scenes;
 mod stats;
 mod touch;
 mod user;
+mod widgets;
 
 use anim::{Pulse, Spinner};
 use anyhow::{Result, anyhow};
+use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
 use config::{Action, Config};
 use display::DrmBackend;
@@ -50,10 +53,11 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     str::FromStr,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use touch::{RawTouch, TouchDevice};
 use user::SessionUser;
+use widgets::Live;
 
 /// Frame cap for animations and touch-driven redraws (~30 fps).
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
@@ -92,7 +96,7 @@ const DEMO_BUTTONS: &[(&str, &str)] = &[
 /// The real size always comes from the DRM mode.
 const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
-const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons] \
+const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] [--png <file>]";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
@@ -106,6 +110,8 @@ const TOKEN_VOLUME_MONITOR: u64 = 6;
 const TOKEN_BACKLIGHT: u64 = 7;
 const TOKEN_HYPR_WATCH: u64 = 8;
 const TOKEN_HYPR_MOUNTS: u64 = 9;
+const TOKEN_CLOCK: u64 = 10;
+const TOKEN_UEVENT: u64 = 11;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -125,7 +131,9 @@ fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "pattern" | "demo" | "anim" | "touch" | "windows" | "buttons" => args.scene = arg,
+            "pattern" | "demo" | "anim" | "touch" | "windows" | "buttons" | "bar" => {
+                args.scene = arg
+            }
             "--gif" => args.gif = Some(it.next().ok_or(anyhow!(USAGE))?.into()),
             "--png" => args.png = Some(it.next().ok_or(anyhow!(USAGE))?.into()),
             "--config" => args.config = Some(it.next().ok_or(anyhow!(USAGE))?.into()),
@@ -171,11 +179,40 @@ struct App {
     runner: Runner,
     vol: Volume,
     backlight: Option<Backlight>,
+    battery: Option<Battery>,
+    battery_status: Option<BatteryStatus>,
     keyboard: Option<VirtualKeyboard>,
     scene: Scene,
 }
 
 impl App {
+    /// What live widgets show, as of now.
+    fn live(&self) -> Live {
+        Live {
+            volume: self.volume,
+            brightness: self.brightness,
+            battery: self.battery_status,
+            now: chrono::Local::now(),
+        }
+    }
+
+    /// Re-reads the battery; returns whether what it shows changed.
+    fn refresh_battery(&mut self) -> bool {
+        let Some(b) = &self.battery else {
+            return false;
+        };
+        let status = b.read().inspect_err(|e| eprintln!("battery: {e:#}")).ok();
+        let changed = status != self.battery_status;
+        self.battery_status = status;
+        changed
+    }
+
+    /// Only the windows scene shows Hyprland's state; the others needn't be rebuilt
+    /// when it changes.
+    fn scene_follows_hypr(&self) -> bool {
+        self.args.scene == "windows"
+    }
+
     fn label(&self) -> String {
         match self.store.get("label") {
             Some(Value::String(s)) => s.clone(),
@@ -204,6 +241,16 @@ impl App {
         let font = &self.font;
         match self.args.scene.as_str() {
             "windows" => scenes::windows(w, h, font, &self.hypr.state, &mut self.icons, &shared),
+            "bar" => match self.config.default_layer() {
+                Some(layer) => scenes::bar(w, h, font, &layer, &mut self.icons),
+                None => {
+                    let mut scene = Scene::new(w, h)?;
+                    let r = Rect { w: 420.0, ..area };
+                    let spec = ButtonSpec::new("none", Icon::None, "No layers in config");
+                    scene.add_button(r, font, spec);
+                    Ok(scene)
+                }
+            },
             "buttons" => {
                 let specs = self
                     .config
@@ -332,8 +379,10 @@ impl App {
         match key.as_str() {
             "volume" => {
                 let v = value.as_f64().ok_or("volume must be a number")?;
-                self.volume = v.clamp(0.0, 100.0).round() as u8;
-                return Ok(self.scene.set_slider("vol", self.volume));
+                let v = v.clamp(0.0, 100.0).round() as u8;
+                let changed = v != self.volume;
+                self.volume = v;
+                return Ok(self.scene.set_slider("vol", v) || changed);
             }
             "label" if !value.is_string() => return Err("label must be a string".into()),
             _ => {}
@@ -496,7 +545,8 @@ fn main() -> Result<()> {
         };
         let app = new_app(parts, (w, h), hypr, home.as_deref())?;
         let mut canvas = Canvas::new(w, h)?;
-        app.scene.draw(&mut canvas, Duration::ZERO, &app.font)?;
+        app.scene
+            .draw(&mut canvas, Duration::ZERO, &app.font, &app.live())?;
         canvas.save_png(&path)?;
         eprintln!("wrote {}", path.display());
         return Ok(());
@@ -598,9 +648,14 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         runner,
         vol: Volume::new(),
         backlight: p.backlight,
+        battery: Battery::find()
+            .inspect_err(|e| eprintln!("battery: {e:#}"))
+            .ok(),
+        battery_status: None,
         keyboard: p.keyboard,
         scene: Scene::new(w, h)?,
     };
+    app.refresh_battery();
     app.scene = app.build_scene()?;
     Ok(app)
 }
@@ -615,10 +670,31 @@ fn arm_once(timer: &TimerFd, wait: Duration) -> Result<()> {
     Ok(())
 }
 
+/// Arms the real-time `clock` for the next multiple of `period` seconds of wall time
+/// (whole minutes for 60), or disarms it. Absolute and cancelled on clock changes, so
+/// it fires on time after a suspend or an NTP jump instead of drifting.
+fn arm_clock(clock: &TimerFd, period: Option<u64>) -> Result<()> {
+    let Some(period) = period else {
+        clock.unset()?;
+        return Ok(());
+    };
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let next = (now / period + 1) * period;
+    clock.set(
+        Expiration::OneShot(TimeSpec::new(next as i64, 0)),
+        TimerSetTimeFlags::TFD_TIMER_ABSTIME | TimerSetTimeFlags::TFD_TIMER_CANCEL_ON_SET,
+    )?;
+    Ok(())
+}
+
 /// Drains a timerfd's expiration count.
 fn drain_timer(timer: &TimerFd) -> Result<()> {
     match timer.wait() {
-        Ok(()) | Err(Errno::EAGAIN) => Ok(()),
+        // ECANCELED: a real-time clock was set; the caller re-arms it.
+        Ok(()) | Err(Errno::EAGAIN | Errno::ECANCELED) => Ok(()),
         Err(e) => Err(e.into()),
     }
 }
@@ -699,6 +775,25 @@ fn run(
         ClockId::CLOCK_MONOTONIC,
         TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
     )?;
+    // Wall-clock tick for clock and battery widgets, at most once a minute
+    // unless the clock format shows seconds.
+    let clock = TimerFd::new(
+        ClockId::CLOCK_REALTIME,
+        TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
+    )?;
+    epoll.add(&clock, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_CLOCK))?;
+    let mut clock_period = app.scene.wall_period();
+    arm_clock(&clock, clock_period)?;
+    // Charger plugged/unplugged and other power supply changes, as they happen.
+    let uevents = match &app.battery {
+        Some(_) => Uevents::open()
+            .inspect_err(|e| eprintln!("battery: {e:#}; updating once a minute only"))
+            .ok(),
+        None => None,
+    };
+    if let Some(u) = &uevents {
+        epoll.add(u.fd(), EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_UEVENT))?;
+    }
     epoll.add(sigfd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_SIGNAL))?;
     epoll.add(&timer, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_TIMER))?;
     epoll.add(
@@ -754,9 +849,15 @@ fn run(
         // first change after idling draws at once, a fast drag draws at most every FRAME.
         let earliest = last_frame.map_or(start, |l| l + FRAME);
         let frame_due = if dirty { Some(earliest) } else { next_anim };
+        // The scene may have been rebuilt (config reload) with other widgets.
+        if app.scene.wall_period() != clock_period {
+            clock_period = app.scene.wall_period();
+            arm_clock(&clock, clock_period)?;
+        }
+
         if frame_due.is_some_and(|d| d <= now) {
             let t = now - start;
-            app.scene.draw(&mut canvas, t, &app.font)?;
+            app.scene.draw(&mut canvas, t, &app.font, &app.live())?;
             let drawn = Instant::now();
             drm.present(&canvas)?;
             stats.record(drawn - now, drawn.elapsed());
@@ -809,6 +910,7 @@ fn run(
                                         App::on_hyprctl_finished(&f);
                                     }
                                     if let Some(v) = app.vol.on_finished(&f, Instant::now()) {
+                                        dirty |= v != app.volume;
                                         app.volume = v;
                                         dirty |= app.scene.set_slider("vol", v);
                                     }
@@ -830,6 +932,17 @@ fn run(
                     }
                 }
                 TOKEN_TIMER => drain_timer(&timer)?,
+                TOKEN_CLOCK => {
+                    drain_timer(&clock)?;
+                    arm_clock(&clock, clock_period)?;
+                    app.refresh_battery();
+                    dirty = true;
+                }
+                TOKEN_UEVENT => {
+                    if uevents.as_ref().is_some_and(Uevents::drain) {
+                        dirty |= app.refresh_battery();
+                    }
+                }
                 TOKEN_TOUCH => {
                     touches.clear();
                     ui_events.clear();
@@ -868,8 +981,10 @@ fn run(
                             st.workspaces.keys().collect::<Vec<_>>(),
                             st.windows.len()
                         );
-                        app.rebuild()?;
-                        dirty = true;
+                        if app.scene_follows_hypr() {
+                            app.rebuild()?;
+                            dirty = true;
+                        }
                     }
                     ReadOutcome::Unchanged => {}
                     ReadOutcome::Disconnected => {
@@ -911,6 +1026,7 @@ fn run(
                     if let Some(b) = &mut app.backlight {
                         match b.read_percent() {
                             Ok(v) => {
+                                dirty |= app.brightness != Some(v);
                                 app.brightness = Some(v);
                                 dirty |= app.scene.set_slider("bright", v);
                             }

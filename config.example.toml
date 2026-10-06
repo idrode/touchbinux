@@ -29,6 +29,13 @@ gap = 12
 #                     (so no width/stretch on it); none: no background, content only
 #   item_radius     = 8 (default, px) | "full" (a pill: half the height)
 #   item_background = "#3a3a3c" (default) | "#rrggbbaa" | "transparent"
+#   item_size       = diameter of circles, px (default and maximum: the row's
+#                     height, 52 with this margin; only for shape = "circle")
+# While pressed (not for volume/brightness, which unfold instead):
+#   item_pressed_background = "#rrggbb" | "#rrggbbaa": replaces the background,
+#                     under the icon and label (default: a translucent white veil
+#                     over the whole item)
+#   item_pressed_scale      = 0.8 to 1.2: draw it that much smaller/bigger (1.0)
 # Pressing still shows a highlight in the item's outline without a background.
 # item_radius = "full"
 
@@ -97,6 +104,18 @@ format = "%H:%M"
 # radius = "full"
 # background = "#c0392b"
 # action = { type = "key", key = "KEY_ESC" }
+#
+# A smaller circle (centred in the row) that turns blue and shrinks a bit when
+# pressed:
+# [[layers.items]]
+# type = "button"
+# id = "prev-small"
+# icon = "/etc/touchbinux/icons/fast_rewind.svg"
+# shape = "circle"
+# size = 40
+# pressed_background = "#1793d1"
+# pressed_scale = 0.9
+# action = { type = "key", key = "KEY_PREVIOUSSONG" }
 #
 # Just the icon, no background:
 # [[layers.items]]

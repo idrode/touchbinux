@@ -342,6 +342,9 @@ default_layer = "main"
 | `item_shape` | `"rounded"` | ver [Forma y fondo](#forma-y-fondo) | forma por defecto de sus elementos |
 | `item_radius` | `8` | | radio por defecto |
 | `item_background` | `"#3a3a3c"` | | fondo por defecto |
+| `item_size` | alto de la fila | | diámetro por defecto de sus círculos |
+| `item_pressed_background` | velo blanco translúcido | | fondo al pulsar |
+| `item_pressed_scale` | `1.0` | 0.8-1.2 | escala al pulsar |
 | `items` | `[]` | — | elementos, de izquierda a derecha (`[[layers.items]]`) |
 
 ```toml
@@ -392,15 +395,21 @@ stretch = 2              # el doble que un spacer
 
 ### Forma y fondo
 
-Todos los tipos menos `spacer` aceptan `shape`, `radius` y `background`. Lo que un
+Todos los tipos menos `spacer` aceptan `shape`, `radius`, `background` y `size`;
+todos menos `spacer`, `volume` y `brightness` (que se despliegan en vez de
+resaltarse) aceptan también `pressed_background` y `pressed_scale`. Lo que un
 elemento no indique lo toma de su capa (`item_shape`, `item_radius`,
-`item_background`) y, si la capa tampoco lo indica, del valor por defecto.
+`item_background`, `item_size`, `item_pressed_background`, `item_pressed_scale`)
+y, si la capa tampoco lo indica, del valor por defecto.
 
 | Campo | Valores | Por defecto |
 |---|---|---|
 | `shape` | `"rounded"`: rectángulo con esquinas redondeadas; `"circle"`: círculo; `"none"`: sin fondo, solo el contenido | `"rounded"` |
 | `radius` | número de px ≥ 0, o `"full"` (píldora: la mitad del alto). Si es mayor que medio alto, se queda en medio alto | `8` |
 | `background` | `"#rrggbb"`, `"#rrggbbaa"` o `"transparent"` | `"#3a3a3c"` |
+| `size` | solo con `shape = "circle"`: diámetro en px, > 0 y como mucho el alto de la fila. Centrado verticalmente | el alto de la fila |
+| `pressed_background` | `"#rrggbb"` o `"#rrggbbaa"`: **sustituye al fondo** mientras se pulsa, con el icono y el texto encima | un velo blanco translúcido **por encima** de todo el elemento |
+| `pressed_scale` | de `0.8` a `1.2`: el elemento entero se dibuja así de pequeño o grande mientras se pulsa, sobre su centro (sin animación) | `1.0` (sin efecto) |
 
 - **`circle`** hace el elemento **cuadrado**: tan ancho como alta es la fila (52 px
   con la barra del M2 y `margin = 4`). Por eso `width` o `stretch` en un elemento
@@ -408,6 +417,15 @@ elemento no indique lo toma de su capa (`item_shape`, `item_radius`,
   se usa. En círculos plegados, `volume` y `brightness` muestran solo el icono; el
   número aparece al desplegarlos. Un `clock` o un `text` no caben en 52 px: úsalos
   con otra forma.
+- **`size`** fuera de un círculo es un error (para otras formas, `width`). Un
+  `size` mayor que la fila se detecta al montar la barra, donde se conoce su alto
+  real; el mensaje lo dice, por ejemplo `size 60 px is larger than the row, which
+  is 52 px high (bar 60 px minus 2 x margin 4)`. Al recargar con ese error también
+  se conserva la configuración anterior; al arrancar, el daemon sale con error.
+  Los iconos se encogen con el círculo.
+- **`pressed_scale` > 1** invade el hueco con los vecinos (con `gap = 12` y 1.2, un
+  botón de 80 px crece 8 px por lado) y se recorta por arriba y por abajo en el
+  borde de la barra. Al encoger, alrededor se ve negro.
 - **`none`** o **`transparent`**: no se dibuja fondo (con `none`, aunque haya
   `background`). Al pulsar se ve igualmente un resaltado con el contorno del
   elemento (redondeado según `radius`, o circular).
@@ -439,6 +457,16 @@ action = { type = "key", key = "KEY_NEXTSONG" }
 [[layers.items]]
 type = "clock"
 shape = "none"                  # la hora como texto suelto
+
+[[layers.items]]
+type = "button"
+id = "prev"
+icon = "/etc/touchbinux/icons/fast_rewind.svg"
+shape = "circle"
+size = 40                       # círculo de 40 px, centrado
+pressed_background = "#1793d1"  # azul al pulsar, con el icono encima
+pressed_scale = 0.9             # y un poco más pequeño
+action = { type = "key", key = "KEY_PREVIOUSSONG" }
 ```
 
 ### `id`

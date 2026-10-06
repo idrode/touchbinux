@@ -299,13 +299,16 @@ impl Canvas {
         px: f32,
         color: Rgba,
     ) -> f32 {
+        let Some(font) = &font.inner else {
+            return 0.0;
+        };
         let mut pen = x;
         let mut prev = None;
         for c in text.chars() {
             if let Some(p) = prev {
-                pen += font.inner.horizontal_kern(p, c, px).unwrap_or(0.0);
+                pen += font.horizontal_kern(p, c, px).unwrap_or(0.0);
             }
-            let (m, coverage) = font.inner.rasterize(c, px);
+            let (m, coverage) = font.rasterize(c, px);
             let gx = (pen + m.xmin as f32).round() as i32;
             // fontdue's ymin is the bitmap's bottom edge relative to the baseline (y up).
             let gy = (baseline_y - (m.height as i32 + m.ymin) as f32).round() as i32;
@@ -384,16 +387,21 @@ impl AlphaMask {
     }
 }
 
+/// A font for text, or none at all: without one the daemon still runs, it just draws
+/// no text (icons, sliders and widgets' graphics are unaffected).
 pub struct Font {
-    inner: fontdue::Font,
+    inner: Option<fontdue::Font>,
 }
+
+/// Searched (recursively) when none of the preferred fonts is there.
+const FONT_DIRS: &[&str] = &["/usr/share/fonts", "/usr/local/share/fonts"];
 
 impl Font {
     pub fn load(path: &FsPath) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("reading font {}", path.display()))?;
         let inner = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
             .map_err(|e| anyhow!("parsing font {}: {e}", path.display()))?;
-        Ok(Font { inner })
+        Ok(Font { inner: Some(inner) })
     }
 
     /// Loads the first font in `paths` that exists and parses.
@@ -408,15 +416,50 @@ impl Font {
         Err(anyhow!("no usable font: [{}]", errors.join("; ")))
     }
 
-    /// Width of `text` at `px`, including kerning.
+    /// The first usable font in `preferred`; failing that, any .ttf/.otf under the
+    /// system font directories (sans and bold first); failing that, no font. Never
+    /// fails: what was picked, or that nothing was, goes to the log.
+    pub fn find(preferred: &[&str]) -> Font {
+        if let Ok(f) = Font::load_first(preferred) {
+            return f;
+        }
+        eprintln!(
+            "font: none of {preferred:?} found; looking in {}",
+            FONT_DIRS.join(", ")
+        );
+        let mut files = Vec::new();
+        for dir in FONT_DIRS {
+            collect_font_files(FsPath::new(dir), 0, &mut files);
+        }
+        files.sort_by_key(|p| (std::cmp::Reverse(font_score(p)), p.clone()));
+        for path in &files {
+            match Font::load(path) {
+                Ok(f) => {
+                    eprintln!("font: using {}", path.display());
+                    return f;
+                }
+                Err(e) => eprintln!("font: {e:#}"),
+            }
+        }
+        eprintln!(
+            "font: no usable .ttf/.otf font found; text will NOT be drawn \
+             (install one, e.g. noto-fonts or ttf-dejavu)"
+        );
+        Font { inner: None }
+    }
+
+    /// Width of `text` at `px`, including kerning (0 without a font).
     pub fn measure(&self, text: &str, px: f32) -> f32 {
+        let Some(font) = &self.inner else {
+            return 0.0;
+        };
         let mut w = 0.0;
         let mut prev = None;
         for c in text.chars() {
             if let Some(p) = prev {
-                w += self.inner.horizontal_kern(p, c, px).unwrap_or(0.0);
+                w += font.horizontal_kern(p, c, px).unwrap_or(0.0);
             }
-            w += self.inner.metrics(c, px).advance_width;
+            w += font.metrics(c, px).advance_width;
             prev = Some(c);
         }
         w
@@ -424,12 +467,58 @@ impl Font {
 
     /// Baseline that vertically centres a line of text on `center_y`.
     pub fn centered_baseline(&self, center_y: f32, px: f32) -> f32 {
-        match self.inner.horizontal_line_metrics(px) {
+        match self.inner.as_ref().and_then(|f| f.horizontal_line_metrics(px)) {
             // descent is negative (below baseline).
             Some(lm) => center_y + (lm.ascent + lm.descent) / 2.0,
             None => center_y + px * 0.35,
         }
     }
+}
+
+/// .ttf/.otf files under `dir`, a few levels deep (font trees are shallow).
+fn collect_font_files(dir: &FsPath, depth: u32, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            if depth < 4 {
+                collect_font_files(&path, depth + 1, out);
+            }
+        } else if path
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("ttf") || x.eq_ignore_ascii_case("otf"))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Prefers a plain bold sans, like the fonts in the preferred list.
+fn font_score(path: &FsPath) -> i32 {
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let has = |w: &str| name.contains(w);
+    let mut score = 0;
+    if has("sans") {
+        score += 4;
+    }
+    if has("bold") {
+        score += 2;
+    } else if has("regular") {
+        score += 1;
+    }
+    for odd in ["mono", "serif", "italic", "oblique", "condensed", "light", "thin", "emoji"] {
+        if has(odd) && !(odd == "serif" && has("sans")) {
+            score -= 3;
+        }
+    }
+    score
 }
 
 pub struct Svg {
@@ -469,5 +558,32 @@ impl Svg {
             height: size as usize,
             data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_a_font_text_is_skipped_not_fatal() {
+        let font = Font { inner: None };
+        let mut c = Canvas::new(40, 20).unwrap();
+        assert_eq!(font.measure("abc", 12.0), 0.0);
+        assert_eq!(c.draw_text(&font, "abc", 0.0, 10.0, 12.0, Rgba::WHITE), 0.0);
+        assert!(font.centered_baseline(10.0, 10.0) > 10.0);
+    }
+
+    #[test]
+    fn fallback_prefers_a_plain_bold_sans() {
+        let mut names = [
+            "NotoSansMono-Bold.ttf",
+            "NotoSerif-Regular.ttf",
+            "NotoSans-Italic.ttf",
+            "NotoSans-Regular.ttf",
+            "NotoSans-Bold.ttf",
+        ];
+        names.sort_by_key(|n| std::cmp::Reverse(font_score(FsPath::new(n))));
+        assert_eq!(names[..2], ["NotoSans-Bold.ttf", "NotoSans-Regular.ttf"]);
     }
 }

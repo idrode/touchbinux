@@ -77,9 +77,11 @@ const SOCKET_PATH: &str = "/run/touchbinux.sock";
 const MAX_KEYS: usize = 256;
 const MAX_KEY_LEN: usize = 64;
 
-/// tiny-dfr's config uses FontTemplate ":bold"; these are tried in order.
+/// tiny-dfr's config uses FontTemplate ":bold"; these are tried in order, then any
+/// font on the system, then none (see `Font::find`).
 const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/noto/NotoSans-Regular.ttf",
     "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -529,7 +531,7 @@ impl App {
 
 fn main() -> Result<()> {
     let args = parse_args()?;
-    let font = Font::load_first(FONT_CANDIDATES)?;
+    let font = Font::find(FONT_CANDIDATES);
     let (config_path, config) = initial_config(&args)?;
     let session = user::resolve(config.run_as.as_deref(), config_path.as_deref());
     let home = session.as_ref().map(|u| u.home.clone());

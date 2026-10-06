@@ -1,4 +1,6 @@
-//! DRM output for the Touch Bar. Adapted from tiny-dfr's `display.rs`.
+//! DRM output for the Touch Bar. Adapted from tiny-dfr's `display.rs`
+//! (https://github.com/AsahiLinux/tiny-dfr, MIT, Copyright (c) 2023
+//! WhatAmISupposedToPutHere; see LICENSE).
 //!
 //! The Touch Bar panel is exposed by the kernel in portrait orientation
 //! (e.g. 60 px wide x ~2000 px tall), so the mode size is (short, long).

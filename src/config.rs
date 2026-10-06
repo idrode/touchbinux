@@ -72,6 +72,8 @@ pub struct LayerConfig {
     #[serde(default)]
     pub item_background: Option<Background>,
     #[serde(default)]
+    pub item_pressed_background: Option<Color>,
+    #[serde(default)]
     pub items: Vec<ItemConfig>,
 }
 
@@ -168,6 +170,9 @@ pub struct ItemConfig {
     pub radius: Option<Radius>,
     #[serde(default)]
     pub background: Option<Background>,
+    /// Highlight colour while pressed (items that have one: not volume/brightness).
+    #[serde(default)]
+    pub pressed_background: Option<Color>,
     /// text: the socket key whose value it shows (`{"type":"set","key":...}`).
     #[serde(default)]
     pub key: Option<String>,
@@ -186,7 +191,9 @@ impl<'de> Deserialize<'de> for Color {
         let s = String::deserialize(d)?;
         parse_color(&s)
             .map(Color)
-            .ok_or_else(|| serde::de::Error::custom(format!("bad colour {s:?}, want \"#rrggbb\"")))
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!("bad colour {s:?}, want \"#rrggbb\" or \"#rrggbbaa\""))
+            })
     }
 }
 
@@ -253,7 +260,9 @@ impl ItemConfig {
         // spacers, shape/radius/background.
         let frame: &[&str] = match self.kind {
             ItemKind::Spacer => &[],
-            _ => &["shape", "radius", "background"],
+            // They unfold instead of showing a pressed highlight.
+            ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background"],
+            _ => &["shape", "radius", "background", "pressed_background"],
         };
         let allowed: &[&str] = match self.kind {
             ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
@@ -288,6 +297,7 @@ impl ItemConfig {
             ("shape", self.shape.is_some()),
             ("radius", self.radius.is_some()),
             ("background", self.background.is_some()),
+            ("pressed_background", self.pressed_background.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -413,6 +423,10 @@ impl LayerConfig {
                 Some(Background::Transparent) => None,
                 None => d.background,
             },
+            pressed: item
+                .pressed_background
+                .or(self.item_pressed_background)
+                .map_or(d.pressed, |c| c.0),
         }
     }
 }
@@ -632,6 +646,7 @@ impl Config {
                 shape: None,
                 radius: None,
                 background: None,
+                pressed_background: None,
                 gif: None,
             })
             .collect();
@@ -642,6 +657,7 @@ impl Config {
             item_shape: None,
             item_radius: None,
             item_background: None,
+            item_pressed_background: None,
             items,
         }))
     }
@@ -1030,6 +1046,35 @@ mod tests {
         // Nothing set anywhere: the built-in defaults.
         assert_eq!(f(plain, 0).shape, Shape::None);
         assert_eq!(f(plain, 0).radius, Radius::Px(DEFAULT_RADIUS));
+    }
+
+    #[test]
+    fn pressed_backgrounds() {
+        let c = parse(
+            "[[layers]]\nid='m'\nitem_pressed_background='#00ff0080'\n\
+             [[layers.items]]\ntype='clock'\n\
+             [[layers.items]]\ntype='battery'\npressed_background='#ff0000'\n\
+             [[layers.items]]\ntype='volume'",
+        )
+        .unwrap();
+        let l = &c.layers[0];
+        assert_eq!(l.frame_for(&l.items[0]).pressed, Rgba(0, 0xff, 0, 0x80));
+        assert_eq!(l.frame_for(&l.items[1]).pressed, Rgba(0xff, 0, 0, 0xff));
+        let plain = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'").unwrap();
+        let p = &plain.layers[0];
+        assert_eq!(p.frame_for(&p.items[0]).pressed, crate::frame::DEFAULT_PRESSED);
+        let item = |layer: &str, body: &str| {
+            format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{body}")
+        };
+        for (layer, body) in [
+            ("", "type='clock'\npressed_background='transparent'"),
+            ("", "type='clock'\npressed_background='#12'"),
+            ("", "type='volume'\npressed_background='#ffffff'"),
+            ("", "type='spacer'\npressed_background='#ffffff'"),
+            ("item_pressed_background='white'", "type='clock'"),
+        ] {
+            assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
+        }
     }
 
     #[test]

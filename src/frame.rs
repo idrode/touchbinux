@@ -8,6 +8,8 @@ use serde::Deserialize;
 pub const DEFAULT_RADIUS: f32 = 8.0;
 /// Background when nothing is configured.
 pub const DEFAULT_BACKGROUND: Rgba = Rgba(0x3a, 0x3a, 0x3c, 0xff);
+/// Pressed highlight when nothing is configured: translucent white over the item.
+pub const DEFAULT_PRESSED: Rgba = Rgba(0xff, 0xff, 0xff, 0x50);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -80,6 +82,8 @@ pub struct Frame {
     pub radius: Radius,
     /// `None`: nothing drawn behind the content.
     pub background: Option<Rgba>,
+    /// Painted over the item, in its outline, while a finger is on it.
+    pub pressed: Rgba,
 }
 
 impl Default for Frame {
@@ -88,6 +92,7 @@ impl Default for Frame {
             shape: Shape::Rounded,
             radius: Radius::Px(DEFAULT_RADIUS),
             background: Some(DEFAULT_BACKGROUND),
+            pressed: DEFAULT_PRESSED,
         }
     }
 }
@@ -121,6 +126,11 @@ impl Frame {
         if let (true, Some(color)) = (self.has_background(), self.background) {
             self.fill(canvas, r, color);
         }
+    }
+
+    /// The pressed highlight, over whatever is there.
+    pub fn draw_pressed(&self, canvas: &mut Canvas, r: Rect) {
+        self.fill(canvas, r, self.pressed);
     }
 
     /// Fills the frame's outline with `color`, whatever the background: used for the
@@ -184,6 +194,7 @@ mod tests {
             shape,
             radius,
             background: None,
+            ..Frame::default()
         };
         assert_eq!(f(Shape::Rounded, Radius::Px(8.0)).corner(r), 8.0);
         assert_eq!(f(Shape::Rounded, Radius::Px(99.0)).corner(r), 26.0);

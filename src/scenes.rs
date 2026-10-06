@@ -25,7 +25,6 @@ const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
 const GREEN: Rgba = Rgba(0x20, 0xe0, 0x40, 0xff);
 const YELLOW: Rgba = Rgba(0xff, 0xd0, 0x00, 0xff);
 const GREY: Rgba = Rgba(0x80, 0x80, 0x80, 0xff);
-const PRESSED_OVERLAY: Rgba = Rgba(0xff, 0xff, 0xff, 0x50);
 const ACCENT: Rgba = Rgba(0x40, 0xa0, 0xff, 0xff);
 const FOCUSED_GREY: Rgba = Rgba(0x5a, 0x5a, 0x60, 0xff);
 const DIM_TEXT: Rgba = Rgba(0xb0, 0xb0, 0xb0, 0xff);
@@ -294,7 +293,7 @@ impl Scene {
         }
         if let Capture::Button(i, true) = self.capture {
             let b = &self.buttons[i];
-            b.frame.fill(canvas, b.rect, PRESSED_OVERLAY);
+            b.frame.draw_pressed(canvas, b.rect);
         }
         for (rect, item) in &self.animated {
             item.draw(canvas, *rect, t);
@@ -1378,6 +1377,46 @@ mod tests {
         assert_eq!(pixel(&c, r.x, r.y), [0, 0, 0, 0xff]);
         s.handle_touch(Phase::Up, at, MS(20), &font, &mut out);
         assert_eq!(out, vec![UiEvent::Tap("t".into())]);
+    }
+
+    #[test]
+    fn pressed_background_colours_the_highlight() {
+        let Some(font) = font() else { return };
+        let cfg: Config = toml::from_str(
+            r##"
+            [[layers]]
+            id = "m"
+            item_pressed_background = "#0000ff80"
+            [[layers.items]]
+            type = "button"
+            id = "opaque"
+            label = "A"
+            background = "transparent"
+            pressed_background = "#ff0000"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "clock"
+            background = "#000000"
+            "##,
+        )
+        .unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+        let mut c = Canvas::new(W, H).unwrap();
+        let press = |s: &mut Scene, i: usize, c: &mut Canvas| {
+            let r = s.buttons[i].rect;
+            let at = (r.x + 3.0, r.y + r.h / 2.0);
+            let mut out = Vec::new();
+            s.handle_touch(Phase::Down, at, MS(10), &font, &mut out);
+            s.draw(c, MS(10), &font, &live()).unwrap();
+            s.handle_touch(Phase::Up, at, MS(20), &font, &mut out);
+            pixel(c, at.0, at.1)
+        };
+        // Opaque red replaces what was there; the layer's translucent blue blends
+        // over the black background (premultiplied: 0x80 blue, alpha 0xff).
+        assert_eq!(press(&mut s, 0, &mut c), [0xff, 0, 0, 0xff]);
+        assert_eq!(press(&mut s, 1, &mut c), [0, 0, 0x80, 0xff]);
     }
 
     #[test]

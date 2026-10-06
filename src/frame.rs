@@ -8,7 +8,8 @@ use serde::Deserialize;
 pub const DEFAULT_RADIUS: f32 = 8.0;
 /// Background when nothing is configured.
 pub const DEFAULT_BACKGROUND: Rgba = Rgba(0x3a, 0x3a, 0x3c, 0xff);
-/// Pressed highlight when nothing is configured: translucent white over the item.
+/// Pressed highlight without `pressed_background`: translucent white over the item
+/// and its content.
 pub const DEFAULT_PRESSED: Rgba = Rgba(0xff, 0xff, 0xff, 0x50);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -82,8 +83,9 @@ pub struct Frame {
     pub radius: Radius,
     /// `None`: nothing drawn behind the content.
     pub background: Option<Rgba>,
-    /// Painted over the item, in its outline, while a finger is on it.
-    pub pressed: Rgba,
+    /// `pressed_background`: replaces the background while a finger is on it, under
+    /// the content. `None`: `DEFAULT_PRESSED` over everything instead.
+    pub pressed: Option<Rgba>,
     /// The whole item is drawn this much bigger (or smaller) while pressed.
     pub pressed_scale: f32,
 }
@@ -94,7 +96,7 @@ impl Default for Frame {
             shape: Shape::Rounded,
             radius: Radius::Px(DEFAULT_RADIUS),
             background: Some(DEFAULT_BACKGROUND),
-            pressed: DEFAULT_PRESSED,
+            pressed: None,
             pressed_scale: 1.0,
         }
     }
@@ -131,9 +133,18 @@ impl Frame {
         }
     }
 
-    /// The pressed highlight, over whatever is there.
-    pub fn draw_pressed(&self, canvas: &mut Canvas, r: Rect) {
-        self.fill(canvas, r, self.pressed);
+    /// The default pressed highlight, over whatever is there.
+    pub fn draw_pressed_veil(&self, canvas: &mut Canvas, r: Rect) {
+        self.fill(canvas, r, DEFAULT_PRESSED);
+    }
+
+    /// The background while pressed: `pressed_background` where the background
+    /// would be (also for shapeless and transparent items).
+    pub fn draw_pressed_background(&self, canvas: &mut Canvas, r: Rect) {
+        if let Some(color) = self.pressed {
+            self.draw_background(canvas, r);
+            self.fill(canvas, r, color);
+        }
     }
 
     /// Fills the frame's outline with `color`, whatever the background: used for the

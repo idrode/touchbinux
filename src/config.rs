@@ -485,7 +485,7 @@ impl LayerConfig {
             pressed: item
                 .pressed_background
                 .or(self.item_pressed_background)
-                .map_or(d.pressed, |c| c.0),
+                .map(|c| c.0),
             pressed_scale: item
                 .pressed_scale
                 .or(self.item_pressed_scale)
@@ -1125,11 +1125,11 @@ mod tests {
         )
         .unwrap();
         let l = &c.layers[0];
-        assert_eq!(l.frame_for(&l.items[0]).pressed, Rgba(0, 0xff, 0, 0x80));
-        assert_eq!(l.frame_for(&l.items[1]).pressed, Rgba(0xff, 0, 0, 0xff));
+        assert_eq!(l.frame_for(&l.items[0]).pressed, Some(Rgba(0, 0xff, 0, 0x80)));
+        assert_eq!(l.frame_for(&l.items[1]).pressed, Some(Rgba(0xff, 0, 0, 0xff)));
         let plain = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'").unwrap();
         let p = &plain.layers[0];
-        assert_eq!(p.frame_for(&p.items[0]).pressed, crate::frame::DEFAULT_PRESSED);
+        assert_eq!(p.frame_for(&p.items[0]).pressed, None);
         let item = |layer: &str, body: &str| {
             format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{body}")
         };

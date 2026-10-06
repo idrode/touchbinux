@@ -250,6 +250,23 @@ impl Canvas {
     }
 
     /// Composites a premultiplied image with its top-left corner at (`x`, `y`).
+    /// Copies the pixels of `src` (same size) inside `r`, rounded out to whole pixels.
+    pub fn copy_region(&mut self, src: &Canvas, r: Rect) {
+        if (self.width(), self.height()) != (src.width(), src.height()) {
+            return;
+        }
+        let w = self.width() as usize;
+        let x0 = (r.x.floor().max(0.0) as usize).min(w);
+        let x1 = ((r.x + r.w).ceil().max(0.0) as usize).min(w);
+        let y0 = (r.y.floor().max(0.0) as usize).min(self.height() as usize);
+        let y1 = ((r.y + r.h).ceil().max(0.0) as usize).min(self.height() as usize);
+        let (from, to) = (src.pixmap.data(), self.pixmap.data_mut());
+        for row in y0..y1 {
+            let (a, b) = ((row * w + x0) * 4, (row * w + x1) * 4);
+            to[a..b].copy_from_slice(&from[a..b]);
+        }
+    }
+
     /// Redraws what is inside `r` scaled by `scale` about its centre, over `behind`
     /// (what shows where it shrinks away). Pixels pushed past the canvas are lost.
     pub fn scale_region(&mut self, r: Rect, scale: f32, behind: Rgba) {

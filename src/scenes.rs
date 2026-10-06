@@ -103,6 +103,8 @@ struct Button {
     rect: Rect,
     /// Its outline, for the pressed highlight.
     frame: Frame,
+    /// Index in `Scene::texts` if this is a `text` item (it draws its own press).
+    text: Option<usize>,
     /// Index in `Scene::animated` of its icon, told about taps (`Animated::on_tap`).
     anim: Option<usize>,
 }
@@ -195,10 +197,15 @@ struct TextItem {
 }
 
 impl TextItem {
-    fn draw(&self, canvas: &mut Canvas, font: &Font) {
+    /// `pressed` with a `pressed_background`: that colour behind the text.
+    fn draw(&self, canvas: &mut Canvas, font: &Font, pressed: bool) {
         let r = self.rect;
         let px = r.h * 0.38;
-        self.frame.draw_background(canvas, r);
+        if pressed && self.frame.pressed.is_some() {
+            self.frame.draw_pressed_background(canvas, r);
+        } else {
+            self.frame.draw_background(canvas, r);
+        }
         let max_w = r.w - 4.0 * PADDING;
         let text = ellipsize(font, &self.text, px, max_w);
         let baseline = font.centered_baseline(r.y + r.h / 2.0, px);
@@ -250,6 +257,8 @@ pub struct Scene {
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
     texts: Vec<TextItem>,
+    /// Items with a `pressed_background`, composed as pressed (see `add_button`).
+    pressed_layer: Option<Canvas>,
     capture: Capture,
     /// Draw a marker under the finger (touch calibration scene).
     show_finger: bool,
@@ -274,6 +283,7 @@ impl Scene {
             buttons: Vec::new(),
             sliders: Vec::new(),
             texts: Vec::new(),
+            pressed_layer: None,
             capture: Capture::None,
             show_finger: false,
             finger: None,
@@ -286,14 +296,30 @@ impl Scene {
 
     pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, live: &Live) -> Result<()> {
         canvas.copy_from(&self.background)?;
-        // Before the press overlay (a `text` item is also a button) and before the
-        // unfolded slider's veil, which must cover them.
-        for text in &self.texts {
-            text.draw(canvas, font);
+        let pressed = match self.capture {
+            Capture::Button(i, true) => Some(&self.buttons[i]),
+            _ => None,
+        };
+        // A pressed_background replaces the item's background, under its content: its
+        // pre-composed pressed look (static part) goes in now.
+        if let Some(b) = pressed
+            && b.frame.pressed.is_some()
+            && b.text.is_none()
+            && let Some(layer) = &self.pressed_layer
+        {
+            canvas.copy_region(layer, b.rect);
         }
-        if let Capture::Button(i, true) = self.capture {
-            let b = &self.buttons[i];
-            b.frame.draw_pressed(canvas, b.rect);
+        // Before the press veil (a `text` item is also a button) and before the
+        // unfolded slider's veil, which must cover them.
+        for (j, text) in self.texts.iter().enumerate() {
+            text.draw(canvas, font, pressed.is_some_and(|b| b.text == Some(j)));
+        }
+        // Without one, the default veil goes over the static content.
+        if let Some(b) = pressed {
+            let precomposed = b.text.is_some() || self.pressed_layer.is_some();
+            if b.frame.pressed.is_none() || !precomposed {
+                b.frame.draw_pressed_veil(canvas, b.rect);
+            }
         }
         for (rect, item) in &self.animated {
             item.draw(canvas, *rect, t);
@@ -588,76 +614,47 @@ impl Scene {
     }
 
     /// One button: its background (see `Frame`), then icon + label centred as a group.
+    /// With a `pressed` colour the button is also composed, on that colour, in
+    /// `pressed_layer`, which is shown in its place while it is pressed.
     pub fn add_button(&mut self, rect: Rect, font: &Font, spec: ButtonSpec) {
-        let Rect { x, y, w, h } = rect;
-        let bg = &mut self.background;
         let frame = spec.style.frame;
-        frame.draw_background(bg, rect);
-        if let Some(accent) = spec.style.underline {
-            let inset = frame.corner(rect).max(4.0);
-            bg.fill_rounded_rect(x + inset, y + h - 4.0, w - 2.0 * inset, 3.0, 1.5, accent);
+        frame.draw_background(&mut self.background, rect);
+        let slot = paint_content(&mut self.background, rect, font, &spec);
+        if let Some(pressed) = frame.pressed
+            && let Some(layer) = self.pressed_layer_mut()
+        {
+            frame.draw_background(layer, rect);
+            frame.fill(layer, rect, pressed);
+            paint_content(layer, rect, font, &spec);
         }
-
-        let icon_h = icon_side(h);
-        let px = h * 0.42;
-        let cy = y + h / 2.0;
-        let baseline = font.centered_baseline(cy, px);
-        let icon_w = match &spec.icon {
-            Icon::Svg(_) | Icon::Raster(_) | Icon::Letter(_) | Icon::Tinted(..) => icon_h,
-            Icon::Animated { width, .. } => *width,
-            Icon::None => 0.0,
-        };
-        let gap = if icon_w > 0.0 && !spec.label.is_empty() {
-            ICON_LABEL_GAP
-        } else {
-            0.0
-        };
-        let label_w = font.measure(&spec.label, px);
-        let gx = (x + (w - (icon_w + gap + label_w)) / 2.0).round();
-        let icon_y = (cy - icon_h / 2.0).round();
-        let mut anim = None;
-        match spec.icon {
-            Icon::Svg(svg) => bg.draw_svg(&svg, gx, icon_y, icon_h),
-            Icon::Raster(img) => {
-                let ix = gx + (icon_h - img.width() as f32) / 2.0;
-                let iy = icon_y + (icon_h - img.height() as f32) / 2.0;
-                bg.draw_image(&img, ix.round() as i32, iy.round() as i32);
-            }
-            Icon::Letter(c) => {
-                // Generic app icon: a rounded tile with the class's initial.
-                bg.fill_rounded_rect(gx, icon_y, icon_h, icon_h, icon_h * 0.22, GREY);
-                let s = c.to_string();
-                let lpx = icon_h * 0.6;
-                let lw = font.measure(&s, lpx);
-                let lb = font.centered_baseline(cy, lpx);
-                bg.draw_text(font, &s, gx + (icon_h - lw) / 2.0, lb, lpx, Rgba::WHITE);
-            }
-            Icon::Tinted(mask, color) => {
-                let ix = gx + (icon_h - mask.width() as f32) / 2.0;
-                let iy = icon_y + (icon_h - mask.height() as f32) / 2.0;
-                bg.draw_mask(&mask, ix.round() as i32, iy.round() as i32, color);
-            }
+        let anim = match spec.icon {
             Icon::Animated { item, .. } => {
-                anim = Some(self.animated.len());
-                self.animated
-                    .push((Rect::new(gx, icon_y, icon_w, icon_h), item));
+                self.animated.push((slot, item));
+                Some(self.animated.len() - 1)
             }
-            Icon::None => {}
-        }
-        self.background.draw_text(
-            font,
-            &spec.label,
-            gx + icon_w + gap,
-            baseline,
-            px,
-            spec.style.text,
-        );
+            _ => None,
+        };
         self.buttons.push(Button {
             id: spec.id,
             rect,
             frame,
             anim,
+            text: None,
         });
+    }
+
+    /// Where items with a `pressed` colour are pre-composed as pressed; black (the
+    /// bar's background) elsewhere. Created on first use; `None` only if it can't be
+    /// allocated, and then those items show the default highlight instead.
+    fn pressed_layer_mut(&mut self) -> Option<&mut Canvas> {
+        if self.pressed_layer.is_none() {
+            let (w, h) = (self.background.width(), self.background.height());
+            self.pressed_layer = Canvas::new(w, h).ok().map(|mut c| {
+                c.clear(Rgba::BLACK);
+                c
+            });
+        }
+        self.pressed_layer.as_mut()
     }
 
     /// Equally sized buttons filling `area`.
@@ -682,12 +679,19 @@ impl Scene {
     /// painted over it every frame. Taps on it are reported as `id`.
     pub fn add_widget(&mut self, rect: Rect, id: &str, frame: Frame, widget: Box<dyn Widget>) {
         frame.draw_background(&mut self.background, rect);
+        // Its content is drawn every frame over whichever background is showing.
+        if frame.pressed.is_some()
+            && let Some(layer) = self.pressed_layer_mut()
+        {
+            frame.draw_pressed_background(layer, rect);
+        }
         self.widgets.push((rect, widget));
         self.buttons.push(Button {
             id: id.into(),
             rect,
             frame,
             anim: None,
+            text: None,
         });
     }
 
@@ -709,6 +713,66 @@ impl Scene {
             frame,
         });
     }
+}
+
+/// Paints a button's underline, static icon and label onto `bg` (its background is
+/// already there). Animated icons are not drawn here: returns the slot the scene
+/// draws them in every frame.
+fn paint_content(bg: &mut Canvas, rect: Rect, font: &Font, spec: &ButtonSpec) -> Rect {
+    let Rect { x, y, w, h } = rect;
+    if let Some(accent) = spec.style.underline {
+        let inset = spec.style.frame.corner(rect).max(4.0);
+        bg.fill_rounded_rect(x + inset, y + h - 4.0, w - 2.0 * inset, 3.0, 1.5, accent);
+    }
+    let icon_h = icon_side(h);
+    let px = h * 0.42;
+    let cy = y + h / 2.0;
+    let baseline = font.centered_baseline(cy, px);
+    let icon_w = match &spec.icon {
+        Icon::Svg(_) | Icon::Raster(_) | Icon::Letter(_) | Icon::Tinted(..) => icon_h,
+        Icon::Animated { width, .. } => *width,
+        Icon::None => 0.0,
+    };
+    let gap = if icon_w > 0.0 && !spec.label.is_empty() {
+        ICON_LABEL_GAP
+    } else {
+        0.0
+    };
+    let label_w = font.measure(&spec.label, px);
+    let gx = (x + (w - (icon_w + gap + label_w)) / 2.0).round();
+    let icon_y = (cy - icon_h / 2.0).round();
+    match &spec.icon {
+        Icon::Svg(svg) => bg.draw_svg(svg, gx, icon_y, icon_h),
+        Icon::Raster(img) => {
+            let ix = gx + (icon_h - img.width() as f32) / 2.0;
+            let iy = icon_y + (icon_h - img.height() as f32) / 2.0;
+            bg.draw_image(img, ix.round() as i32, iy.round() as i32);
+        }
+        Icon::Letter(c) => {
+            // Generic app icon: a rounded tile with the class's initial.
+            bg.fill_rounded_rect(gx, icon_y, icon_h, icon_h, icon_h * 0.22, GREY);
+            let s = c.to_string();
+            let lpx = icon_h * 0.6;
+            let lw = font.measure(&s, lpx);
+            let lb = font.centered_baseline(cy, lpx);
+            bg.draw_text(font, &s, gx + (icon_h - lw) / 2.0, lb, lpx, Rgba::WHITE);
+        }
+        Icon::Tinted(mask, color) => {
+            let ix = gx + (icon_h - mask.width() as f32) / 2.0;
+            let iy = icon_y + (icon_h - mask.height() as f32) / 2.0;
+            bg.draw_mask(mask, ix.round() as i32, iy.round() as i32, *color);
+        }
+        Icon::Animated { .. } | Icon::None => {}
+    }
+    bg.draw_text(
+        font,
+        &spec.label,
+        gx + icon_w + gap,
+        baseline,
+        px,
+        spec.style.text,
+    );
+    Rect::new(gx, icon_y, icon_w, icon_h)
 }
 
 fn contains(r: Rect, x: f32, y: f32) -> bool {
@@ -1099,6 +1163,7 @@ pub fn bar(
                     rect,
                     frame,
                     anim: None,
+                    text: Some(scene.texts.len() - 1),
                 });
             }
             ItemKind::Spacer => {}
@@ -1437,6 +1502,16 @@ mod tests {
         // Opaque red replaces what was there; the layer's translucent blue blends
         // over the black background (premultiplied: 0x80 blue, alpha 0xff).
         assert_eq!(press(&mut s, 0, &mut c), [0xff, 0, 0, 0xff]);
+        // ...but not the content: the white label is still drawn on top of it.
+        let r = s.buttons[0].rect;
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (r.x + 3.0, 30.0), MS(30), &font, &mut out);
+        s.draw(&mut c, MS(30), &font, &live()).unwrap();
+        let white = (r.x as u32..(r.x + r.w) as u32)
+            .flat_map(|x| (r.y as u32..(r.y + r.h) as u32).map(move |y| (x, y)))
+            .any(|(x, y)| pixel(&c, x as f32, y as f32).iter().all(|&v| v > 0xe0));
+        assert!(white, "label hidden by the pressed background");
+        s.handle_touch(Phase::Up, (r.x + 3.0, 30.0), MS(40), &font, &mut out);
         assert_eq!(press(&mut s, 1, &mut c), [0, 0, 0x80, 0xff]);
     }
 
@@ -1610,6 +1685,100 @@ mod tests {
         // The automatic fold starts at the first frame after it is due.
         shot(&mut s, MS(9000), "g-folding");
         shot(&mut s, MS(9500), "h-folded-back");
+    }
+
+    /// Not a check: a layer showing `size`, `pressed_background` and
+    /// `pressed_scale`, with each item pressed in turn, written as PNGs to
+    /// $TOUCHBINUX_FRAMES (run with --ignored).
+    #[test]
+    #[ignore]
+    fn dump_pressed() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let cfg: Config = toml::from_str(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "button"
+            id = "default"
+            label = "por defecto"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "red"
+            label = "rojo"
+            pressed_background = "#c0392b"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "glow"
+            label = "sin fondo"
+            background = "transparent"
+            pressed_background = "#00ffb760"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "small"
+            label = "0.9"
+            pressed_scale = 0.9
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "big"
+            label = "1.1"
+            pressed_scale = 1.1
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "spacer"
+            [[layers.items]]
+            type = "button"
+            id = "c52"
+            icon = "builtin:folder"
+            shape = "circle"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "c40"
+            icon = "builtin:folder"
+            shape = "circle"
+            size = 40
+            pressed_scale = 0.85
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "battery"
+            shape = "circle"
+            size = 30
+            pressed_background = "#1793d1"
+            [[layers.items]]
+            type = "clock"
+            radius = "full"
+            pressed_scale = 1.15
+            pressed_background = "#00000000"
+            "##,
+        )
+        .unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        s.draw(&mut canvas, MS(0), &font, &live).unwrap();
+        canvas
+            .save_png(Path::new(&format!("{dir}/p-idle.png")))
+            .unwrap();
+        let mut out = Vec::new();
+        for i in 0..s.buttons.len() {
+            let r = s.buttons[i].rect;
+            let at = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let id = s.buttons[i].id.clone();
+            s.handle_touch(Phase::Down, at, MS(10), &font, &mut out);
+            s.draw(&mut canvas, MS(10), &font, &live).unwrap();
+            canvas
+                .save_png(Path::new(&format!("{dir}/p-{i}-{id}.png")))
+                .unwrap();
+            s.handle_touch(Phase::Cancel, at, MS(20), &font, &mut out);
+        }
     }
 
     /// Not a check: time to draw one frame with the volume slider unfolding and the

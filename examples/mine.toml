@@ -1,0 +1,92 @@
+# PERSONAL EXAMPLE - the author's own /etc/touchbinux/config.toml, kept as a backup
+# and as a sample of a fuller layout. It depends on the author's machine:
+#   - a GIF at /etc/touchbinux/gifs/bongosmash.gif: elsewhere the file is missing,
+#     which is a config error, so this file does NOT load as is;
+#   - icons in /etc/touchbinux/icons that only exist there (arch, hype, docker...,
+#     copied from the author's /etc/tiny-dfr); missing ones are drawn as "?";
+#   - KEY_F13/F14/F15/F19, which only do something because the author's Hyprland
+#     config binds them;
+#   - `qs ipc` commands for the author's Quickshell setup;
+#   - run_as = "ander".
+# Start from config.example.toml instead; the full reference is in docs/GUIA.md.
+
+run_as = "ander"
+
+default_layer = "main"
+
+# [launcher] [wallpaper] ···········  [bongo] [hype] [docker] [brightness] [volume] [battery] [clock]
+[[layers]]
+id = "main"
+margin = 4
+gap = 12
+
+[[layers.items]]
+type = "button"
+id = "launcher"
+icon = "/etc/touchbinux/icons/arch.svg"
+color = "#1793d1"
+width = 80
+action = { type = "key", key = "KEY_F13" }
+
+# Folder drawn by code; it opens and closes when tapped.
+[[layers.items]]
+type = "button"
+id = "wallpaper"
+icon = "builtin:folder"
+width = 80
+action = { type = "key", key = "KEY_F14" }
+
+[[layers.items]]
+type = "spacer"
+
+
+[[layers.items]]
+type = "gif"
+id = "bongo"
+path = "/etc/touchbinux/gifs/bongosmash.gif"
+width = 80
+play = "always"
+
+[[layers.items]]
+type = "button"
+id = "hype"
+icon = "/etc/touchbinux/icons/hype.svg"
+width = 80
+action = { type = "key", key = "KEY_F15" }
+
+[[layers.items]]
+type = "button"
+id = "docker"
+icon = "/etc/touchbinux/icons/docker-svgrepo-com.svg"
+width = 80
+action = { type = "key", key = "KEY_F19" }
+
+[[layers.items]]
+type = "brightness"
+width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
+
+[[layers.items]]
+type = "volume"
+width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
+
+# Same command as the XF86Battery bind in hyprland.lua.
+[[layers.items]]
+type = "battery"
+width = 120
+action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "battery", "toggle"] }
+
+# Same command as the XF86Time bind. Redrawn once a minute (every second only if
+# the format shows seconds).
+[[layers.items]]
+type = "clock"
+format = "%H:%M"
+width = 200
+action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "calendar", "toggle"] }

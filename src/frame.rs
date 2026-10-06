@@ -88,6 +88,9 @@ pub struct Frame {
     pub pressed: Option<Rgba>,
     /// The whole item is drawn this much bigger (or smaller) while pressed.
     pub pressed_scale: f32,
+    /// `text_color`: every text and number the item draws. `None`: each item's
+    /// usual colours (white, grey for "no data" placeholders).
+    pub text: Option<Rgba>,
 }
 
 impl Default for Frame {
@@ -98,6 +101,7 @@ impl Default for Frame {
             background: Some(DEFAULT_BACKGROUND),
             pressed: None,
             pressed_scale: 1.0,
+            text: None,
         }
     }
 }

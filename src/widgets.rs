@@ -82,6 +82,7 @@ fn icon_and_text(
 pub struct Clock {
     format: String,
     period: u64,
+    color: Rgba,
 }
 
 impl Clock {
@@ -90,7 +91,14 @@ impl Clock {
         Clock {
             format: format.to_string(),
             period: if shows_seconds(format) { 1 } else { 60 },
+            color: TEXT,
         }
+    }
+
+    /// Config `text_color`; white otherwise.
+    pub fn with_color(mut self, color: Option<Rgba>) -> Clock {
+        self.color = color.unwrap_or(TEXT);
+        self
     }
 }
 
@@ -122,7 +130,7 @@ impl Widget for Clock {
         let (_, cy) = rect.center();
         let x = (rect.x + (rect.w - tw) / 2.0).round();
         let baseline = cx.font.centered_baseline(cy, px);
-        canvas.draw_text(cx.font, &text, x, baseline, px, TEXT);
+        canvas.draw_text(cx.font, &text, x, baseline, px, self.color);
     }
 
     fn wall_period(&self) -> Option<u64> {
@@ -202,12 +210,15 @@ impl BatteryIcons {
 pub struct BatteryWidget {
     /// `None` if the SVGs couldn't be loaded: a battery is drawn by code instead.
     pub icons: Option<BatteryIcons>,
+    /// Config `text_color`, for the "?" shown without battery data (grey otherwise).
+    pub text: Option<Rgba>,
 }
 
 impl Widget for BatteryWidget {
     fn draw(&self, canvas: &mut Canvas, rect: Rect, _t: Duration, cx: &DrawCx) {
         let Some(status) = cx.live.battery else {
-            icon_and_text(canvas, rect, cx, "?", DIM, |c, r| draw_battery(c, r, None));
+            let color = self.text.unwrap_or(DIM);
+            icon_and_text(canvas, rect, cx, "?", color, |c, r| draw_battery(c, r, None));
             return;
         };
         let side = icon_side(rect.h);

@@ -209,7 +209,8 @@ impl TextItem {
         let max_w = r.w - 4.0 * PADDING;
         let text = ellipsize(font, &self.text, px, max_w);
         let baseline = font.centered_baseline(r.y + r.h / 2.0, px);
-        canvas.draw_text(font, &text, r.x + 2.0 * PADDING, baseline, px, Rgba::WHITE);
+        let color = self.frame.text.unwrap_or(Rgba::WHITE);
+        canvas.draw_text(font, &text, r.x + 2.0 * PADDING, baseline, px, color);
     }
 }
 
@@ -1106,10 +1107,13 @@ pub fn bar(
                 let label = item.label.as_deref().unwrap_or("");
                 let mut spec = ButtonSpec::new(id, icon, label);
                 spec.style.frame = frame;
+                if let Some(c) = frame.text {
+                    spec.style.text = c;
+                }
                 scene.add_button(rect, font, spec);
             }
             ItemKind::Clock => {
-                let clock = Clock::new(item.clock_format());
+                let clock = Clock::new(item.clock_format()).with_color(frame.text);
                 scene.add_widget(rect, id, frame, Box::new(clock));
             }
             ItemKind::Battery => {
@@ -1128,7 +1132,10 @@ pub fn bar(
                 if icons.is_none() {
                     eprintln!("bar: no battery icons found; drawing my own");
                 }
-                scene.add_widget(rect, id, frame, Box::new(BatteryWidget { icons }));
+                scene.add_widget(rect, id, frame, Box::new(BatteryWidget {
+                        icons,
+                        text: frame.text,
+                    }));
             }
             ItemKind::Volume | ItemKind::Brightness => {
                 let level = if item.kind == ItemKind::Volume {
@@ -1602,6 +1609,94 @@ mod tests {
         let (_, c) = pressed_frame("1.2");
         assert_eq!(pixel(&c, 106.0, 30.0)[0], 0xff);
         assert_eq!(pixel(&c, 116.0, 30.0), [0, 0, 0, 0xff]);
+    }
+
+    /// Whether some pixel inside `r` is exactly this opaque colour (the inside of
+    /// a glyph is fully covered, so it gets the text colour unblended).
+    fn has_colour(c: &Canvas, r: Rect, rgb: [u8; 3]) -> bool {
+        (r.x as u32..(r.x + r.w) as u32)
+            .flat_map(|x| (r.y as u32..(r.y + r.h) as u32).map(move |y| (x, y)))
+            .any(|(x, y)| pixel(c, x as f32, y as f32) == [rgb[0], rgb[1], rgb[2], 0xff])
+    }
+
+    #[test]
+    fn text_color_paints_labels_and_numbers() {
+        let Some(font) = font() else { return };
+        let layer_toml = |extra: &str| {
+            format!(
+                r##"
+                [[layers]]
+                id = "m"
+                item_background = "transparent"
+                {extra}
+                [[layers.items]]
+                type = "button"
+                id = "b"
+                label = "Hola"
+                text_color = "#ff0000"
+                action = {{ type = "socket" }}
+                [[layers.items]]
+                type = "clock"
+                text_color = "#00ff00"
+                [[layers.items]]
+                type = "text"
+                key = "k"
+                [[layers.items]]
+                type = "battery"
+                text_color = "#ff00ff"
+                [[layers.items]]
+                type = "volume"
+                text_color = "#ffff00"
+                color = "#00ffff"
+                expand_width = 1000
+                "##
+            )
+        };
+        let build = |extra: &str| {
+            let cfg: Config = toml::from_str(&layer_toml(extra)).unwrap();
+            let layer = cfg.default_layer().unwrap();
+            let mut icons = IconResolver::new(None, icon_size(H));
+            let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+            s.set_text("k", "texto");
+            s
+        };
+        // The layer's item_text_color for the text item, its own for the rest.
+        let mut s = build("item_text_color = \"#0000ff\"");
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live()).unwrap();
+        let rects: Vec<Rect> = s.buttons.iter().map(|b| b.rect).collect();
+        let vol = s.expanders[0].rect;
+        assert!(has_colour(&c, rects[0], [0xff, 0, 0]), "button label");
+        assert!(has_colour(&c, rects[1], [0, 0xff, 0]), "clock");
+        assert!(has_colour(&c, rects[2], [0, 0, 0xff]), "text item (layer default)");
+        // live() has no battery data: its "?" placeholder.
+        assert!(has_colour(&c, rects[3], [0xff, 0, 0xff]), "battery placeholder");
+        assert!(has_colour(&c, vol, [0xff, 0xff, 0]), "volume value");
+        assert!(!has_colour(&c, rects[0], [0xff, 0xff, 0xff]), "no white left");
+        // Unfolded: the value keeps text_color, the filled track keeps `color`.
+        tap(&mut s, (vol.x + 5.0, vol.y + vol.h / 2.0), MS(0), &font);
+        s.advance(MS(1000), &live());
+        s.draw(&mut c, MS(1000), &font, &live()).unwrap();
+        let open = s.expanders[0].open_rect;
+        assert!(has_colour(&c, open, [0xff, 0xff, 0]), "unfolded value");
+        assert!(has_colour(&c, open, [0, 0xff, 0xff]), "slider fill");
+
+        // Without text_color: as before, white text and a grey placeholder.
+        let cfg: Config = toml::from_str(
+            &layer_toml("").replace("text_color = ", "# text_color = "),
+        )
+        .unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+        s.set_text("k", "texto");
+        s.draw(&mut c, MS(0), &font, &live()).unwrap();
+        let rects: Vec<Rect> = s.buttons.iter().map(|b| b.rect).collect();
+        for (i, r) in rects.iter().take(3).enumerate() {
+            assert!(has_colour(&c, *r, [0xff, 0xff, 0xff]), "item {i} not white");
+        }
+        assert!(has_colour(&c, rects[3], [0x90, 0x90, 0x90]), "grey battery placeholder");
+        assert!(has_colour(&c, s.expanders[0].rect, [0xff, 0xff, 0xff]), "white volume value");
     }
 
     #[test]

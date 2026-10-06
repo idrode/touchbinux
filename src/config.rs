@@ -77,6 +77,8 @@ pub struct LayerConfig {
     pub item_pressed_background: Option<Color>,
     #[serde(default)]
     pub item_pressed_scale: Option<f32>,
+    #[serde(default)]
+    pub item_text_color: Option<Color>,
     /// Default diameter of the layer's circles (`size` on an item).
     #[serde(default)]
     pub item_size: Option<f32>,
@@ -180,6 +182,9 @@ pub struct ItemConfig {
     /// Highlight colour while pressed (items that have one: not volume/brightness).
     #[serde(default)]
     pub pressed_background: Option<Color>,
+    /// Colour of the item's text and numbers (not for gifs and spacers: they have none).
+    #[serde(default)]
+    pub text_color: Option<Color>,
     /// Drawn this much bigger/smaller while pressed (1.0: no effect).
     #[serde(default)]
     pub pressed_scale: Option<f32>,
@@ -286,9 +291,17 @@ impl ItemConfig {
             ],
         };
         let allowed: &[&str] = match self.kind {
-            ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
-            ItemKind::Clock => &["id", "format", "action"],
-            ItemKind::Battery => &["id", "icon_dir", "action"],
+            ItemKind::Button => &[
+                "id",
+                "icon",
+                "label",
+                "color",
+                "action",
+                "anim_ms",
+                "text_color",
+            ],
+            ItemKind::Clock => &["id", "format", "action", "text_color"],
+            ItemKind::Battery => &["id", "icon_dir", "action", "text_color"],
             ItemKind::Volume | ItemKind::Brightness => &[
                 "id",
                 "action",
@@ -296,9 +309,10 @@ impl ItemConfig {
                 "anim_ms",
                 "expand_width",
                 "collapse_after_ms",
+                "text_color",
             ],
             ItemKind::Gif => &["id", "path", "play", "action"],
-            ItemKind::Text => &["id", "key", "action"],
+            ItemKind::Text => &["id", "key", "action", "text_color"],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -321,6 +335,7 @@ impl ItemConfig {
             ("pressed_background", self.pressed_background.is_some()),
             ("size", self.diameter.is_some()),
             ("pressed_scale", self.pressed_scale.is_some()),
+            ("text_color", self.text_color.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -490,6 +505,7 @@ impl LayerConfig {
                 .pressed_scale
                 .or(self.item_pressed_scale)
                 .unwrap_or(d.pressed_scale),
+            text: item.text_color.or(self.item_text_color).map(|c| c.0),
         }
     }
 }
@@ -712,6 +728,7 @@ impl Config {
                 pressed_background: None,
                 diameter: None,
                 pressed_scale: None,
+                text_color: None,
                 gif: None,
             })
             .collect();
@@ -725,6 +742,7 @@ impl Config {
             item_pressed_background: None,
             item_size: None,
             item_pressed_scale: None,
+            item_text_color: None,
             items,
         }))
     }
@@ -1202,6 +1220,47 @@ mod tests {
             ("", "type='volume'\npressed_scale=1.1"),
             ("", "type='spacer'\npressed_scale=1.1"),
             ("item_pressed_scale=2", "type='clock'"),
+        ] {
+            assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
+        }
+    }
+
+    #[test]
+    fn text_colors() {
+        let c = parse(
+            "[[layers]]\nid='m'\nitem_text_color='#ffcc00'\n\
+             [[layers.items]]\ntype='clock'\n\
+             [[layers.items]]\ntype='volume'\ntext_color='#00ff0080'\ncolor='#ff0000'\n\
+             [[layers.items]]\ntype='gif'\npath='/a.gif'",
+        )
+        .unwrap();
+        let l = &c.layers[0];
+        let t = |i: usize| l.frame_for(&l.items[i]).text;
+        assert_eq!(t(0), Some(Rgba(0xff, 0xcc, 0, 0xff)));
+        assert_eq!(t(1), Some(Rgba(0, 0xff, 0, 0x80)));
+        assert!(matches!(l.items[1].color, Some(Color(Rgba(0xff, 0, 0, 0xff)))));
+        let plain = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'").unwrap();
+        assert_eq!(plain.layers[0].frame_for(&plain.layers[0].items[0]).text, None);
+        for body in [
+            "type='button'\nid='b'\nlabel='x'\naction={type='socket'}",
+            "type='battery'",
+            "type='brightness'",
+            "type='text'\nkey='k'",
+        ] {
+            let ok = format!("[[layers]]\nid='m'\n[[layers.items]]\n{body}\ntext_color='#123456'");
+            assert!(parse(&ok).is_ok(), "rejected: {ok}");
+        }
+        let item = |layer: &str, body: &str| {
+            format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{body}")
+        };
+        for (layer, body) in [
+            ("", "type='gif'\npath='/a.gif'\ntext_color='#ffffff'"),
+            ("", "type='spacer'\ntext_color='#ffffff'"),
+            ("", "type='clock'\ntext_color='transparent'"),
+            ("", "type='clock'\ntext_color='#fff'"),
+            ("", "type='clock'\ntext_color='white'"),
+            ("", "type='clock'\ntext_color=16777215"),
+            ("item_text_color='#12345g'", "type='clock'"),
         ] {
             assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
         }

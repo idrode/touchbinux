@@ -287,7 +287,11 @@ impl Expander {
 
         let value = self.value(live);
         let text = value.map_or("–".to_string(), |v| v.to_string());
-        let text_color = if value.is_some() { TEXT } else { DIM };
+        let text_color = match (self.frame.text, value) {
+            (Some(c), _) => c,
+            (None, Some(_)) => TEXT,
+            (None, None) => DIM,
+        };
         let fade = |c: Rgba, a: f32| c.with_alpha((c.3 as f32 * a.clamp(0.0, 1.0)).round() as u8);
 
         // Folded layout (icon and value centred) and unfolded one (icon at the left,

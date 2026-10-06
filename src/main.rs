@@ -411,19 +411,21 @@ impl App {
             eprintln!("config: no config file to reload");
             return;
         };
-        match Config::load(&path) {
-            Ok(cfg) => {
+        // Some checks need the real bar (e.g. a circle's `size` against the row's
+        // height), so the new config only replaces the old one once its scene builds.
+        let built = Config::load(&path).and_then(|cfg| {
+            let old = std::mem::replace(&mut self.config, cfg);
+            self.rebuild().inspect_err(|_| self.config = old)
+        });
+        match built {
+            Ok(()) => {
                 eprintln!(
                     "config: reloaded {} ({} buttons)",
                     path.display(),
-                    cfg.buttons.len()
+                    self.config.buttons.len()
                 );
-                self.config = cfg;
                 self.runner
                     .set_user(user::resolve(self.config.run_as.as_deref(), Some(&path)));
-                if let Err(e) = self.rebuild() {
-                    eprintln!("config: rebuilding scene: {e:#}");
-                }
             }
             Err(e) => eprintln!("config: {e:#}\nconfig: keeping the previous configuration"),
         }

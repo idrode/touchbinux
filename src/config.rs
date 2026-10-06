@@ -35,6 +35,8 @@ const MAX_PX: f32 = 4000.0;
 const MAX_ANIM_MS: u64 = 2000;
 /// Shorter than this, a slider would fold before you could aim at it.
 const MIN_COLLAPSE_MS: u64 = 500;
+/// `pressed_scale`: a small effect, not a zoom.
+const PRESSED_SCALE: std::ops::RangeInclusive<f32> = 0.8..=1.2;
 /// Longest key a socket client may set (and so a `text` item may show).
 pub const MAX_KEY_LEN: usize = 64;
 
@@ -73,6 +75,8 @@ pub struct LayerConfig {
     pub item_background: Option<Background>,
     #[serde(default)]
     pub item_pressed_background: Option<Color>,
+    #[serde(default)]
+    pub item_pressed_scale: Option<f32>,
     /// Default diameter of the layer's circles (`size` on an item).
     #[serde(default)]
     pub item_size: Option<f32>,
@@ -176,6 +180,9 @@ pub struct ItemConfig {
     /// Highlight colour while pressed (items that have one: not volume/brightness).
     #[serde(default)]
     pub pressed_background: Option<Color>,
+    /// Drawn this much bigger/smaller while pressed (1.0: no effect).
+    #[serde(default)]
+    pub pressed_scale: Option<f32>,
     /// Circles only: diameter in px (default and maximum: the row's height). `size`
     /// in the TOML; named apart from the `size()` method.
     #[serde(default, rename = "size")]
@@ -269,7 +276,14 @@ impl ItemConfig {
             ItemKind::Spacer => &[],
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
-            _ => &["shape", "radius", "background", "pressed_background", "size"],
+            _ => &[
+                "shape",
+                "radius",
+                "background",
+                "pressed_background",
+                "pressed_scale",
+                "size",
+            ],
         };
         let allowed: &[&str] = match self.kind {
             ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
@@ -306,6 +320,7 @@ impl ItemConfig {
             ("background", self.background.is_some()),
             ("pressed_background", self.pressed_background.is_some()),
             ("size", self.diameter.is_some()),
+            ("pressed_scale", self.pressed_scale.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -368,6 +383,9 @@ impl ItemConfig {
         if self.anim_ms.is_some_and(|ms| ms > MAX_ANIM_MS) {
             bail!("{what}: anim_ms must be 0..={MAX_ANIM_MS}");
         }
+        if self.pressed_scale.is_some_and(|k| !PRESSED_SCALE.contains(&k)) {
+            bail!("{what}: pressed_scale must be in {PRESSED_SCALE:?}");
+        }
         if self.diameter.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
             bail!("{what}: size must be a diameter in px, in (0, {MAX_PX}]");
         }
@@ -393,6 +411,12 @@ impl LayerConfig {
             bail!("layer id must not be empty");
         }
         let px_ok = |v: f32| (0.0..=MAX_PX).contains(&v);
+        if self.item_pressed_scale.is_some_and(|k| !PRESSED_SCALE.contains(&k)) {
+            bail!(
+                "layer {:?}: item_pressed_scale must be in {PRESSED_SCALE:?}",
+                self.id
+            );
+        }
         if self.item_size.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
             bail!(
                 "layer {:?}: item_size must be a diameter in px, in (0, {MAX_PX}]",
@@ -462,6 +486,10 @@ impl LayerConfig {
                 .pressed_background
                 .or(self.item_pressed_background)
                 .map_or(d.pressed, |c| c.0),
+            pressed_scale: item
+                .pressed_scale
+                .or(self.item_pressed_scale)
+                .unwrap_or(d.pressed_scale),
         }
     }
 }
@@ -683,6 +711,7 @@ impl Config {
                 background: None,
                 pressed_background: None,
                 diameter: None,
+                pressed_scale: None,
                 gif: None,
             })
             .collect();
@@ -695,6 +724,7 @@ impl Config {
             item_background: None,
             item_pressed_background: None,
             item_size: None,
+            item_pressed_scale: None,
             items,
         }))
     }
@@ -1145,6 +1175,36 @@ mod tests {
         }
         let err = format!("{:#}", parse(&item("", "type='clock'\nsize=40")).unwrap_err());
         assert!(err.contains("`size` only applies to shape"), "{err}");
+    }
+
+    #[test]
+    fn pressed_scales() {
+        let c = parse(
+            "[[layers]]\nid='m'\nitem_pressed_scale=0.9\n\
+             [[layers.items]]\ntype='clock'\n\
+             [[layers.items]]\ntype='battery'\npressed_scale=1.2\n\
+             [[layers.items]]\ntype='text'\nkey='k'\npressed_scale=0.8",
+        )
+        .unwrap();
+        let l = &c.layers[0];
+        let k = |i: usize| l.frame_for(&l.items[i]).pressed_scale;
+        assert_eq!((k(0), k(1), k(2)), (0.9, 1.2, 0.8));
+        let plain = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'").unwrap();
+        assert_eq!(plain.layers[0].frame_for(&plain.layers[0].items[0]).pressed_scale, 1.0);
+        let item = |layer: &str, body: &str| {
+            format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{body}")
+        };
+        for (layer, body) in [
+            ("", "type='clock'\npressed_scale=0.79"),
+            ("", "type='clock'\npressed_scale=1.21"),
+            ("", "type='clock'\npressed_scale=nan"),
+            ("", "type='clock'\npressed_scale='big'"),
+            ("", "type='volume'\npressed_scale=1.1"),
+            ("", "type='spacer'\npressed_scale=1.1"),
+            ("item_pressed_scale=2", "type='clock'"),
+        ] {
+            assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
+        }
     }
 
     #[test]

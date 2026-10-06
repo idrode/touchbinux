@@ -84,6 +84,8 @@ pub struct Frame {
     pub background: Option<Rgba>,
     /// Painted over the item, in its outline, while a finger is on it.
     pub pressed: Rgba,
+    /// The whole item is drawn this much bigger (or smaller) while pressed.
+    pub pressed_scale: f32,
 }
 
 impl Default for Frame {
@@ -93,6 +95,7 @@ impl Default for Frame {
             radius: Radius::Px(DEFAULT_RADIUS),
             background: Some(DEFAULT_BACKGROUND),
             pressed: DEFAULT_PRESSED,
+            pressed_scale: 1.0,
         }
     }
 }

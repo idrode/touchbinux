@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, anyhow};
 use resvg::{
     tiny_skia::{
-        Color, FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect as SkRect,
+        Color, FillRule, FilterQuality, IntRect, LineCap, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect as SkRect,
         Stroke, Transform,
     },
     usvg,
@@ -250,6 +250,36 @@ impl Canvas {
     }
 
     /// Composites a premultiplied image with its top-left corner at (`x`, `y`).
+    /// Redraws what is inside `r` scaled by `scale` about its centre, over `behind`
+    /// (what shows where it shrinks away). Pixels pushed past the canvas are lost.
+    pub fn scale_region(&mut self, r: Rect, scale: f32, behind: Rgba) {
+        let (x0, y0) = (r.x.floor().max(0.0), r.y.floor().max(0.0));
+        let x1 = (r.x + r.w).ceil().min(self.width() as f32);
+        let y1 = (r.y + r.h).ceil().min(self.height() as f32);
+        let Some(area) = IntRect::from_xywh(
+            x0 as i32,
+            y0 as i32,
+            (x1 - x0).max(0.0) as u32,
+            (y1 - y0).max(0.0) as u32,
+        ) else {
+            return;
+        };
+        let Some(copy) = self.pixmap.clone_rect(area) else {
+            return;
+        };
+        self.fill_rect(x0, y0, x1 - x0, y1 - y0, behind);
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (w, h) = (x1 - x0, y1 - y0);
+        let transform =
+            Transform::from_row(scale, 0.0, 0.0, scale, cx - scale * w / 2.0, cy - scale * h / 2.0);
+        let paint = PixmapPaint {
+            quality: FilterQuality::Bilinear,
+            ..PixmapPaint::default()
+        };
+        self.pixmap
+            .draw_pixmap(0, 0, copy.as_ref(), &paint, transform, None);
+    }
+
     pub fn draw_image(&mut self, image: &Image, x: i32, y: i32) {
         self.pixmap.draw_pixmap(
             x,

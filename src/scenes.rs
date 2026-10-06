@@ -302,6 +302,14 @@ impl Scene {
         for (rect, w) in &self.widgets {
             w.draw(canvas, *rect, t, &cx);
         }
+        // Everything of the pressed item is drawn by now (background, highlight, icon,
+        // live content): scale it as a whole.
+        if let Capture::Button(i, true) = self.capture {
+            let b = &self.buttons[i];
+            if b.frame.pressed_scale != 1.0 {
+                canvas.scale_region(b.rect, b.frame.pressed_scale, Rgba::BLACK);
+            }
+        }
         let active = self.active_expander(t);
         for (i, e) in self.expanders.iter().enumerate() {
             if Some(i) != active {
@@ -1472,6 +1480,53 @@ mod tests {
         assert_eq!(circle_layer("size = 52").unwrap().buttons[0].rect.h, 52.0);
         let err = format!("{:#}", circle_layer("size = 53").err().unwrap());
         assert!(err.contains("size 53 px is larger than the row, which is 52 px"), "{err}");
+    }
+
+    #[test]
+    fn pressed_scale_shrinks_or_grows_the_item() {
+        let Some(font) = font() else { return };
+        let pressed_frame = |scale: &str| {
+            let cfg: Config = toml::from_str(&format!(
+                r##"
+                [[layers]]
+                id = "m"
+                [[layers.items]]
+                type = "button"
+                id = "b"
+                label = "B"
+                width = 100
+                radius = 0
+                background = "#ff0000"
+                pressed_background = "#00000000"
+                pressed_scale = {scale}
+                action = {{ type = "socket" }}
+                "##
+            ))
+            .unwrap();
+            let layer = cfg.default_layer().unwrap();
+            let mut icons = IconResolver::new(None, icon_size(H));
+            let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+            let r = s.buttons[0].rect;
+            let mut out = Vec::new();
+            s.handle_touch(Phase::Down, (r.x + 50.0, 30.0), MS(10), &font, &mut out);
+            let mut c = Canvas::new(W, H).unwrap();
+            s.draw(&mut c, MS(10), &font, &live()).unwrap();
+            (r, c)
+        };
+        // Button at x 4..104, y 4..56.
+        let (r, c) = pressed_frame("1.0");
+        assert_eq!((r.x, r.w), (4.0, 100.0));
+        assert_eq!(pixel(&c, 6.0, 30.0)[0], 0xff, "unscaled");
+        // 0.8: 80 px wide about x = 54, i.e. 14..94; the edges show the black behind.
+        let (_, c) = pressed_frame("0.8");
+        assert_eq!(pixel(&c, 6.0, 30.0), [0, 0, 0, 0xff]);
+        assert_eq!(pixel(&c, 13.0, 30.0), [0, 0, 0, 0xff]);
+        assert_eq!(pixel(&c, 16.0, 30.0)[0], 0xff);
+        assert_eq!(pixel(&c, 30.0, 8.0), [0, 0, 0, 0xff], "top edge moved down");
+        // 1.2: 120 px wide, 104 + 10 on the right, into the gap.
+        let (_, c) = pressed_frame("1.2");
+        assert_eq!(pixel(&c, 106.0, 30.0)[0], 0xff);
+        assert_eq!(pixel(&c, 116.0, 30.0), [0, 0, 0, 0xff]);
     }
 
     #[test]

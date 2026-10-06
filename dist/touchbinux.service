@@ -4,7 +4,7 @@ Description=touchbinux Touch Bar daemon
 # Never alongside tiny-dfr: starting one stops the other (both want DRM master on
 # the bar and an exclusive grab on the digitizer). The ordering makes tiny-dfr's
 # stop finish before we start. tiny-dfr is also pulled in by its own udev rule
-# (SYSTEMD_WANTS), so it must be masked as well; see README.md.
+# (SYSTEMD_WANTS), so it must be masked as well; see docs/GUIA.md.
 Conflicts=tiny-dfr.service
 After=tiny-dfr.service
 

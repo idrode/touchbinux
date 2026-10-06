@@ -25,7 +25,7 @@ REPO_ICONS=icons
 # A tiny-dfr user's own icons, if any: copied too, and they win over the repo's
 # (same precedence tiny-dfr gives /etc/tiny-dfr over /usr/share/tiny-dfr).
 TINY_DFR_ICONS=/etc/tiny-dfr
-# Seat isolation for the Touch Bar comes from tiny-dfr's package (see README).
+# Seat isolation for the Touch Bar comes from tiny-dfr's package (see docs/GUIA.md).
 SEAT_RULE=/usr/lib/udev/rules.d/99-touchbar-seat.rules
 # The only model this has been tested on (MacBook Pro 13" M2, 2022).
 TESTED_COMPATIBLE=apple,j493

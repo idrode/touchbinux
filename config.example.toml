@@ -22,6 +22,15 @@ default_layer = "main"
 id = "main"
 margin = 4
 gap = 12
+# How items are drawn, for the whole layer (each item may override them with
+# `shape`, `radius` and `background`; spacers have no box):
+#   item_shape      = "rounded" (default) | "circle" | "none"
+#                     circle: the item is made square, as wide as the row is tall
+#                     (so no width/stretch on it); none: no background, content only
+#   item_radius     = 8 (default, px) | "full" (a pill: half the height)
+#   item_background = "#3a3a3c" (default) | "#rrggbbaa" | "transparent"
+# Pressing still shows a highlight in the item's outline without a background.
+# item_radius = "full"
 
 # Many Touch Bar MacBooks have no physical Esc key.
 [[layers.items]]
@@ -69,6 +78,36 @@ type = "battery"
 [[layers.items]]
 type = "clock"
 format = "%H:%M"
+
+# Shapes, commented out:
+#
+# Round media buttons (folded volume/brightness circles show only their icon):
+# [[layers.items]]
+# type = "button"
+# id = "play-round"
+# icon = "/etc/touchbinux/icons/play_pause.svg"
+# shape = "circle"
+# action = { type = "key", key = "KEY_PLAYPAUSE" }
+#
+# A pill with a colour of its own:
+# [[layers.items]]
+# type = "button"
+# id = "esc-pill"
+# label = "esc"
+# radius = "full"
+# background = "#c0392b"
+# action = { type = "key", key = "KEY_ESC" }
+#
+# Just the icon, no background:
+# [[layers.items]]
+# type = "button"
+# id = "next-bare"
+# icon = "/etc/touchbinux/icons/fast_forward.svg"
+# background = "transparent"         # or shape = "none"
+# action = { type = "key", key = "KEY_NEXTSONG" }
+#
+# The clock above as plain text: add `shape = "none"` to it. The battery in a
+# circle: add `shape = "circle"` to it.
 
 # More examples, commented out (see "Recetas" in docs/GUIA.md):
 #

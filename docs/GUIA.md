@@ -339,6 +339,9 @@ default_layer = "main"
 | `id` | obligatorio | no vacío, único | nombre de la capa |
 | `margin` | `4` | 0-4000 px | borde vacío alrededor de la fila (los cuatro lados) |
 | `gap` | `12` | 0-4000 px | espacio entre elementos vecinos |
+| `item_shape` | `"rounded"` | ver [Forma y fondo](#forma-y-fondo) | forma por defecto de sus elementos |
+| `item_radius` | `8` | | radio por defecto |
+| `item_background` | `"#3a3a3c"` | | fondo por defecto |
 | `items` | `[]` | — | elementos, de izquierda a derecha (`[[layers.items]]`) |
 
 ```toml
@@ -385,6 +388,57 @@ type = "spacer"          # empuja lo que sigue a la derecha
 [[layers.items]]
 type = "clock"
 stretch = 2              # el doble que un spacer
+```
+
+### Forma y fondo
+
+Todos los tipos menos `spacer` aceptan `shape`, `radius` y `background`. Lo que un
+elemento no indique lo toma de su capa (`item_shape`, `item_radius`,
+`item_background`) y, si la capa tampoco lo indica, del valor por defecto.
+
+| Campo | Valores | Por defecto |
+|---|---|---|
+| `shape` | `"rounded"`: rectángulo con esquinas redondeadas; `"circle"`: círculo; `"none"`: sin fondo, solo el contenido | `"rounded"` |
+| `radius` | número de px ≥ 0, o `"full"` (píldora: la mitad del alto). Si es mayor que medio alto, se queda en medio alto | `8` |
+| `background` | `"#rrggbb"`, `"#rrggbbaa"` o `"transparent"` | `"#3a3a3c"` |
+
+- **`circle`** hace el elemento **cuadrado**: tan ancho como alta es la fila (52 px
+  con la barra del M2 y `margin = 4`). Por eso `width` o `stretch` en un elemento
+  circular son un error (también si el círculo viene de `item_shape`). `radius` no
+  se usa. En círculos plegados, `volume` y `brightness` muestran solo el icono; el
+  número aparece al desplegarlos. Un `clock` o un `text` no caben en 52 px: úsalos
+  con otra forma.
+- **`none`** o **`transparent`**: no se dibuja fondo (con `none`, aunque haya
+  `background`). Al pulsar se ve igualmente un resaltado con el contorno del
+  elemento (redondeado según `radius`, o circular).
+- Los sliders de `volume`/`brightness` conservan forma, radio y fondo al
+  desplegarse; un círculo se despliega en píldora.
+- Un valor desconocido (`shape = "square"`), un radio negativo o no numérico, o un
+  color mal escrito es un error de configuración: al recargar se conserva la
+  configuración anterior.
+
+```toml
+[[layers]]
+id = "main"
+item_radius = "full"            # todo en píldora...
+
+[[layers.items]]
+type = "button"
+id = "play"
+icon = "/etc/touchbinux/icons/play_pause.svg"
+shape = "circle"                # ...salvo este círculo
+action = { type = "key", key = "KEY_PLAYPAUSE" }
+
+[[layers.items]]
+type = "button"
+id = "next"
+icon = "/etc/touchbinux/icons/fast_forward.svg"
+background = "transparent"      # solo el icono
+action = { type = "key", key = "KEY_NEXTSONG" }
+
+[[layers.items]]
+type = "clock"
+shape = "none"                  # la hora como texto suelto
 ```
 
 ### `id`
@@ -621,9 +675,10 @@ action = { type = "socket" }
 
 ### Colores
 
-`"#rrggbb"` o `"#rrggbbaa"` (alfa). En `button` (icono o carpeta) y en
-`volume`/`brightness` (relleno del slider). Otros formatos (`"red"`, `"#fff"`) son
-error. Los colores de fondo, texto y batería están fijos en el código
+`"#rrggbb"` o `"#rrggbbaa"` (alfa). `color` en `button` (icono o carpeta) y en
+`volume`/`brightness` (relleno del slider); `background`/`item_background` para el
+fondo (que además admite `"transparent"`). Otros formatos (`"red"`, `"#fff"`) son
+error. Los colores del texto y de la batería están fijos en el código
 (`src/scenes.rs`, `src/widgets.rs`).
 
 ### Animaciones: resumen

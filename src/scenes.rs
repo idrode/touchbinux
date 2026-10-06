@@ -1397,6 +1397,72 @@ mod tests {
         assert_eq!(pixel(&c, open.x + open.w - 2.0, open.y + 1.0), [0, 0, 0, 0xff]);
     }
 
+    /// Not a check: frames of a layer of circles (folder opening, pressed
+    /// transparent button, volume unfolding into a pill), written as PNGs to
+    /// $TOUCHBINUX_FRAMES (run with --ignored).
+    #[test]
+    #[ignore]
+    fn dump_frame_shapes() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let cfg: Config = toml::from_str(
+            r##"
+            [[layers]]
+            id = "m"
+            item_shape = "circle"
+            [[layers.items]]
+            type = "button"
+            id = "folder"
+            icon = "builtin:folder"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "t"
+            label = "sin fondo"
+            shape = "rounded"
+            background = "transparent"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "spacer"
+            [[layers.items]]
+            type = "volume"
+            expand_width = 1000
+            [[layers.items]]
+            type = "brightness"
+            "##,
+        )
+        .unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, t: Duration, name: &str| {
+            s.advance(t, &live);
+            s.draw(&mut canvas, t, &font, &live).unwrap();
+            canvas
+                .save_png(Path::new(&format!("{dir}/{name}.png")))
+                .unwrap();
+        };
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let mut out = Vec::new();
+        shot(&mut s, MS(0), "a-idle");
+        let (folder, plain) = (s.buttons[0].rect, s.buttons[1].rect);
+        tap(&mut s, mid(folder), MS(100), &font);
+        shot(&mut s, MS(250), "b-folder-opening");
+        shot(&mut s, MS(450), "c-folder-open");
+        s.handle_touch(Phase::Down, mid(plain), MS(1000), &font, &mut out);
+        shot(&mut s, MS(1000), "d-transparent-pressed");
+        s.handle_touch(Phase::Up, mid(plain), MS(1010), &font, &mut out);
+        let vol = s.expanders[0].rect;
+        tap(&mut s, mid(vol), MS(2000), &font);
+        shot(&mut s, MS(2080), "e-circle-unfolding");
+        shot(&mut s, MS(2300), "f-pill-open");
+        // The automatic fold starts at the first frame after it is due.
+        shot(&mut s, MS(9000), "g-folding");
+        shot(&mut s, MS(9500), "h-folded-back");
+    }
+
     /// Not a check: time to draw one frame with the volume slider unfolding and the
     /// waves swaying (run with --release --ignored --nocapture).
     #[test]

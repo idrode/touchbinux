@@ -9,7 +9,7 @@
 use crate::{
     anim::Tween,
     canvas::{Canvas, Font, Rect, Rgba},
-    frame::Frame,
+    frame::{Frame, Shape},
     scenes::{PADDING, icon_side},
     widgets::{DIM, ICON, Level, Live, SpeakerLook, TEXT, WAVE_THRESHOLDS, draw_speaker, draw_sun},
 };
@@ -295,8 +295,13 @@ impl Expander {
         // slides from one place to the other, the rest cross-fades.
         let px = r.h * 0.42;
         let side = icon_side(r.h);
-        let tw = font.measure(&text, px);
-        let gap = 8.0;
+        // A folded circle has room for the icon only; the value shows when unfolded.
+        let folded_value = self.frame.shape != Shape::Circle;
+        let (tw, gap) = if folded_value {
+            (font.measure(&text, px), 8.0)
+        } else {
+            (0.0, 0.0)
+        };
         let group_x = (r.x + (r.w - (side + gap + tw)) / 2.0).round();
         let parts = slider_parts(r, font);
         let icon_x = group_x + (parts.icon.x - group_x) * k;
@@ -307,7 +312,7 @@ impl Expander {
         // so the two never read as two numbers.
         let folded = 1.0 - 2.0 * k;
         let unfolded = (k - 0.4) / 0.6;
-        if folded > 0.0 {
+        if folded > 0.0 && folded_value {
             canvas.draw_text(
                 font,
                 &text,

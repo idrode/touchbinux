@@ -123,6 +123,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("touchbinux-watch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
+        // The ipc test may have the process-wide umask at 0177 right now.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let w = InstanceWatch::new(&root).unwrap();
         assert!(!readable(&w));
 

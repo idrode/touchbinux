@@ -87,12 +87,14 @@ const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
 ];
 
-const ICON_DIR: &str = "/etc/tiny-dfr";
+/// Icons of the `demo` and `anim` test scenes: the ones the tiny-dfr package ships
+/// (also in this repo's icons/), so they exist on any machine with tiny-dfr.
+const ICON_DIR: &str = "/usr/share/tiny-dfr";
 const DEMO_BUTTONS: &[(&str, &str)] = &[
-    ("arch", "Arch"),
-    ("docker-svgrepo-com", "Docker"),
-    ("neovim-svgrepo-com", "Neovim"),
-    ("terminal-svgrepo-com", "Terminal"),
+    ("play_pause", "Play"),
+    ("search", "Search"),
+    ("volume_up", "Volume"),
+    ("brightness_high", "Bright"),
 ];
 
 /// Canvas size used only for `--png` previews, when there is no DRM mode to ask.
@@ -336,7 +338,7 @@ impl App {
                     speed: 1.0,
                 };
                 let pulse = Pulse {
-                    mask: load_icon("arch")?.to_mask(size)?,
+                    mask: load_icon("bolt")?.to_mask(size)?,
                     from: Rgba(0x10, 0x50, 0x40, 0xff),
                     to: Rgba(0x00, 0xff, 0xb7, 0xff),
                     period: Duration::from_millis(1500),
@@ -345,12 +347,12 @@ impl App {
                     item,
                     width: size as f32,
                 };
-                let terminal = Icon::Svg(Rc::new(load_icon("terminal-svgrepo-com")?));
+                let still = Icon::Svg(Rc::new(load_icon("search")?));
                 let specs = vec![
                     ButtonSpec::new("spinner", animated(Box::new(spinner)), "Loading"),
                     ButtonSpec::new("pulse", animated(Box::new(pulse)), "Pulse"),
                     gif,
-                    ButtonSpec::new("static", terminal, "Static"),
+                    ButtonSpec::new("static", still, "Static"),
                 ];
                 let mut scene = Scene::new(w, h)?;
                 scene.add_buttons(area, font, specs);

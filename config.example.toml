@@ -1,150 +1,93 @@
-# touchbinux configuration.
-# Default location: /etc/touchbinux/config.toml (or pass --config <file>).
-# Reload without restarting: sudo systemctl reload touchbinux
-# (or, when started by hand: sudo kill -HUP $(pidof touchbinux))
+# touchbinux configuration - generic example.
+# Installed by install.sh as /etc/touchbinux/config.toml (only if that file doesn't
+# exist yet). Full reference of every option: docs/GUIA.md.
+#
+# Reload after editing:  sudo systemctl reload touchbinux
+# If the new file has an error, the daemon keeps the previous configuration and says
+# why in the log (journalctl -u touchbinux -e).
+#
+# It only uses what any installation has: the icons install.sh copies to
+# /etc/touchbinux/icons (from this repo's icons/), keys sent through the virtual
+# keyboard, and the built-in volume, brightness, battery and clock widgets.
 
-# Who commands run as when the daemon is NOT started with sudo (e.g. as a systemd
-# service). Only honoured if this file is owned by root and not group/world-writable,
-# and never root itself. With sudo, SUDO_UID always wins.
-# run_as = "ander"
-
-# Layers: the `bar` scene (the one the service runs) shows `default_layer`, or the
-# first [[layers]] if it isn't set. Items are placed left to right, `gap` px apart,
-# inside a `margin` px border (defaults 12 and 4).
-#
-# Item types and their fields (anything else is an error):
-#   button      id, icon and/or label, action, color   (no label: icon alone, centred)
-#               anim_ms                 only with icon = "builtin:folder"
-#   clock       id, format (strftime, default "%H:%M"), action
-#   battery     id, icon_dir (default /etc/touchbinux/icons), action
-#   volume      id, action, color, anim_ms, expand_width, collapse_after_ms
-#   brightness  (same as volume)
-#   gif         id, path (absolute), play ("on_tap" or "always"), action
-#   spacer      (nothing)             empty space
-# Every type also takes `width = <px>` (fixed) or `stretch = <weight>` (a share of
-# what is left). Spacers default to stretch = 1, the others to a fixed width.
-# Widgets' ids default to their type ("clock", "battery"...); ids must be unique.
-# `icon` is an absolute .svg/.png path, an icon theme name, or "builtin:folder".
-# `color` ("#rrggbb" or "#rrggbbaa") paints a button's icon in that one colour.
-#
-# volume and brightness show an icon and the current value. A tap unfolds them into
-# a slider over the bar; dragging anywhere on it changes the real level (the finger
-# is followed even if it leaves the slider). On the volume slider, a tap on the
-# speaker mutes/unmutes. While unfolded the other items don't respond: a touch
-# elsewhere just folds it. Options (defaults in brackets):
-#   expand_width       width of the unfolded slider, px     [half the bar]
-#   collapse_after_ms  fold back after this long untouched  [3000]  (500-60000)
-#   anim_ms            unfolding/folding time               [200]   (0-2000)
-#   color              filled part of the slider            ["#00ffb7"]
-# A gif is read when the config is loaded: a missing file or one that isn't a valid
-# GIF is a config error (on reload, the previous config stays). Its frames are
-# scaled once to the bar's inner height, or to the slot's width if the GIF is wider,
-# keeping its proportions, and centred. play = "on_tap" [default] shows the first
-# frame and plays the whole animation once per tap, then rests (no frames, no CPU);
-# "always" plays all the time, redrawing exactly when each frame's delay ends (up
-# to the loop's ~30 fps cap). With `action`, a tap also runs it, as on a button.
-# Several gifs share one frame timer, and items on the same file one decoding.
-#
-# The "builtin:folder" icon opens and closes when tapped: anim_ms is the opening
-# time [300]; it stays open half that, then closes. The action fires at once.
-# Without `action` a widget's taps only go to the socket. Taps are always reported
-# on the socket as well.
-#
-# Old style: without [[layers]], a list of [[buttons]] (id, label, icon, action)
-# forms the default layer, each button an equal share of the bar. The `buttons`
-# scene still shows them as before.
-#
-# Action types:
-#   { type = "command", argv = ["prog", "arg", ...], timeout_ms = 5000 }  # no shell
-#   { type = "hyprctl", workspace = 2 }                     # or "name:web", "+1"
-#   { type = "hyprctl", focus_window = "0xaaab33103270" }   # window address
-#   { type = "hyprctl", exec = ["kitty", "-e", "htop"] }     # argv, no shell expansion
-#   { type = "hyprctl", raw = 'hl.dsp.focus({ workspace = "e+1" })' }  # literal, advanced
-#     (hyprctl actions are written in the syntax of Hyprland's config provider,
-#      Lua or classic hyprlang, detected at connection. `raw` is NOT translated:
-#      write it for your provider. The old `args = [...]` still works, translated
-#      when it is workspace/focuswindow/exec.)
-#   { type = "key", key = "KEY_PLAYPAUSE" }                            # virtual keyboard
-#   { type = "socket" }                                                # only notify Quickshell
-#
-# To launch GUI apps prefer `hyprctl` with `exec`: Hyprland starts them, so the
-# command's timeout doesn't kill the app.
+# Who the commands of your buttons run as when the daemon runs as a service. Only
+# honoured if this file is owned by root and not writable by group/others, and never
+# root itself. install.sh fills it in with your user.
+# run_as = "your-user"
 
 default_layer = "main"
 
-# [launcher] [wallpaper] ···········  [gif] [hype] [docker] [brightness] [volume] [battery] [clock]
+#  [esc]  ·····················  [prev] [play] [next]  [brightness] [volume] [battery] [clock]
 [[layers]]
 id = "main"
 margin = 4
 gap = 12
 
+# Many Touch Bar MacBooks have no physical Esc key.
 [[layers.items]]
 type = "button"
-id = "launcher"
-icon = "/etc/touchbinux/icons/arch.svg"
-color = "#1793d1"
-width = 80
-action = { type = "key", key = "KEY_F13" }
-
-# Folder drawn by code; it opens and closes when tapped.
-[[layers.items]]
-type = "button"
-id = "wallpaper"
-icon = "builtin:folder"
-width = 80
-anim_ms = 300
-action = { type = "key", key = "KEY_F14" }
+id = "esc"
+label = "esc"
+width = 100
+action = { type = "key", key = "KEY_ESC" }
 
 [[layers.items]]
 type = "spacer"
 
-# 220x220 GIF in a 60 px slot: drawn about 50 px tall, centred.
+# Media keys: they do what your desktop binds XF86AudioPrev/Play/Next to (e.g. a
+# `playerctl` bind in Hyprland). Without such binds they do nothing.
 [[layers.items]]
-type = "gif"
-path = "/etc/touchbinux/gifs/bongosmash.gif"
-width = 60
-play = "on_tap"
+type = "button"
+id = "prev"
+icon = "/etc/touchbinux/icons/fast_rewind.svg"
+action = { type = "key", key = "KEY_PREVIOUSSONG" }
 
 [[layers.items]]
 type = "button"
-id = "hype"
-icon = "/etc/touchbinux/icons/hype.svg"
-width = 80
-action = { type = "key", key = "KEY_F15" }
+id = "play"
+icon = "/etc/touchbinux/icons/play_pause.svg"
+action = { type = "key", key = "KEY_PLAYPAUSE" }
 
 [[layers.items]]
 type = "button"
-id = "docker"
-icon = "/etc/touchbinux/icons/docker-svgrepo-com.svg"
-width = 80
-action = { type = "key", key = "KEY_F19" }
+id = "next"
+icon = "/etc/touchbinux/icons/fast_forward.svg"
+action = { type = "key", key = "KEY_NEXTSONG" }
 
+# Tap to unfold a slider; drag to change the level. Brightness is the main display's
+# backlight (/sys/class/backlight); volume is PipeWire's default sink (wpctl). On the
+# volume slider, tapping the speaker mutes/unmutes.
 [[layers.items]]
 type = "brightness"
-width = 120
-expand_width = 1000
-collapse_after_ms = 3000
-anim_ms = 200
-color = "#00ffb7"
 
 [[layers.items]]
 type = "volume"
-width = 120
-expand_width = 1000
-collapse_after_ms = 3000
-anim_ms = 200
-color = "#00ffb7"
 
-# Same command as the XF86Battery bind in hyprland.lua.
 [[layers.items]]
 type = "battery"
-width = 80
-action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "battery", "toggle"] }
 
-# Same command as the XF86Time bind. Redrawn once a minute (every second only if
-# the format shows seconds).
 [[layers.items]]
 type = "clock"
 format = "%H:%M"
-width = 120
-action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "calendar", "toggle"] }
+
+# More examples, commented out (see "Recetas" in docs/GUIA.md):
+#
+# Open an app through Hyprland (it keeps running after the tap):
+# [[layers.items]]
+# type = "button"
+# id = "terminal"
+# icon = "utilities-terminal"          # a name from your icon theme
+# action = { type = "hyprctl", exec = ["kitty"] }
+#
+# Run a command, as run_as, without a shell:
+# [[layers.items]]
+# type = "button"
+# id = "hello"
+# label = "Hello"
+# action = { type = "command", argv = ["notify-send", "Hello from the Touch Bar"] }
+#
+# Show what a script sends over the socket (/run/touchbinux.sock):
+# [[layers.items]]
+# type = "text"
+# key = "weather"
+# width = 200

@@ -921,6 +921,28 @@ mod tests {
         assert!(matches!(c.action("cpu"), Some(Action::Socket)));
     }
 
+    /// The shipped example must load anywhere: valid, no files of its own, and every
+    /// icon it names is one install.sh copies from icons/.
+    #[test]
+    fn example_config_is_generic() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let c = Config::load(&root.join("config.example.toml")).unwrap();
+        assert!(c.run_as.is_none());
+        let items = &c.default_layer().unwrap().items;
+        assert!(items.iter().all(|i| i.kind != ItemKind::Gif));
+        for icon in items.iter().filter_map(|i| i.icon.as_deref()) {
+            let name = icon
+                .strip_prefix(&format!("{ICON_DIR}/"))
+                .unwrap_or_else(|| panic!("{icon} is not in {ICON_DIR}"));
+            assert!(root.join("icons").join(name).is_file(), "{name} not in icons/");
+        }
+        for item in items {
+            if let Some(Action::Command { argv, .. }) = &item.action {
+                panic!("example depends on a command: {argv:?}");
+            }
+        }
+    }
+
     /// A real 2-frame GIF (6x3) in a fresh temporary directory.
     fn temp_gif(name: &str) -> std::path::PathBuf {
         use image::{Delay, Frame, RgbaImage, codecs::gif::GifEncoder};

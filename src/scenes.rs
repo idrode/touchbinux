@@ -18,7 +18,7 @@ use crate::{
         Widget,
     },
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::{collections::HashMap, path::Path, rc::Rc, time::Duration};
 
 const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
@@ -983,20 +983,29 @@ pub fn bar(
         (w as f32 - 2.0 * m).max(0.0),
         (h as f32 - 2.0 * m).max(1.0),
     );
-    // Circles are as wide as the row is tall (config rejects width/stretch on them).
-    let sizes: Vec<_> = layer
-        .items
-        .iter()
-        .map(|i| {
-            if layer.is_circle(i) {
-                layout::Size::Fixed(area.h)
-            } else {
-                i.size()
-            }
-        })
-        .collect();
+    // Circles are square: `size` wide, or as wide as the row is tall (config rejects
+    // width/stretch on them). Here is where the row's height is known.
+    let mut sizes = Vec::with_capacity(layer.items.len());
+    for item in &layer.items {
+        if let Some(d) = layer.circle_diameter(item)
+            && d > area.h + 0.01
+        {
+            bail!(
+                "layer {:?}: {} {:?}: size {d} px is larger than the row, which is {} px \
+                 high (bar {h} px minus 2 x margin {m})",
+                layer.id,
+                item.kind.name(),
+                item.id().unwrap_or(""),
+                area.h
+            );
+        }
+        sizes.push(if layer.is_circle(item) {
+            layout::Size::Fixed(layer.circle_diameter(item).unwrap_or(area.h))
+        } else {
+            item.size()
+        });
+    }
     let slots = layout::distribute(area.x, area.w, layer.gap, &sizes);
-    let size = icon_side(area.h);
     let mut scaled_gifs = HashMap::new();
     for (item, (x, iw)) in layer.items.iter().zip(slots) {
         let Some(id) = item.id() else {
@@ -1013,7 +1022,11 @@ pub fn bar(
             );
             continue;
         }
-        let rect = Rect { x, w: iw, ..area };
+        // A smaller circle is centred vertically in the row.
+        let ih = layer.circle_diameter(item).unwrap_or(area.h);
+        let y = (area.y + (area.h - ih) / 2.0).round();
+        let rect = Rect::new(x, y, iw, ih);
+        let size = icon_side(ih);
         let frame = layer.frame_for(item);
         match item.kind {
             ItemKind::Button => {
@@ -1417,6 +1430,48 @@ mod tests {
         // over the black background (premultiplied: 0x80 blue, alpha 0xff).
         assert_eq!(press(&mut s, 0, &mut c), [0xff, 0, 0, 0xff]);
         assert_eq!(press(&mut s, 1, &mut c), [0, 0, 0x80, 0xff]);
+    }
+
+    fn circle_layer(size: &str) -> Result<Scene> {
+        let font = font().ok_or(anyhow::anyhow!("no font"))?;
+        let cfg: Config = toml::from_str(&format!(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "button"
+            id = "c"
+            icon = "builtin:folder"
+            shape = "circle"
+            background = "#ff0000"
+            {size}
+            action = {{ type = "socket" }}
+            "##
+        ))?;
+        let layer = cfg.default_layer().ok_or(anyhow::anyhow!("no layer"))?;
+        let mut icons = IconResolver::new(None, icon_size(H));
+        bar(W, H, &font, &layer, &mut icons)
+    }
+
+    #[test]
+    fn circle_size_sets_the_diameter_centred_in_the_row() {
+        let Some(font) = font() else { return };
+        let s = circle_layer("size = 40").unwrap();
+        let r = s.buttons[0].rect;
+        // Row: y 4..56 (52 px); a 40 px circle sits at y 10..50.
+        assert_eq!((r.x, r.y, r.w, r.h), (4.0, 10.0, 40.0, 40.0));
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live()).unwrap();
+        assert_eq!(pixel(&c, r.x + 1.0, 30.0), [0xff, 0, 0, 0xff], "left edge");
+        assert_eq!(pixel(&c, r.x + 20.0, 11.0), [0xff, 0, 0, 0xff], "top edge");
+        assert_eq!(pixel(&c, r.x + 20.0, 8.0), [0, 0, 0, 0xff], "above it");
+        assert_eq!(pixel(&c, r.x + 41.0, 30.0), [0, 0, 0, 0xff], "right of it");
+        assert_eq!(pixel(&c, r.x + 2.0, 12.0), [0, 0, 0, 0xff], "corner of its square");
+        // The full row's height is the default and the maximum.
+        assert_eq!(circle_layer("").unwrap().buttons[0].rect.h, 52.0);
+        assert_eq!(circle_layer("size = 52").unwrap().buttons[0].rect.h, 52.0);
+        let err = format!("{:#}", circle_layer("size = 53").err().unwrap());
+        assert!(err.contains("size 53 px is larger than the row, which is 52 px"), "{err}");
     }
 
     #[test]

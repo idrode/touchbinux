@@ -73,6 +73,9 @@ pub struct LayerConfig {
     pub item_background: Option<Background>,
     #[serde(default)]
     pub item_pressed_background: Option<Color>,
+    /// Default diameter of the layer's circles (`size` on an item).
+    #[serde(default)]
+    pub item_size: Option<f32>,
     #[serde(default)]
     pub items: Vec<ItemConfig>,
 }
@@ -99,7 +102,7 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             ItemKind::Button => "button",
             ItemKind::Clock => "clock",
@@ -173,6 +176,10 @@ pub struct ItemConfig {
     /// Highlight colour while pressed (items that have one: not volume/brightness).
     #[serde(default)]
     pub pressed_background: Option<Color>,
+    /// Circles only: diameter in px (default and maximum: the row's height). `size`
+    /// in the TOML; named apart from the `size()` method.
+    #[serde(default, rename = "size")]
+    pub diameter: Option<f32>,
     /// text: the socket key whose value it shows (`{"type":"set","key":...}`).
     #[serde(default)]
     pub key: Option<String>,
@@ -261,8 +268,8 @@ impl ItemConfig {
         let frame: &[&str] = match self.kind {
             ItemKind::Spacer => &[],
             // They unfold instead of showing a pressed highlight.
-            ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background"],
-            _ => &["shape", "radius", "background", "pressed_background"],
+            ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
+            _ => &["shape", "radius", "background", "pressed_background", "size"],
         };
         let allowed: &[&str] = match self.kind {
             ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
@@ -298,6 +305,7 @@ impl ItemConfig {
             ("radius", self.radius.is_some()),
             ("background", self.background.is_some()),
             ("pressed_background", self.pressed_background.is_some()),
+            ("size", self.diameter.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -360,6 +368,9 @@ impl ItemConfig {
         if self.anim_ms.is_some_and(|ms| ms > MAX_ANIM_MS) {
             bail!("{what}: anim_ms must be 0..={MAX_ANIM_MS}");
         }
+        if self.diameter.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
+            bail!("{what}: size must be a diameter in px, in (0, {MAX_PX}]");
+        }
         if self.expand_width.is_some_and(|w| !(w > 0.0 && w <= MAX_PX)) {
             bail!("{what}: expand_width must be in (0, {MAX_PX}]");
         }
@@ -382,6 +393,12 @@ impl LayerConfig {
             bail!("layer id must not be empty");
         }
         let px_ok = |v: f32| (0.0..=MAX_PX).contains(&v);
+        if self.item_size.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
+            bail!(
+                "layer {:?}: item_size must be a diameter in px, in (0, {MAX_PX}]",
+                self.id
+            );
+        }
         if !px_ok(self.margin) || !px_ok(self.gap) {
             bail!(
                 "layer {:?}: margin and gap must be in [0, {MAX_PX}]",
@@ -391,6 +408,15 @@ impl LayerConfig {
         for item in &self.items {
             item.validate()
                 .with_context(|| format!("layer {:?}", self.id))?;
+            if item.diameter.is_some() && !self.is_circle(item) {
+                bail!(
+                    "layer {:?}: {} {:?}: `size` only applies to shape = \"circle\" \
+                     (use width for other shapes)",
+                    self.id,
+                    item.kind.name(),
+                    item.id().unwrap_or("")
+                );
+            }
             if self.is_circle(item) && (item.width.is_some() || item.stretch.is_some())
             {
                 bail!(
@@ -409,6 +435,15 @@ impl LayerConfig {
     /// no box and are never circles.
     pub fn is_circle(&self, item: &ItemConfig) -> bool {
         item.kind != ItemKind::Spacer && self.frame_for(item).shape == Shape::Circle
+    }
+
+    /// A circle's diameter if configured (its own `size`, else the layer's
+    /// `item_size`); `None` for non-circles, or to use the row's height. Checked
+    /// against the row's height when the scene is built, which knows the bar.
+    pub fn circle_diameter(&self, item: &ItemConfig) -> Option<f32> {
+        self.is_circle(item)
+            .then(|| item.diameter.or(self.item_size))
+            .flatten()
     }
 
     /// `item`'s box: its own `shape`/`radius`/`background`, else the layer's
@@ -647,6 +682,7 @@ impl Config {
                 radius: None,
                 background: None,
                 pressed_background: None,
+                diameter: None,
                 gif: None,
             })
             .collect();
@@ -658,6 +694,7 @@ impl Config {
             item_radius: None,
             item_background: None,
             item_pressed_background: None,
+            item_size: None,
             items,
         }))
     }
@@ -1075,6 +1112,39 @@ mod tests {
         ] {
             assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
         }
+    }
+
+    #[test]
+    fn circle_sizes() {
+        let c = parse(
+            "[[layers]]\nid='m'\nitem_size=40\n\
+             [[layers.items]]\ntype='battery'\nshape='circle'\n\
+             [[layers.items]]\ntype='clock'\nshape='circle'\nsize=30\n\
+             [[layers.items]]\ntype='clock'\nid='plain'",
+        )
+        .unwrap();
+        let l = &c.layers[0];
+        assert_eq!(l.circle_diameter(&l.items[0]), Some(40.0)); // layer default
+        assert_eq!(l.circle_diameter(&l.items[1]), Some(30.0)); // its own
+        assert_eq!(l.circle_diameter(&l.items[2]), None); // not a circle: ignored
+        let item = |layer: &str, body: &str| {
+            format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{body}")
+        };
+        for (layer, body) in [
+            ("", "type='clock'\nsize=40"), // not a circle
+            ("", "type='clock'\nshape='rounded'\nsize=40"),
+            ("", "type='clock'\nshape='circle'\nsize=0"),
+            ("", "type='clock'\nshape='circle'\nsize=-10"),
+            ("", "type='clock'\nshape='circle'\nsize=nan"),
+            ("", "type='clock'\nshape='circle'\nsize='big'"),
+            ("", "type='spacer'\nsize=10"),
+            ("item_size=-1", "type='clock'"),
+            ("item_size=0", "type='clock'"),
+        ] {
+            assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
+        }
+        let err = format!("{:#}", parse(&item("", "type='clock'\nsize=40")).unwrap_err());
+        assert!(err.contains("`size` only applies to shape"), "{err}");
     }
 
     #[test]

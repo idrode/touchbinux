@@ -284,6 +284,11 @@ impl Scene {
 
     pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, live: &Live) -> Result<()> {
         canvas.copy_from(&self.background)?;
+        // Before the press overlay (a `text` item is also a button) and before the
+        // unfolded slider's veil, which must cover them.
+        for text in &self.texts {
+            text.draw(canvas, font);
+        }
         if let Capture::Button(i, true) = self.capture {
             let r = self.buttons[i].rect;
             canvas.fill_rounded_rect(r.x, r.y, r.w, r.h, RADIUS, PRESSED_OVERLAY);
@@ -320,9 +325,6 @@ impl Scene {
         }
         for s in &self.sliders {
             s.draw(canvas, font);
-        }
-        for text in &self.texts {
-            text.draw(canvas, font);
         }
         if let (true, Some((x, y))) = (self.show_finger, self.finger) {
             let h = canvas.height() as f32;
@@ -564,14 +566,15 @@ impl Scene {
         }
     }
 
+    /// Sets every text item shown under `id` (a `text` item's socket key); returns
+    /// whether any of them changed.
     pub fn set_text(&mut self, id: &str, text: &str) -> bool {
-        match self.texts.iter_mut().find(|t| t.id == id) {
-            Some(t) if t.text != text => {
-                t.text = text.to_string();
-                true
-            }
-            _ => false,
+        let mut changed = false;
+        for t in self.texts.iter_mut().filter(|t| t.id == id && t.text != text) {
+            t.text = text.to_string();
+            changed = true;
         }
+        changed
     }
 
     /// One button: rounded background, then icon + label centred as a group.
@@ -1033,6 +1036,16 @@ pub fn bar(
                 let icon = gif_icon(item, rect, &mut scaled_gifs);
                 scene.add_button(rect, font, ButtonSpec::new(id, icon, ""));
             }
+            ItemKind::Text => {
+                // Shown under its key (see `set_text`); tapped like a button.
+                let key = item.key.as_deref().unwrap_or("");
+                scene.add_text(rect, key, "");
+                scene.buttons.push(Button {
+                    id: id.to_string(),
+                    rect,
+                    anim: None,
+                });
+            }
             ItemKind::Spacer => {}
         }
     }
@@ -1239,6 +1252,26 @@ mod tests {
         let (_, ev) = tap(&mut s, (r.x + 5.0, r.y + 5.0), MS(10), &font);
         assert_eq!(ev, vec![UiEvent::Tap("brightness".into())]);
         assert!(!s.expanders[1].fold.is_active(MS(10)));
+    }
+
+    #[test]
+    fn text_items_follow_their_key_and_report_taps() {
+        let Some(font) = font() else { return };
+        let cfg: Config = toml::from_str(
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='text'\nid='w'\nkey='weather'\n\
+             [[layers.items]]\ntype='text'\nid='w2'\nkey='weather'",
+        )
+        .unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let mut s = bar(W, H, &font, &layer, &mut icons).unwrap();
+        assert!(s.set_text("weather", "18 °C"));
+        assert!(!s.set_text("weather", "18 °C"));
+        assert!(!s.set_text("other", "x"));
+        assert!(s.texts.iter().all(|t| t.text == "18 °C"));
+        let r = s.texts[0].rect;
+        let (_, ev) = tap(&mut s, (r.x + 5.0, r.y + 5.0), MS(10), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("w".into())]);
     }
 
     /// Not a check: time to draw one frame with the volume slider unfolding and the

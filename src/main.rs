@@ -75,7 +75,7 @@ const HYPRCTL_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_PATH: &str = "/run/touchbinux.sock";
 /// Quickshell may set arbitrary keys; keep the store bounded.
 const MAX_KEYS: usize = 256;
-const MAX_KEY_LEN: usize = 64;
+const MAX_KEY_LEN: usize = config::MAX_KEY_LEN;
 
 /// tiny-dfr's config uses FontTemplate ":bold"; these are tried in order, then any
 /// font on the system, then none (see `Font::find`).
@@ -221,11 +221,7 @@ impl App {
     }
 
     fn label(&self) -> String {
-        match self.store.get("label") {
-            Some(Value::String(s)) => s.clone(),
-            Some(v) => v.to_string(),
-            None => String::new(),
-        }
+        self.store.get("label").map(value_text).unwrap_or_default()
     }
 
     /// Rebuilds the scene from current state, keeping a press/drag in progress.
@@ -249,7 +245,14 @@ impl App {
         match self.args.scene.as_str() {
             "windows" => scenes::windows(w, h, font, &self.hypr.state, &mut self.icons, &shared),
             "bar" => match self.config.default_layer() {
-                Some(layer) => scenes::bar(w, h, font, &layer, &mut self.icons),
+                Some(layer) => {
+                    let mut scene = scenes::bar(w, h, font, &layer, &mut self.icons)?;
+                    // `text` items show what clients have already set.
+                    for (key, value) in &self.store {
+                        scene.set_text(key, &value_text(value));
+                    }
+                    Ok(scene)
+                }
                 None => {
                     let mut scene = Scene::new(w, h)?;
                     let r = Rect { w: 420.0, ..area };
@@ -394,11 +397,10 @@ impl App {
             "label" if !value.is_string() => return Err("label must be a string".into()),
             _ => {}
         }
+        let text = value_text(&value);
         self.store.insert(key.clone(), value);
-        Ok(key == "label" && {
-            let label = self.label();
-            self.scene.set_text("label", &label)
-        })
+        // `text` items showing this key (and the demo scene's "label").
+        Ok(self.scene.set_text(&key, &text))
     }
 
     /// Re-reads the config file; on any error keeps the current one.
@@ -758,6 +760,14 @@ fn watch_hypr(
         *watch = None;
     }
     Ok(())
+}
+
+/// How a client-set value is shown: strings as they are, anything else as JSON.
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    }
 }
 
 fn ui_event_json(ev: &UiEvent) -> Value {

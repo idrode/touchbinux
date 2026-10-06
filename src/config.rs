@@ -34,6 +34,8 @@ const MAX_PX: f32 = 4000.0;
 const MAX_ANIM_MS: u64 = 2000;
 /// Shorter than this, a slider would fold before you could aim at it.
 const MIN_COLLAPSE_MS: u64 = 500;
+/// Longest key a socket client may set (and so a `text` item may show).
+pub const MAX_KEY_LEN: usize = 64;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +84,7 @@ pub enum ItemKind {
     Volume,
     Brightness,
     Gif,
+    Text,
     Spacer,
 }
 
@@ -94,6 +97,7 @@ impl ItemKind {
             ItemKind::Volume => "volume",
             ItemKind::Brightness => "brightness",
             ItemKind::Gif => "gif",
+            ItemKind::Text => "text",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -149,6 +153,9 @@ pub struct ItemConfig {
     /// gif: "on_tap" (default) or "always".
     #[serde(default)]
     pub play: Option<Play>,
+    /// text: the socket key whose value it shows (`{"type":"set","key":...}`).
+    #[serde(default)]
+    pub key: Option<String>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
@@ -199,6 +206,7 @@ impl ItemConfig {
                 ItemKind::Clock => 120.0,
                 ItemKind::Battery => 80.0,
                 ItemKind::Gif => 60.0,
+                ItemKind::Text => 200.0,
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
             }),
         }
@@ -240,6 +248,7 @@ impl ItemConfig {
                 "collapse_after_ms",
             ],
             ItemKind::Gif => &["id", "path", "play", "action"],
+            ItemKind::Text => &["id", "key", "action"],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -255,6 +264,7 @@ impl ItemConfig {
             ("collapse_after_ms", self.collapse_after_ms.is_some()),
             ("path", self.path.is_some()),
             ("play", self.play.is_some()),
+            ("key", self.key.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) {
@@ -299,6 +309,14 @@ impl ItemConfig {
                 .is_some_and(|p| Path::new(p).is_absolute())
         {
             bail!("{what}: a gif needs `path`, an absolute path to the .gif");
+        }
+        if self.kind == ItemKind::Text
+            && !self
+                .key
+                .as_deref()
+                .is_some_and(|k| !k.is_empty() && k.len() <= MAX_KEY_LEN)
+        {
+            bail!("{what}: a text needs `key`, 1-{MAX_KEY_LEN} bytes (the socket key it shows)");
         }
         if self.kind == ItemKind::Clock {
             let fmt = self.clock_format();
@@ -556,6 +574,7 @@ impl Config {
                 collapse_after_ms: None,
                 path: None,
                 play: None,
+                key: None,
                 gif: None,
             })
             .collect();
@@ -851,6 +870,10 @@ mod tests {
             "type='gif'\npath='/a.gif'\nplay='loop'",
             "type='gif'\npath='/a.gif'\nicon='x'",
             "type='button'\nid='b'\nlabel='x'\npath='/a.gif'\naction={type='socket'}",
+            "type='text'",
+            "type='text'\nkey=''",
+            "type='text'\nkey='weather'\nlabel='x'",
+            "type='clock'\nkey='weather'",
         ];
         for body in bad {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");
@@ -882,6 +905,20 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn text_items() {
+        let c = parse(
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='text'\nkey='weather'\n\
+             [[layers.items]]\ntype='text'\nid='cpu'\nkey='cpu'\naction={type='socket'}",
+        )
+        .unwrap();
+        let items = &c.layers[0].items;
+        assert_eq!(items[0].id(), Some("text"));
+        assert_eq!(items[0].key.as_deref(), Some("weather"));
+        assert_eq!(items[0].size(), Size::Fixed(200.0));
+        assert!(matches!(c.action("cpu"), Some(Action::Socket)));
     }
 
     /// A real 2-frame GIF (6x3) in a fresh temporary directory.

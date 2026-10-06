@@ -2,6 +2,7 @@
 
 use crate::{
     canvas::Rgba,
+    frame::{Background, Frame, Radius, Shape},
     gif::{Decoded, Play},
     hyprctl::HyprAction,
     layout::Size,
@@ -63,6 +64,13 @@ pub struct LayerConfig {
     /// Space between neighbouring items, in px.
     #[serde(default = "default_gap")]
     pub gap: f32,
+    /// Defaults for the items' `shape`, `radius` and `background`.
+    #[serde(default)]
+    pub item_shape: Option<Shape>,
+    #[serde(default)]
+    pub item_radius: Option<Radius>,
+    #[serde(default)]
+    pub item_background: Option<Background>,
     #[serde(default)]
     pub items: Vec<ItemConfig>,
 }
@@ -153,6 +161,13 @@ pub struct ItemConfig {
     /// gif: "on_tap" (default) or "always".
     #[serde(default)]
     pub play: Option<Play>,
+    /// The item's box (see `frame`); unset ones come from the layer's `item_*`.
+    #[serde(default)]
+    pub shape: Option<Shape>,
+    #[serde(default)]
+    pub radius: Option<Radius>,
+    #[serde(default)]
+    pub background: Option<Background>,
     /// text: the socket key whose value it shows (`{"type":"set","key":...}`).
     #[serde(default)]
     pub key: Option<String>,
@@ -175,7 +190,7 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
-fn parse_color(s: &str) -> Option<Rgba> {
+pub fn parse_color(s: &str) -> Option<Rgba> {
     let hex = s.strip_prefix('#')?;
     if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -234,7 +249,12 @@ impl ItemConfig {
             Some(id) => format!("{kind} {id:?}"),
             None => kind.to_string(),
         };
-        // Fields each type accepts, besides type/width/stretch.
+        // Fields each type accepts, besides type/width/stretch and, for all but
+        // spacers, shape/radius/background.
+        let frame: &[&str] = match self.kind {
+            ItemKind::Spacer => &[],
+            _ => &["shape", "radius", "background"],
+        };
         let allowed: &[&str] = match self.kind {
             ItemKind::Button => &["id", "icon", "label", "color", "action", "anim_ms"],
             ItemKind::Clock => &["id", "format", "action"],
@@ -265,9 +285,12 @@ impl ItemConfig {
             ("path", self.path.is_some()),
             ("play", self.play.is_some()),
             ("key", self.key.is_some()),
+            ("shape", self.shape.is_some()),
+            ("radius", self.radius.is_some()),
+            ("background", self.background.is_some()),
         ];
         for (field, set) in present {
-            if set && !allowed.contains(&field) {
+            if set && !allowed.contains(&field) && !frame.contains(&field) {
                 bail!("{what}: `{field}` is not valid for a {kind}");
             }
         }
@@ -358,8 +381,39 @@ impl LayerConfig {
         for item in &self.items {
             item.validate()
                 .with_context(|| format!("layer {:?}", self.id))?;
+            if self.is_circle(item) && (item.width.is_some() || item.stretch.is_some())
+            {
+                bail!(
+                    "layer {:?}: {} {:?}: a circle is as wide as the row is tall; \
+                     remove `width`/`stretch` or use another shape",
+                    self.id,
+                    item.kind.name(),
+                    item.id().unwrap_or("")
+                );
+            }
         }
         Ok(())
+    }
+
+    /// Whether `item` is drawn as a circle (and so sized as a square). Spacers have
+    /// no box and are never circles.
+    pub fn is_circle(&self, item: &ItemConfig) -> bool {
+        item.kind != ItemKind::Spacer && self.frame_for(item).shape == Shape::Circle
+    }
+
+    /// `item`'s box: its own `shape`/`radius`/`background`, else the layer's
+    /// `item_*`, else the defaults.
+    pub fn frame_for(&self, item: &ItemConfig) -> Frame {
+        let d = Frame::default();
+        Frame {
+            shape: item.shape.or(self.item_shape).unwrap_or(d.shape),
+            radius: item.radius.or(self.item_radius).unwrap_or(d.radius),
+            background: match item.background.or(self.item_background) {
+                Some(Background::Color(c)) => Some(c),
+                Some(Background::Transparent) => None,
+                None => d.background,
+            },
+        }
     }
 }
 
@@ -575,6 +629,9 @@ impl Config {
                 path: None,
                 play: None,
                 key: None,
+                shape: None,
+                radius: None,
+                background: None,
                 gif: None,
             })
             .collect();
@@ -582,6 +639,9 @@ impl Config {
             id: LEGACY_LAYER.into(),
             margin: default_margin(),
             gap: default_gap(),
+            item_shape: None,
+            item_radius: None,
+            item_background: None,
             items,
         }))
     }
@@ -919,6 +979,89 @@ mod tests {
         assert_eq!(items[0].key.as_deref(), Some("weather"));
         assert_eq!(items[0].size(), Size::Fixed(200.0));
         assert!(matches!(c.action("cpu"), Some(Action::Socket)));
+    }
+
+    #[test]
+    fn frames_from_items_and_layers() {
+        use crate::frame::{DEFAULT_RADIUS, Radius, Shape};
+        let c = parse(
+            r##"
+            [[layers]]
+            id = "m"
+            item_shape = "rounded"
+            item_radius = "full"
+            item_background = "#102030"
+
+            [[layers.items]]
+            type = "clock"
+
+            [[layers.items]]
+            type = "button"
+            id = "b"
+            icon = "x"
+            shape = "circle"
+            background = "transparent"
+            action = { type = "socket" }
+
+            [[layers.items]]
+            type = "volume"
+            radius = 4
+
+            [[layers]]
+            id = "plain"
+            [[layers.items]]
+            type = "gif"
+            path = "/a.gif"
+            shape = "none"
+            "##,
+        )
+        .unwrap();
+        let (m, plain) = (&c.layers[0], &c.layers[1]);
+        let f = |l: &LayerConfig, i: usize| l.frame_for(&l.items[i]);
+        // Layer defaults...
+        assert_eq!(f(m, 0).shape, Shape::Rounded);
+        assert_eq!(f(m, 0).radius, Radius::Full);
+        assert_eq!(f(m, 0).background, Some(Rgba(0x10, 0x20, 0x30, 0xff)));
+        // ...overridden field by field.
+        assert_eq!(f(m, 1).shape, Shape::Circle);
+        assert_eq!(f(m, 1).background, None);
+        assert_eq!(f(m, 2).radius, Radius::Px(4.0));
+        assert_eq!(f(m, 2).background, Some(Rgba(0x10, 0x20, 0x30, 0xff)));
+        // Nothing set anywhere: the built-in defaults.
+        assert_eq!(f(plain, 0).shape, Shape::None);
+        assert_eq!(f(plain, 0).radius, Radius::Px(DEFAULT_RADIUS));
+    }
+
+    #[test]
+    fn rejects_bad_frames() {
+        let item = |layer: &str, body: &str| {
+            format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{body}")
+        };
+        let bad = [
+            ("", "type='clock'\nshape='square'"),
+            ("", "type='clock'\nradius=-2"),
+            ("", "type='clock'\nradius='half'"),
+            ("", "type='clock'\nbackground='#12345'"),
+            ("", "type='clock'\nbackground='blue'"),
+            ("", "type='spacer'\nshape='none'"),
+            ("", "type='spacer'\nbackground='transparent'"),
+            ("item_shape='oval'", "type='clock'"),
+            ("item_radius=-1", "type='clock'"),
+            ("item_background='#zzzzzz'", "type='clock'"),
+            // A circle's width is the row's height.
+            ("", "type='clock'\nshape='circle'\nwidth=80"),
+            ("item_shape='circle'", "type='battery'\nstretch=1"),
+        ];
+        for (layer, body) in bad {
+            assert!(parse(&item(layer, body)).is_err(), "accepted: {layer} / {body}");
+        }
+        // A spacer in a layer of circles keeps its stretch.
+        assert!(parse(&item("item_shape='circle'", "type='spacer'\nstretch=2")).is_ok());
+        let err = format!(
+            "{:#}",
+            parse(&item("", "type='clock'\nshape='circle'\nwidth=80")).unwrap_err()
+        );
+        assert!(err.contains("a circle is as wide as the row is tall"), "{err}");
     }
 
     /// The shipped example must load anywhere: valid, no files of its own, and every

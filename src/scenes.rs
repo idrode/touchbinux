@@ -6,6 +6,7 @@ use crate::{
     anim::Animated,
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{ItemConfig, ItemKind, LayerConfig},
+    frame::Frame,
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     gif::{Gif, GifPlayer, Play},
     hypr::HyprState,
@@ -24,7 +25,6 @@ const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
 const GREEN: Rgba = Rgba(0x20, 0xe0, 0x40, 0xff);
 const YELLOW: Rgba = Rgba(0xff, 0xd0, 0x00, 0xff);
 const GREY: Rgba = Rgba(0x80, 0x80, 0x80, 0xff);
-pub const BUTTON_GREY: Rgba = Rgba(0x3a, 0x3a, 0x3c, 0xff);
 const PRESSED_OVERLAY: Rgba = Rgba(0xff, 0xff, 0xff, 0x50);
 const ACCENT: Rgba = Rgba(0x40, 0xa0, 0xff, 0xff);
 const FOCUSED_GREY: Rgba = Rgba(0x5a, 0x5a, 0x60, 0xff);
@@ -102,6 +102,8 @@ pub enum UiEvent {
 struct Button {
     id: String,
     rect: Rect,
+    /// Its outline, for the pressed highlight.
+    frame: Frame,
     /// Index in `Scene::animated` of its icon, told about taps (`Animated::on_tap`).
     anim: Option<usize>,
 }
@@ -143,7 +145,7 @@ impl Slider {
         let px = self.text_px();
         let (x0, x1, cy) = self.track(font, px);
         let baseline = font.centered_baseline(cy, px);
-        canvas.fill_rounded_rect(r.x, r.y, r.w, r.h, RADIUS, BUTTON_GREY);
+        Frame::default().draw_background(canvas, r);
         canvas.draw_text(
             font,
             &self.label,
@@ -190,13 +192,14 @@ struct TextItem {
     id: String,
     rect: Rect,
     text: String,
+    frame: Frame,
 }
 
 impl TextItem {
     fn draw(&self, canvas: &mut Canvas, font: &Font) {
         let r = self.rect;
         let px = r.h * 0.38;
-        canvas.fill_rounded_rect(r.x, r.y, r.w, r.h, RADIUS, BUTTON_GREY);
+        self.frame.draw_background(canvas, r);
         let max_w = r.w - 4.0 * PADDING;
         let text = ellipsize(font, &self.text, px, max_w);
         let baseline = font.centered_baseline(r.y + r.h / 2.0, px);
@@ -290,8 +293,8 @@ impl Scene {
             text.draw(canvas, font);
         }
         if let Capture::Button(i, true) = self.capture {
-            let r = self.buttons[i].rect;
-            canvas.fill_rounded_rect(r.x, r.y, r.w, r.h, RADIUS, PRESSED_OVERLAY);
+            let b = &self.buttons[i];
+            b.frame.fill(canvas, b.rect, PRESSED_OVERLAY);
         }
         for (rect, item) in &self.animated {
             item.draw(canvas, *rect, t);
@@ -577,13 +580,15 @@ impl Scene {
         changed
     }
 
-    /// One button: rounded background, then icon + label centred as a group.
+    /// One button: its background (see `Frame`), then icon + label centred as a group.
     pub fn add_button(&mut self, rect: Rect, font: &Font, spec: ButtonSpec) {
         let Rect { x, y, w, h } = rect;
         let bg = &mut self.background;
-        bg.fill_rounded_rect(x, y, w, h, RADIUS, spec.style.bg);
+        let frame = spec.style.frame;
+        frame.draw_background(bg, rect);
         if let Some(accent) = spec.style.underline {
-            bg.fill_rounded_rect(x + RADIUS, y + h - 4.0, w - 2.0 * RADIUS, 3.0, 1.5, accent);
+            let inset = frame.corner(rect).max(4.0);
+            bg.fill_rounded_rect(x + inset, y + h - 4.0, w - 2.0 * inset, 3.0, 1.5, accent);
         }
 
         let icon_h = icon_side(h);
@@ -643,6 +648,7 @@ impl Scene {
         self.buttons.push(Button {
             id: spec.id,
             rect,
+            frame,
             anim,
         });
     }
@@ -667,14 +673,13 @@ impl Scene {
 
     /// A live widget: its button background goes to the static layer, the widget is
     /// painted over it every frame. Taps on it are reported as `id`.
-    pub fn add_widget(&mut self, rect: Rect, id: &str, widget: Box<dyn Widget>) {
-        let Rect { x, y, w, h } = rect;
-        self.background
-            .fill_rounded_rect(x, y, w, h, RADIUS, BUTTON_GREY);
+    pub fn add_widget(&mut self, rect: Rect, id: &str, frame: Frame, widget: Box<dyn Widget>) {
+        frame.draw_background(&mut self.background, rect);
         self.widgets.push((rect, widget));
         self.buttons.push(Button {
             id: id.into(),
             rect,
+            frame,
             anim: None,
         });
     }
@@ -689,11 +694,12 @@ impl Scene {
         });
     }
 
-    pub fn add_text(&mut self, area: Rect, id: &str, text: &str) {
+    pub fn add_text(&mut self, area: Rect, id: &str, text: &str, frame: Frame) {
         self.texts.push(TextItem {
             id: id.into(),
             rect: area,
             text: text.into(),
+            frame,
         });
     }
 }
@@ -733,7 +739,7 @@ impl From<Option<AppIcon>> for Icon {
 
 #[derive(Clone, Copy)]
 pub struct ButtonStyle {
-    pub bg: Rgba,
+    pub frame: Frame,
     pub text: Rgba,
     pub underline: Option<Rgba>,
 }
@@ -741,7 +747,7 @@ pub struct ButtonStyle {
 impl Default for ButtonStyle {
     fn default() -> Self {
         ButtonStyle {
-            bg: BUTTON_GREY,
+            frame: Frame::default(),
             text: Rgba::WHITE,
             underline: None,
         }
@@ -768,7 +774,6 @@ impl ButtonSpec {
 
 pub const MARGIN: f32 = 4.0;
 pub const GAP: f32 = 12.0;
-pub const RADIUS: f32 = 8.0;
 pub const PADDING: f32 = 8.0;
 const ICON_LABEL_GAP: f32 = 10.0;
 
@@ -839,6 +844,7 @@ fn add_levels(scene: &mut Scene, area: Rect, shared: &Shared) -> f32 {
         },
         "label",
         shared.label,
+        Frame::default(),
     );
     x
 }
@@ -909,7 +915,7 @@ pub fn windows(
         let active = hypr.active_workspace == Some(id);
         let mut spec = ButtonSpec::new(&format!("workspace:{id}"), Icon::None, name);
         if active {
-            spec.style.bg = ACCENT;
+            spec.style.frame = Frame::with_background(ACCENT);
         } else if hypr.window_count(id) == 0 {
             spec.style.text = DIM_TEXT;
         }
@@ -936,7 +942,7 @@ pub fn windows(
         };
         let mut spec = ButtonSpec::new(&format!("window:{}", win.addr), icon, "");
         if hypr.focused.as_deref() == Some(win.addr.as_str()) {
-            spec.style.bg = FOCUSED_GREY;
+            spec.style.frame = Frame::with_background(FOCUSED_GREY);
             spec.style.underline = Some(ACCENT);
         }
         scene.add_button(
@@ -978,7 +984,18 @@ pub fn bar(
         (w as f32 - 2.0 * m).max(0.0),
         (h as f32 - 2.0 * m).max(1.0),
     );
-    let sizes: Vec<_> = layer.items.iter().map(ItemConfig::size).collect();
+    // Circles are as wide as the row is tall (config rejects width/stretch on them).
+    let sizes: Vec<_> = layer
+        .items
+        .iter()
+        .map(|i| {
+            if layer.is_circle(i) {
+                layout::Size::Fixed(area.h)
+            } else {
+                i.size()
+            }
+        })
+        .collect();
     let slots = layout::distribute(area.x, area.w, layer.gap, &sizes);
     let size = icon_side(area.h);
     let mut scaled_gifs = HashMap::new();
@@ -998,14 +1015,18 @@ pub fn bar(
             continue;
         }
         let rect = Rect { x, w: iw, ..area };
+        let frame = layer.frame_for(item);
         match item.kind {
             ItemKind::Button => {
                 let icon = button_icon(item, icons, size);
                 let label = item.label.as_deref().unwrap_or("");
-                scene.add_button(rect, font, ButtonSpec::new(id, icon, label));
+                let mut spec = ButtonSpec::new(id, icon, label);
+                spec.style.frame = frame;
+                scene.add_button(rect, font, spec);
             }
             ItemKind::Clock => {
-                scene.add_widget(rect, id, Box::new(Clock::new(item.clock_format())));
+                let clock = Clock::new(item.clock_format());
+                scene.add_widget(rect, id, frame, Box::new(clock));
             }
             ItemKind::Battery => {
                 let dirs = std::iter::once(item.battery_icon_dir())
@@ -1023,7 +1044,7 @@ pub fn bar(
                 if icons.is_none() {
                     eprintln!("bar: no battery icons found; drawing my own");
                 }
-                scene.add_widget(rect, id, Box::new(BatteryWidget { icons }));
+                scene.add_widget(rect, id, frame, Box::new(BatteryWidget { icons }));
             }
             ItemKind::Volume | ItemKind::Brightness => {
                 let level = if item.kind == ItemKind::Volume {
@@ -1041,19 +1062,22 @@ pub fn bar(
                 let open = expanded_rect(rect, area, width);
                 scene
                     .expanders
-                    .push(Expander::new(id, level, rect, open, color, fold));
+                    .push(Expander::new(id, level, rect, open, color, frame, fold));
             }
             ItemKind::Gif => {
                 let icon = gif_icon(item, rect, &mut scaled_gifs);
-                scene.add_button(rect, font, ButtonSpec::new(id, icon, ""));
+                let mut spec = ButtonSpec::new(id, icon, "");
+                spec.style.frame = frame;
+                scene.add_button(rect, font, spec);
             }
             ItemKind::Text => {
                 // Shown under its key (see `set_text`); tapped like a button.
                 let key = item.key.as_deref().unwrap_or("");
-                scene.add_text(rect, key, "");
+                scene.add_text(rect, key, "", frame);
                 scene.buttons.push(Button {
                     id: id.to_string(),
                     rect,
+                    frame,
                     anim: None,
                 });
             }
@@ -1283,6 +1307,94 @@ mod tests {
         let r = s.texts[0].rect;
         let (_, ev) = tap(&mut s, (r.x + 5.0, r.y + 5.0), MS(10), &font);
         assert_eq!(ev, vec![UiEvent::Tap("w".into())]);
+    }
+
+    /// [circle] [transparent button] [pill volume] on a 2008x60 bar.
+    const FRAMES: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "c"
+        label = "C"
+        shape = "circle"
+        background = "#ff0000"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "button"
+        id = "t"
+        label = "T"
+        background = "transparent"
+        width = 100
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "volume"
+        radius = "full"
+        background = "#0000ff"
+        expand_width = 1000
+    "##;
+
+    fn frames_scene(font: &Font) -> Scene {
+        let cfg: Config = toml::from_str(FRAMES).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        bar(W, H, font, &layer, &mut icons).unwrap()
+    }
+
+    /// Premultiplied RGBA of one pixel.
+    fn pixel(c: &Canvas, x: f32, y: f32) -> [u8; 4] {
+        let i = ((y as u32 * c.width() + x as u32) * 4) as usize;
+        c.data()[i..i + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn circles_are_square_and_round() {
+        let Some(font) = font() else { return };
+        let s = frames_scene(&font);
+        let r = s.buttons[0].rect;
+        assert_eq!((r.w, r.h), (52.0, 52.0), "as wide as the row is tall");
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live()).unwrap();
+        // Red at the edge midpoints, black in the square's corners.
+        assert_eq!(pixel(&c, r.x + 1.0, r.y + r.h / 2.0)[0], 0xff);
+        assert_eq!(pixel(&c, r.x + 1.0, r.y + 1.0), [0, 0, 0, 0xff]);
+        assert_eq!(pixel(&c, r.x + r.w - 2.0, r.y + r.h - 2.0), [0, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn transparent_buttons_still_show_the_press() {
+        let Some(font) = font() else { return };
+        let mut s = frames_scene(&font);
+        let r = s.buttons[1].rect;
+        let at = (r.x + 3.0, r.y + r.h / 2.0); // clear of the label
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live()).unwrap();
+        assert_eq!(pixel(&c, at.0, at.1), [0, 0, 0, 0xff], "no background");
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, at, MS(10), &font, &mut out);
+        s.draw(&mut c, MS(10), &font, &live()).unwrap();
+        assert!(pixel(&c, at.0, at.1)[0] > 0x20, "pressed highlight");
+        // In the shape of the frame: the rounded corner stays black.
+        assert_eq!(pixel(&c, r.x, r.y), [0, 0, 0, 0xff]);
+        s.handle_touch(Phase::Up, at, MS(20), &font, &mut out);
+        assert_eq!(out, vec![UiEvent::Tap("t".into())]);
+    }
+
+    #[test]
+    fn sliders_keep_their_frame_when_unfolded() {
+        let Some(font) = font() else { return };
+        let mut s = frames_scene(&font);
+        let live = live();
+        let vol = s.expanders[0].rect;
+        tap(&mut s, (vol.x + 5.0, vol.y + vol.h / 2.0), MS(0), &font);
+        s.advance(MS(1000), &live);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(1000), &font, &live).unwrap();
+        let open = s.expanders[0].open_rect;
+        // Blue background, pill-shaped: round ends leave the corners black.
+        assert_eq!(pixel(&c, open.x + open.w / 2.0, open.y + 2.0)[2], 0xff);
+        assert_eq!(pixel(&c, open.x + 1.0, open.y + 1.0), [0, 0, 0, 0xff]);
+        assert_eq!(pixel(&c, open.x + open.w - 2.0, open.y + 1.0), [0, 0, 0, 0xff]);
     }
 
     /// Not a check: time to draw one frame with the volume slider unfolding and the

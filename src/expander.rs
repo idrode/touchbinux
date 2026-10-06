@@ -9,7 +9,8 @@
 use crate::{
     anim::Tween,
     canvas::{Canvas, Font, Rect, Rgba},
-    scenes::{BUTTON_GREY, PADDING, RADIUS, icon_side},
+    frame::Frame,
+    scenes::{PADDING, icon_side},
     widgets::{DIM, ICON, Level, Live, SpeakerLook, TEXT, WAVE_THRESHOLDS, draw_speaker, draw_sun},
 };
 use std::time::Duration;
@@ -165,6 +166,8 @@ pub struct Expander {
     pub rect: Rect,
     pub open_rect: Rect,
     color: Rgba,
+    /// Shape, radius and background, folded and unfolded.
+    frame: Frame,
     pub fold: Fold,
     /// The value under the finger while dragging; shown instead of the live one so
     /// late readings of the real level don't make the knob jump back.
@@ -184,6 +187,7 @@ impl Expander {
         rect: Rect,
         open_rect: Rect,
         color: Rgba,
+        frame: Frame,
         fold: Fold,
     ) -> Expander {
         Expander {
@@ -192,6 +196,7 @@ impl Expander {
             rect,
             open_rect,
             color,
+            frame,
             fold,
             drag: None,
             available: true,
@@ -277,7 +282,8 @@ impl Expander {
     pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, live: &Live) {
         let k = self.fold.progress(t);
         let r = self.current_rect(t);
-        canvas.fill_rounded_rect(r.x, r.y, r.w, r.h, RADIUS, BUTTON_GREY);
+        // Corner radius follows the current size: a circle unfolds into a pill.
+        self.frame.draw_background(canvas, r);
 
         let value = self.value(live);
         let text = value.map_or("–".to_string(), |v| v.to_string());

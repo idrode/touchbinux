@@ -12,7 +12,7 @@ use resvg::{
 use std::{f32::consts::TAU, fs, path::Path as FsPath};
 
 /// Straight (non-premultiplied) RGBA colour.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
 impl Rgba {

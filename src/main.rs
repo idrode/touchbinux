@@ -4,6 +4,7 @@ mod canvas;
 mod config;
 mod display;
 mod expander;
+mod frame;
 mod gif;
 mod hypr;
 mod hyprctl;
@@ -305,6 +306,7 @@ impl App {
                     },
                     "label",
                     &label,
+                    frame::Frame::default(),
                 );
                 let sx = lx + label_w + scenes::GAP;
                 let slider = Rect {

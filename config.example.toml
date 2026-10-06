@@ -29,6 +29,8 @@ gap = 12
 #                     (so no width/stretch on it); none: no background, content only
 #   item_radius     = 8 (default, px) | "full" (a pill: half the height)
 #   item_background = "#3a3a3c" (default) | "#rrggbbaa" | "transparent"
+#   item_text_color = "#rrggbb" | "#rrggbbaa": labels, clock, text items, the
+#                     volume/brightness value (default: white; grey "no data" marks)
 #   item_size       = diameter of circles, px (default and maximum: the row's
 #                     height, 52 with this margin; only for shape = "circle")
 # While pressed (not for volume/brightness, which unfold instead):
@@ -116,6 +118,17 @@ format = "%H:%M"
 # pressed_background = "#1793d1"
 # pressed_scale = 0.9
 # action = { type = "key", key = "KEY_PREVIOUSSONG" }
+#
+# Amber text on a dark red pill; on volume/brightness, `color` is the slider fill
+# and text_color only the number (add text_color = "#ffcc00" to the items above):
+# [[layers.items]]
+# type = "button"
+# id = "amber"
+# label = "F1"
+# radius = "full"
+# background = "#3a1010"
+# text_color = "#ffcc00"
+# action = { type = "key", key = "KEY_F1" }
 #
 # Just the icon, no background:
 # [[layers.items]]

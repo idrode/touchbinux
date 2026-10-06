@@ -343,6 +343,7 @@ default_layer = "main"
 | `item_radius` | `8` | | radio por defecto |
 | `item_background` | `"#3a3a3c"` | | fondo por defecto |
 | `item_size` | alto de la fila | | diámetro por defecto de sus círculos |
+| `item_text_color` | blanco | | color del texto y los números (ver [Colores](#colores)) |
 | `item_pressed_background` | velo blanco translúcido | | fondo al pulsar |
 | `item_pressed_scale` | `1.0` | 0.8-1.2 | escala al pulsar |
 | `items` | `[]` | — | elementos, de izquierda a derecha (`[[layers.items]]`) |
@@ -584,6 +585,7 @@ En el de volumen, tocar el altavoz silencia/reactiva.
 | `collapse_after_ms` | `3000` | 500-60000 | se pliega tras este tiempo sin tocarlo |
 | `anim_ms` | `200` | 0-2000 | duración de desplegar/plegar |
 | `color` | `"#00ffb7"` | | parte llena del slider |
+| `text_color` | blanco | | solo el número (también al desplegar); no cambia el relleno |
 | `action` | — | | se ejecuta además al tocar (plegado) |
 
 ```toml
@@ -703,11 +705,40 @@ action = { type = "socket" }
 
 ### Colores
 
-`"#rrggbb"` o `"#rrggbbaa"` (alfa). `color` en `button` (icono o carpeta) y en
-`volume`/`brightness` (relleno del slider); `background`/`item_background` para el
-fondo (que además admite `"transparent"`). Otros formatos (`"red"`, `"#fff"`) son
-error. Los colores del texto y de la batería están fijos en el código
-(`src/scenes.rs`, `src/widgets.rs`).
+`"#rrggbb"` o `"#rrggbbaa"` (alfa). Otros formatos (`"red"`, `"#fff"`) son error.
+
+| Opción | Dónde | Qué pinta |
+|---|---|---|
+| `color` | `button` | el icono (o la carpeta) de un solo color |
+| `color` | `volume`, `brightness` | la parte llena del slider |
+| `background` / `item_background` | todos menos `spacer` | el fondo (admite además `"transparent"`) |
+| `pressed_background` / `item_pressed_background` | todos menos `spacer`, `volume`, `brightness` | el fondo al pulsar |
+| `text_color` / `item_text_color` | `button`, `clock`, `battery`, `text`, `volume`, `brightness` | todo el texto y los números del elemento |
+
+`text_color`, en detalle:
+
+- `button`: la etiqueta (`label`). Los iconos no cambian (para eso, `color`).
+- `clock`: la hora. `text`: el valor recibido por el socket.
+- `volume` y `brightness`: el número, plegado y desplegado, y el `–` que aparece sin
+  valor. `color` sigue siendo el relleno del slider.
+- `battery`: **la batería no muestra ningún número**; `text_color` solo cambia el
+  `?` que aparece cuando no hay datos de batería.
+- Sin `text_color`, como siempre: blanco, y gris para los marcadores sin datos
+  (`?`, `–`). `gif` y `spacer` no tienen texto: ponérselo es un error.
+
+```toml
+[[layers]]
+id = "main"
+item_text_color = "#ffcc00"     # todo el texto en ámbar...
+
+[[layers.items]]
+type = "volume"
+color = "#00ffb7"               # relleno del slider
+text_color = "#ffffff"          # ...salvo este número, en blanco
+```
+
+Los colores del icono de batería y de los iconos de volumen y brillo están fijos en
+el código (`src/widgets.rs`).
 
 ### Animaciones: resumen
 

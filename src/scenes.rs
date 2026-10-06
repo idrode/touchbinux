@@ -1008,10 +1008,21 @@ pub fn bar(
                 scene.add_widget(rect, id, Box::new(Clock::new(item.clock_format())));
             }
             ItemKind::Battery => {
-                let dir = Path::new(item.battery_icon_dir());
-                let icons = BatteryIcons::load(dir, size as u32)
-                    .inspect_err(|e| eprintln!("bar: battery icons: {e:#}; drawing my own"))
-                    .ok();
+                let dirs = std::iter::once(item.battery_icon_dir())
+                    .chain(crate::icons::FALLBACK_DIRS.iter().copied());
+                let mut icons = None;
+                for dir in dirs {
+                    match BatteryIcons::load(Path::new(dir), size as u32) {
+                        Ok(i) => {
+                            icons = Some(i);
+                            break;
+                        }
+                        Err(e) => eprintln!("bar: battery icons: {e:#}"),
+                    }
+                }
+                if icons.is_none() {
+                    eprintln!("bar: no battery icons found; drawing my own");
+                }
                 scene.add_widget(rect, id, Box::new(BatteryWidget { icons }));
             }
             ItemKind::Volume | ItemKind::Brightness => {

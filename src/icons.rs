@@ -22,6 +22,9 @@ use std::{
 const SIZES: &[&str] = &[
     "scalable", "64x64", "48x48", "96x96", "128x128", "256x256", "32x32", "24x24", "22x22", "16x16",
 ];
+/// Where an icon given by a path that doesn't exist is looked for, by file name: the
+/// tiny-dfr package's icons, the same ones install.sh copies from this repo.
+pub const FALLBACK_DIRS: &[&str] = &["/usr/share/tiny-dfr"];
 /// App icons for windows; the rest for config buttons (media keys etc.).
 const CATEGORIES: &[&str] = &["apps", "actions", "status", "devices", "places", "panel"];
 
@@ -190,7 +193,20 @@ impl IconResolver {
     fn find_icon_file(&self, name: &str) -> Option<PathBuf> {
         let p = Path::new(name);
         if p.is_absolute() {
-            return p.is_file().then(|| p.to_path_buf());
+            if p.is_file() {
+                return Some(p.to_path_buf());
+            }
+            // E.g. /etc/touchbinux/icons/play_pause.svg before install.sh copied it.
+            let found = p.file_name().and_then(|f| {
+                FALLBACK_DIRS
+                    .iter()
+                    .map(|d| Path::new(d).join(f))
+                    .find(|c| c.is_file())
+            });
+            if let Some(f) = &found {
+                eprintln!("icons: {name} not found, using {}", f.display());
+            }
+            return found;
         }
         for theme in &self.themes {
             for base in &self.icon_bases {

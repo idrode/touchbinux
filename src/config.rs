@@ -44,6 +44,8 @@ const PRESSED_SCALE: std::ops::RangeInclusive<f32> = 0.8..=1.2;
 pub const MAX_KEY_LEN: usize = 64;
 /// An expandable's children must fit in one unfolded row.
 const MAX_CHILDREN: usize = 12;
+/// `thumb_size` of a gif_picker, px (it is also capped to the row's height).
+const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,7 +102,7 @@ fn default_gap() -> f32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     Button,
     Clock,
@@ -110,6 +112,7 @@ pub enum ItemKind {
     Gif,
     Text,
     Expandable,
+    GifPicker,
     Spacer,
 }
 
@@ -124,6 +127,7 @@ impl ItemKind {
             ItemKind::Gif => "gif",
             ItemKind::Text => "text",
             ItemKind::Expandable => "expandable",
+            ItemKind::GifPicker => "gif_picker",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -177,7 +181,7 @@ pub struct ItemConfig {
     /// gif: absolute path of the .gif.
     #[serde(default)]
     pub path: Option<String>,
-    /// gif: "on_tap" (default) or "always".
+    /// gif, gif_picker: "on_tap" (default) or "always".
     #[serde(default)]
     pub play: Option<Play>,
     /// The item's box (see `frame`); unset ones come from the layer's `item_*`.
@@ -206,9 +210,17 @@ pub struct ItemConfig {
     /// expandable: what it unfolds into, left to right.
     #[serde(default)]
     pub children: Option<Vec<ChildConfig>>,
-    /// expandable: background of the children the daemon marks as active.
+    /// expandable: background of the children the daemon marks as active;
+    /// gif_picker: of the chosen GIF's thumbnail.
     #[serde(default)]
     pub active_color: Option<Color>,
+    /// gif_picker: absolute path of the folder whose GIFs it offers.
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// gif_picker: thumbnails' height, px (default: as high as the unfolded row
+    /// allows).
+    #[serde(default)]
+    pub thumb_size: Option<u32>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
@@ -294,6 +306,7 @@ impl ItemConfig {
                 ItemKind::Gif => 60.0,
                 ItemKind::Text => 200.0,
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
+                ItemKind::GifPicker => 80.0,
             }),
         }
     }
@@ -341,7 +354,7 @@ impl ItemConfig {
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
-            ItemKind::Expandable => &[
+            ItemKind::Expandable | ItemKind::GifPicker => &[
                 "shape",
                 "radius",
                 "background",
@@ -393,6 +406,17 @@ impl ItemConfig {
                 "active_color",
                 "text_color",
             ],
+            ItemKind::GifPicker => &[
+                "id",
+                "dir",
+                "play",
+                "thumb_size",
+                "action",
+                "anim_ms",
+                "expand_width",
+                "collapse_after_ms",
+                "active_color",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -418,6 +442,8 @@ impl ItemConfig {
             ("text_color", self.text_color.is_some()),
             ("children", self.children.is_some()),
             ("active_color", self.active_color.is_some()),
+            ("dir", self.dir.is_some()),
+            ("thumb_size", self.thumb_size.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -464,6 +490,17 @@ impl ItemConfig {
                 .is_some_and(|p| Path::new(p).is_absolute())
         {
             bail!("{what}: a gif needs `path`, an absolute path to the .gif");
+        }
+        if self.kind == ItemKind::GifPicker
+            && !self
+                .dir
+                .as_deref()
+                .is_some_and(|p| Path::new(p).is_absolute())
+        {
+            bail!("{what}: a gif_picker needs `dir`, the absolute path of a folder of GIFs");
+        }
+        if self.thumb_size.is_some_and(|s| !THUMB_SIZE.contains(&s)) {
+            bail!("{what}: thumb_size must be {THUMB_SIZE:?} px");
         }
         if self.kind == ItemKind::Text
             && !self
@@ -851,6 +888,8 @@ impl Config {
                 key: None,
                 children: None,
                 active_color: None,
+                dir: None,
+                thumb_size: None,
                 shape: None,
                 radius: None,
                 background: None,
@@ -1538,6 +1577,47 @@ mod tests {
         }
         let err = format!("{:#}", parse(&button("builtin:rocket", "")).unwrap_err());
         assert!(err.contains("builtin:folder_classic"), "lists the built-ins: {err}");
+    }
+
+    #[test]
+    fn gif_pickers() {
+        let c = parse(
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='gif_picker'\n\
+             dir='/home/u/Pictures/gifs'\nplay='always'\nwidth=90\nthumb_size=40\n\
+             expand_width=900\ncollapse_after_ms=5000\nanim_ms=150\n\
+             active_color='#ff000080'\nradius='full'\npressed_background='#00ff00'",
+        )
+        .unwrap();
+        let p = &c.layers[0].items[0];
+        assert_eq!(p.kind, ItemKind::GifPicker);
+        assert_eq!(p.id(), Some("gif_picker"));
+        assert_eq!(p.dir.as_deref(), Some("/home/u/Pictures/gifs"));
+        assert_eq!((p.play, p.thumb_size), (Some(Play::Always), Some(40)));
+        assert_eq!(p.size(), Size::Fixed(90.0));
+        let plain = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif_picker'\ndir='/g'")
+            .unwrap();
+        assert_eq!(plain.layers[0].items[0].size(), Size::Fixed(80.0));
+        let item = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif_picker'\n{body}");
+        for body in [
+            "",
+            "dir='Pictures/gifs'",
+            "dir='/g'\nthumb_size=4",
+            "dir='/g'\nthumb_size=500",
+            "dir='/g'\nplay='loop'",
+            "dir='/g'\nicon='x'",
+            "dir='/g'\npath='/a.gif'",
+            "dir='/g'\nlabel='x'",
+            "dir='/g'\ntext_color='#ffffff'",
+            "dir='/g'\npressed_scale=0.9",
+            "dir='/g'\nchildren=[]",
+            "dir='/g'\ndirectory='/h'",
+        ] {
+            assert!(parse(&item(body)).is_err(), "accepted: {body}");
+        }
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ndir='/g'").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif'\npath='/a.gif'\nthumb_size=40").is_err());
+        let err = format!("{:#}", parse(&item("")).unwrap_err());
+        assert!(err.contains("a gif_picker needs `dir`"), "{err}");
     }
 
     /// The shipped example must load anywhere: valid, no files of its own, and every

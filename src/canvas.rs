@@ -419,6 +419,7 @@ fn blend_over(dst: &mut [u8], color: Rgba, coverage: u32) {
 }
 
 /// A pre-rendered premultiplied RGBA bitmap (e.g. a GIF frame).
+#[derive(Clone)]
 pub struct Image {
     pixmap: Pixmap,
 }

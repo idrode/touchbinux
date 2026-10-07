@@ -9,7 +9,7 @@
 use crate::{
     anim::Animated,
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
-    expander::{Fold, lerp_rect},
+    expander::{Fold, expanded_rect, lerp_rect},
     frame::{DEFAULT_PRESSED, Frame, Shape},
     scenes::{PADDING, ellipsize, icon_side},
     widgets::{DIM, TEXT},
@@ -38,6 +38,14 @@ pub enum Glyph {
 }
 
 impl Glyph {
+    /// How wide it is drawn when icons are `side` px.
+    pub fn width(&self, side: f32) -> f32 {
+        match self {
+            Glyph::Image(img) => img.width() as f32,
+            _ => side,
+        }
+    }
+
     /// Draws it centred in the square `icon` at `alpha` (0..=1).
     pub fn draw(&self, canvas: &mut Canvas, icon: Rect, alpha: f32) {
         let (cx, cy) = icon.center();
@@ -88,39 +96,93 @@ pub struct Expandable {
     /// Folded place, and where it unfolds to.
     pub rect: Rect,
     pub open_rect: Rect,
+    /// The row it unfolds within, and its configured `expand_width` (`None`: fit
+    /// the children); to place it again when its children or icon change.
+    area: Rect,
+    width: Option<f32>,
     frame: Frame,
     /// Its icon; told about taps (`builtin:folder` opens).
     face: Box<dyn Animated>,
+    /// How wide the icon is drawn (a GIF may be wider than the usual square).
+    face_w: f32,
     label: String,
     pub children: Vec<Child>,
     active_color: Rgba,
     pub fold: Fold,
+    /// Without anything to show (an empty gif_picker) a tap doesn't unfold it.
+    pub enabled: bool,
+    /// Its children are choices (`UiEvent::Pick`) rather than actions.
+    pub picks: bool,
+}
+
+/// What `Expandable::new` needs besides its id, rect and children.
+pub struct Spec {
+    pub area: Rect,
+    pub width: Option<f32>,
+    pub frame: Frame,
+    pub face: Box<dyn Animated>,
+    pub label: String,
+    pub active_color: Rgba,
+    pub fold: Fold,
+    pub picks: bool,
 }
 
 impl Expandable {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: &str,
-        rect: Rect,
-        open_rect: Rect,
-        frame: Frame,
-        face: Box<dyn Animated>,
-        label: &str,
-        children: Vec<Child>,
-        active_color: Rgba,
-        fold: Fold,
-    ) -> Expandable {
-        Expandable {
+    pub fn new(id: &str, rect: Rect, spec: Spec, children: Vec<Child>, font: &Font) -> Expandable {
+        let mut e = Expandable {
             id: id.to_string(),
             rect,
-            open_rect,
-            frame,
-            face,
-            label: label.to_string(),
+            open_rect: rect,
+            area: spec.area,
+            width: spec.width,
+            frame: spec.frame,
+            face: spec.face,
+            face_w: icon_side(rect.h),
+            label: spec.label,
             children,
-            active_color,
-            fold,
+            active_color: spec.active_color,
+            fold: spec.fold,
+            enabled: true,
+            picks: spec.picks,
+        };
+        e.place(font);
+        e
+    }
+
+    /// Works out `open_rect` for the current children and icon.
+    fn place(&mut self, font: &Font) {
+        let header = self.header_w(self.rect.h);
+        let width = self
+            .width
+            .unwrap_or_else(|| default_width(self.rect.h, header, &self.children, font));
+        self.open_rect = expanded_rect(self.rect, self.area, width);
+    }
+
+    /// Replaces the children (e.g. the GIFs found in a folder), keeping the active
+    /// state of those that stay. Returns whether anything changed.
+    pub fn set_children(&mut self, mut children: Vec<Child>, font: &Font) -> bool {
+        for c in &mut children {
+            c.active |= self.children.iter().any(|o| o.id == c.id && o.active);
         }
+        self.children = children;
+        self.place(font);
+        true
+    }
+
+    /// Replaces the icon, drawn `width` px wide.
+    pub fn set_face(&mut self, face: Box<dyn Animated>, width: f32, font: &Font) {
+        self.face = face;
+        self.face_w = width;
+        self.place(font);
+    }
+
+    /// Unfolded, the icon's column at the left, never narrower than a square.
+    fn header_w(&self, row_h: f32) -> f32 {
+        row_h.max(self.face_w + 2.0 * CHILD_GAP)
+    }
+
+    fn header_end(&self, r: Rect) -> f32 {
+        r.x + self.header_w(r.h)
     }
 
     /// Keeps the state of the item it replaces (scene rebuilt on reload): how far
@@ -172,12 +234,13 @@ impl Expandable {
         if !(y >= r.y && y < r.y + r.h && x >= r.x && x < r.x + r.w) {
             return Part::Gap;
         }
-        if x < header_end(r) {
+        let header = self.header_end(r);
+        if x < header {
             return Part::Header;
         }
         (0..self.children.len())
             .find(|&j| {
-                let c = child_rect(r, &self.frame, self.children.len(), j);
+                let c = child_rect(r, header, &self.frame, self.children.len(), j);
                 x >= c.x && x < c.x + c.w
             })
             .map_or(Part::Gap, Part::Child)
@@ -200,15 +263,17 @@ impl Expandable {
         } else {
             (0.0, 0.0)
         };
-        let group_x = (r.x + (r.w - (side + gap + tw)) / 2.0).round();
-        let header_x = (r.x + (header_end(r) - r.x - side) / 2.0).round();
+        let face_w = self.face_w;
+        let header_end = self.header_end(r);
+        let group_x = (r.x + (r.w - (face_w + gap + tw)) / 2.0).round();
+        let header_x = (r.x + (header_end - r.x - face_w) / 2.0).round();
         // In place before the children start to show, so it never covers them.
         let slide = (k / 0.4).min(1.0);
         let icon_x = group_x + (header_x - group_x) * slide;
         let icon = Rect::new(
             icon_x.round(),
             (r.y + (r.h - side) / 2.0).round(),
-            side,
+            face_w,
             side,
         );
         self.face.draw(canvas, icon, t);
@@ -220,7 +285,7 @@ impl Expandable {
             canvas.draw_text(
                 font,
                 &self.label,
-                icon_x + side + gap,
+                icon_x + face_w + gap,
                 baseline,
                 px,
                 fade(text, folded),
@@ -231,7 +296,7 @@ impl Expandable {
             return;
         }
         // A thin divider between the header and the children.
-        let x = header_end(r);
+        let x = header_end;
         let sep = r.h * 0.25;
         canvas.fill_rect(
             x - 0.5,
@@ -242,7 +307,7 @@ impl Expandable {
         );
         let n = self.children.len();
         for (j, child) in self.children.iter().enumerate() {
-            let slot = child_rect(r, &self.frame, n, j);
+            let slot = child_rect(r, header_end, &self.frame, n, j);
             let corner = self.frame.corner(slot);
             if child.active {
                 let c = fade(self.active_color, unfolded);
@@ -276,7 +341,7 @@ fn draw_child(
     alpha: f32,
 ) {
     let px = label_px(slot.h);
-    let icon_w = if child.glyph.is_some() { side } else { 0.0 };
+    let icon_w = child.glyph.as_ref().map_or(0.0, |g| g.width(side));
     let room = (slot.w - 2.0 * PADDING - icon_w - ICON_LABEL_GAP).max(0.0);
     let mut label = ellipsize(font, &child.label, px, room);
     // Next to an icon, a label cut down to (almost) nothing is just noise; while the
@@ -294,22 +359,17 @@ fn draw_child(
     let x = (slot.x + (slot.w - (icon_w + gap + lw)) / 2.0).round();
     let (_, cy) = slot.center();
     if let Some(g) = &child.glyph {
-        let icon = Rect::new(x, (cy - side / 2.0).round(), side, side);
+        let icon = Rect::new(x, (cy - side / 2.0).round(), icon_w, side);
         g.draw(canvas, icon, alpha);
     }
     let baseline = font.centered_baseline(cy, px);
     canvas.draw_text(font, &label, x + icon_w + gap, baseline, px, text);
 }
 
-/// Right edge of the header (the icon's square) in the row `r`.
-fn header_end(r: Rect) -> f32 {
-    r.x + r.h
-}
-
-/// Child `j` of `n` in the row `r`: equal shares of what the header leaves, clear of
-/// the row's round end.
-fn child_rect(r: Rect, frame: &Frame, n: usize, j: usize) -> Rect {
-    let x0 = header_end(r) + CHILD_GAP;
+/// Child `j` of `n` in the row `r`: equal shares of what the header (ending at
+/// `header_end`) leaves, clear of the row's round end.
+fn child_rect(r: Rect, header_end: f32, frame: &Frame, n: usize, j: usize) -> Rect {
+    let x0 = header_end + CHILD_GAP;
     let end = r.x + r.w - (frame.corner(r) * 0.5).max(CHILD_GAP);
     let n = n.max(1) as f32;
     let w = ((end - x0 - CHILD_GAP * (n - 1.0)) / n).max(1.0);
@@ -322,6 +382,11 @@ fn child_rect(r: Rect, frame: &Frame, n: usize, j: usize) -> Rect {
     )
 }
 
+/// Tallest a child's icon (e.g. a GIF thumbnail) can be in a row `row_h` px high.
+pub fn child_icon_max(row_h: f32) -> f32 {
+    (row_h - 2.0 * CHILD_INSET).max(1.0)
+}
+
 /// Children's labels, in a row `h` px high.
 fn label_px(slot_h: f32) -> f32 {
     slot_h * 0.42
@@ -329,13 +394,13 @@ fn label_px(slot_h: f32) -> f32 {
 
 /// `expand_width` when not configured: the header, then every child as wide as the
 /// widest one needs to show its icon and whole label.
-pub fn default_width(row_h: f32, children: &[Child], font: &Font) -> f32 {
+fn default_width(row_h: f32, header: f32, children: &[Child], font: &Font) -> f32 {
     let slot_h = (row_h - 2.0 * CHILD_INSET).max(1.0);
     let side = icon_side(row_h);
     let widest = children
         .iter()
         .map(|c| {
-            let icon = if c.glyph.is_some() { side } else { 0.0 };
+            let icon = c.glyph.as_ref().map_or(0.0, |g| g.width(side));
             let label = font.measure(&c.label, label_px(slot_h));
             let gap = if icon > 0.0 && label > 0.0 {
                 ICON_LABEL_GAP
@@ -346,7 +411,7 @@ pub fn default_width(row_h: f32, children: &[Child], font: &Font) -> f32 {
         })
         .fold(MIN_CHILD_W, f32::max);
     let n = children.len() as f32;
-    (row_h + CHILD_GAP + n * (widest + CHILD_GAP) + PADDING).ceil()
+    (header + CHILD_GAP + n * (widest + CHILD_GAP) + PADDING).ceil()
 }
 
 impl Animated for Still {
@@ -367,8 +432,8 @@ mod tests {
     fn children_share_the_row_after_the_header() {
         let frame = Frame::default();
         let r = Rect::new(100.0, 4.0, 500.0, 52.0);
-        let a = child_rect(r, &frame, 3, 0);
-        let c = child_rect(r, &frame, 3, 2);
+        let a = child_rect(r, 152.0, &frame, 3, 0);
+        let c = child_rect(r, 152.0, &frame, 3, 2);
         assert!(a.x >= 152.0, "after the header: {a:?}");
         assert!(c.x + c.w <= r.x + r.w, "inside the row: {c:?}");
         assert!((a.w - c.w).abs() <= 1.0);
@@ -378,7 +443,7 @@ mod tests {
             shape: Shape::Circle,
             ..Frame::default()
         };
-        let p = child_rect(r, &pill, 3, 2);
+        let p = child_rect(r, 152.0, &pill, 3, 2);
         assert!(p.x + p.w <= r.x + r.w - 13.0, "{p:?}");
     }
 }

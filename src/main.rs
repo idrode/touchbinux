@@ -7,6 +7,7 @@ mod expandable;
 mod expander;
 mod frame;
 mod gif;
+mod gifpick;
 mod hypr;
 mod hyprctl;
 mod hyprwatch;
@@ -17,6 +18,7 @@ mod layout;
 mod levels;
 mod runner;
 mod scenes;
+mod state;
 mod stats;
 mod touch;
 mod user;
@@ -26,7 +28,8 @@ use anim::{Pulse, Spinner};
 use anyhow::{Result, anyhow};
 use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
-use config::{Action, Config};
+use config::{Action, Config, ItemConfig, ItemKind};
+use gifpick::{Loader, Reply, Request};
 use display::DrmBackend;
 use evdev::KeyCode;
 use hypr::{Hypr, ReadOutcome};
@@ -119,6 +122,7 @@ const TOKEN_HYPR_WATCH: u64 = 8;
 const TOKEN_HYPR_MOUNTS: u64 = 9;
 const TOKEN_CLOCK: u64 = 10;
 const TOKEN_UEVENT: u64 = 11;
+const TOKEN_GIF_LOADER: u64 = 12;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -191,6 +195,24 @@ struct App {
     battery_status: Option<BatteryStatus>,
     keyboard: Option<VirtualKeyboard>,
     scene: Scene,
+    /// Reads gif_picker folders off the main loop; `None` (previews) reads inline.
+    loader: Option<Loader>,
+    /// What each gif_picker has found and shows, by item id; kept across rebuilds.
+    pickers: BTreeMap<String, Picker>,
+    /// Choices made on the bar (the gif_pickers' GIFs), saved across restarts.
+    state: state::StateFile,
+}
+
+/// A gif_picker's folder as last read, and its GIF.
+#[derive(Default)]
+struct Picker {
+    /// Folder and thumbnail height of the last listing (asked again if they change).
+    listed: Option<(PathBuf, u32)>,
+    entries: Vec<(String, PathBuf, Rc<canvas::Image>)>,
+    /// The chosen file decoded, and the box it was fitted to.
+    gif: Option<(PathBuf, (u32, u32), gif::Gif)>,
+    /// Last listing error, so each one is logged once.
+    error: Option<String>,
 }
 
 impl App {
@@ -231,7 +253,203 @@ impl App {
         let mut scene = self.build_scene()?;
         scene.inherit_interaction(&self.scene);
         self.scene = scene;
+        self.sync_pickers();
         Ok(())
+    }
+
+    /// The config of gif_picker `id`.
+    fn picker_config(&self, id: &str) -> Option<&ItemConfig> {
+        self.config
+            .layers
+            .iter()
+            .flat_map(|l| &l.items)
+            .find(|i| i.kind == ItemKind::GifPicker && i.id() == Some(id))
+    }
+
+    /// The file chosen for gif_picker `id`, if it still belongs to its folder.
+    fn chosen_gif(&self, id: &str) -> Option<PathBuf> {
+        let dir = Path::new(self.picker_config(id)?.dir.as_deref()?);
+        let path = self.state.state.gif_picker.get(id)?;
+        (path.parent() == Some(dir)).then(|| path.clone())
+    }
+
+    /// Fills the scene's gif_pickers with what is known, and asks for what is
+    /// missing (the folder listing, the chosen GIF at this size).
+    fn sync_pickers(&mut self) {
+        for slot in self.scene.pickers() {
+            let Some(item) = self.picker_config(&slot.id) else {
+                continue;
+            };
+            let dir = PathBuf::from(item.dir.as_deref().unwrap_or_default());
+            let thumb_h = item.thumb_size.map_or(slot.thumb_max, |s| s.min(slot.thumb_max));
+            let picker = self.pickers.entry(slot.id.clone()).or_default();
+            if picker.listed.as_ref() != Some(&(dir.clone(), thumb_h)) {
+                picker.entries.clear();
+                self.scan_picker(&slot.id);
+            }
+            let chosen = self.chosen_gif(&slot.id);
+            let picker = self.pickers.entry(slot.id.clone()).or_default();
+            let loaded = picker
+                .gif
+                .as_ref()
+                .is_some_and(|(p, size, _)| Some(p) == chosen.as_ref() && *size == slot.gif_max);
+            if !loaded {
+                picker.gif = None;
+                if let Some(path) = chosen {
+                    let (max_w, max_h) = slot.gif_max;
+                    let reader = self.reader();
+                    let item = slot.id.clone();
+                    self.request(Request::Load {
+                        item,
+                        path,
+                        max_w,
+                        max_h,
+                        reader,
+                    });
+                }
+            }
+            self.show_picker(&slot.id);
+        }
+    }
+
+    /// Who reads gif_picker folders: the session user, as for commands.
+    fn reader(&self) -> gifpick::Reader {
+        self.runner.user().map(|u| (u.uid, u.gid))
+    }
+
+    /// Lists gif_picker `id`'s folder again (on every tap: it may have changed).
+    fn scan_picker(&mut self, id: &str) {
+        let Some(slot) = self.scene.pickers().into_iter().find(|s| s.id == id) else {
+            return;
+        };
+        let Some(item) = self.picker_config(id) else {
+            return;
+        };
+        let dir = PathBuf::from(item.dir.as_deref().unwrap_or_default());
+        let thumb_h = item.thumb_size.map_or(slot.thumb_max, |s| s.min(slot.thumb_max));
+        let reader = self.reader();
+        self.request(Request::Scan {
+            item: id.to_string(),
+            dir,
+            thumb_h,
+            reader,
+        });
+    }
+
+    fn request(&mut self, req: Request) {
+        match &self.loader {
+            Some(l) => l.send(req),
+            None => {
+                let reply = gifpick::handle_now(req);
+                self.on_reply(reply);
+            }
+        }
+    }
+
+    /// Puts gif_picker `id`'s thumbnails and GIF in the scene.
+    fn show_picker(&mut self, id: &str) {
+        let play = self
+            .picker_config(id)
+            .and_then(|i| i.play)
+            .unwrap_or(gif::Play::OnTap);
+        let chosen = self.chosen_gif(id);
+        let Some(p) = self.pickers.get(id) else {
+            return;
+        };
+        let chosen_name = chosen
+            .as_ref()
+            .and_then(|c| p.entries.iter().find(|(_, path, _)| path == c))
+            .map(|(name, _, _)| name.as_str());
+        let entries = p
+            .entries
+            .iter()
+            .map(|(name, _, img)| (name.clone(), img.clone()))
+            .collect();
+        let gif = p.gif.as_ref().map(|(_, _, g)| (g.clone(), play));
+        self.scene
+            .set_picker_entries(id, entries, chosen_name, &self.font);
+        self.scene.set_picker_gif(id, gif, &self.font);
+    }
+
+    /// A listing or a GIF from the loader thread.
+    fn on_reply(&mut self, reply: Reply) {
+        match reply {
+            Reply::Scanned { item, dir, result } => {
+                let Some(conf) = self.picker_config(&item) else {
+                    return;
+                };
+                if conf.dir.as_deref().map(Path::new) != Some(dir.as_path()) {
+                    return; // the config changed meanwhile
+                }
+                let thumb = self
+                    .scene
+                    .pickers()
+                    .into_iter()
+                    .find(|s| s.id == item)
+                    .map(|s| conf.thumb_size.map_or(s.thumb_max, |t| t.min(s.thumb_max)));
+                let picker = self.pickers.entry(item.clone()).or_default();
+                picker.listed = thumb.map(|t| (dir.clone(), t));
+                match result {
+                    Ok(entries) => {
+                        if entries.is_empty() && picker.error.is_none() {
+                            eprintln!("gif_picker {item:?}: no GIFs in {}", dir.display());
+                        }
+                        picker.error = entries.is_empty().then(String::new);
+                        picker.entries = entries
+                            .into_iter()
+                            .map(|e| (e.name, e.path, Rc::new(e.thumb)))
+                            .collect();
+                    }
+                    Err(e) => {
+                        if picker.error.as_ref() != Some(&e) {
+                            eprintln!("gif_picker {item:?}: {e}; disabled");
+                        }
+                        picker.error = Some(e);
+                        picker.entries.clear();
+                    }
+                }
+                self.show_picker(&item);
+            }
+            Reply::Loaded { item, path, result } => {
+                if self.chosen_gif(&item).as_ref() != Some(&path) {
+                    return; // another one was chosen meanwhile
+                }
+                let Some(slot) = self.scene.pickers().into_iter().find(|s| s.id == item) else {
+                    return;
+                };
+                match result {
+                    Ok(frames) => {
+                        let gif = gif::Gif::from(frames);
+                        eprintln!(
+                            "gif_picker {item:?}: showing {} ({} frames, {}x{})",
+                            path.display(),
+                            gif.frame_count(),
+                            gif.width(),
+                            slot.gif_max.1
+                        );
+                        let picker = self.pickers.entry(item.clone()).or_default();
+                        picker.gif = Some((path, slot.gif_max, gif));
+                    }
+                    Err(e) => eprintln!("gif_picker {item:?}: {e}"),
+                }
+                self.show_picker(&item);
+            }
+        }
+    }
+
+    /// A thumbnail was tapped: that GIF goes in the bar, and is remembered.
+    fn on_pick(&mut self, item: &str, name: &str) {
+        let Some(path) = self
+            .pickers
+            .get(item)
+            .and_then(|p| p.entries.iter().find(|(n, _, _)| n == name))
+            .map(|(_, path, _)| path.clone())
+        else {
+            return;
+        };
+        self.state.state.gif_picker.insert(item.to_string(), path);
+        self.state.save();
+        self.sync_pickers();
     }
 
     fn build_scene(&mut self) -> Result<Scene> {
@@ -474,6 +692,11 @@ impl App {
 
     /// Runs whatever a tap on `id` means. The tap is also always reported on the socket.
     fn on_tap(&mut self, id: &str) {
+        // A gif_picker reads its folder again each time it is opened (or tapped
+        // while it has nothing to show, in case GIFs appeared).
+        if self.picker_config(id).is_some() {
+            self.scan_picker(id);
+        }
         if let Some(ws) = id.strip_prefix("workspace:") {
             self.hyprctl(&HyprAction::Workspace(ws.into()));
             return;
@@ -563,6 +786,8 @@ fn main() -> Result<()> {
             backlight,
             brightness,
             keyboard: None,
+            // Previews read the folders inline, so the PNG shows the chosen GIFs.
+            loader: None,
         };
         let app = new_app(parts, (w, h), hypr, home.as_deref())?;
         let mut canvas = Canvas::new(w, h)?;
@@ -626,6 +851,9 @@ fn main() -> Result<()> {
             backlight,
             brightness,
             keyboard,
+            loader: Loader::start()
+                .inspect_err(|e| eprintln!("gif_picker: {e:#}; reading folders inline"))
+                .ok(),
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app)
@@ -649,6 +877,7 @@ struct AppParts {
     backlight: Option<Backlight>,
     brightness: Option<u8>,
     keyboard: Option<VirtualKeyboard>,
+    loader: Option<Loader>,
 }
 
 fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> Result<App> {
@@ -676,9 +905,13 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         battery_status: None,
         keyboard: p.keyboard,
         scene: Scene::new(w, h)?,
+        loader: p.loader,
+        pickers: BTreeMap::new(),
+        state: state::StateFile::open(),
     };
     app.refresh_battery();
     app.scene = app.build_scene()?;
+    app.sync_pickers();
     Ok(app)
 }
 
@@ -782,6 +1015,7 @@ fn ui_event_json(ev: &UiEvent) -> Value {
             json!({"type": "slider", "id": id, "value": v})
         }
         UiEvent::ToggleMute(id) => json!({"type": "mute", "id": id}),
+        UiEvent::Pick(id, value) => json!({"type": "pick", "id": id, "value": value}),
     }
 }
 
@@ -844,6 +1078,9 @@ fn run(
             b.fd(),
             EpollEvent::new(EpollFlags::EPOLLPRI, TOKEN_BACKLIGHT),
         )?;
+    }
+    if let Some(l) = &app.loader {
+        epoll.add(l.fd(), EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_GIF_LOADER))?;
     }
     let mut hypr_watch: Option<InstanceWatch> = None;
     watch_hypr(&epoll, app, &retry, &mut hypr_watch)?;
@@ -976,6 +1213,13 @@ fn run(
                     app.refresh_battery();
                     dirty = true;
                 }
+                TOKEN_GIF_LOADER => {
+                    let replies = app.loader.as_ref().map(Loader::drain).unwrap_or_default();
+                    for r in replies {
+                        app.on_reply(r);
+                    }
+                    dirty = true;
+                }
                 TOKEN_UEVENT => {
                     if uevents.as_ref().is_some_and(Uevents::drain) {
                         dirty |= app.refresh_battery();
@@ -1020,6 +1264,7 @@ fn run(
                             UiEvent::Slider(id, v) => app.on_slider(id, *v),
                             UiEvent::Level(_, level, v) => app.on_level(*level, *v),
                             UiEvent::ToggleMute(_) => app.vol.toggle_mute(),
+                            UiEvent::Pick(item, name) => app.on_pick(item, name),
                         }
                     }
                 }

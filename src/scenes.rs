@@ -6,10 +6,11 @@ use crate::{
     anim::Animated,
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, ItemConfig, ItemKind, LayerConfig},
-    expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Still},
+    expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     frame::Frame,
     gif::{Gif, GifPlayer, Play},
+    gifpick::PickerFace,
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
@@ -21,6 +22,8 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use std::{collections::HashMap, path::Path, rc::Rc, time::Duration};
+#[cfg(test)]
+use std::path::PathBuf;
 
 const RED: Rgba = Rgba(0xff, 0x20, 0x20, 0xff);
 const GREEN: Rgba = Rgba(0x20, 0xe0, 0x40, 0xff);
@@ -97,6 +100,16 @@ pub enum UiEvent {
     Level(String, Level, u8),
     /// The speaker icon of the unfolded volume slider was tapped.
     ToggleMute(String),
+    /// A choice in a gif_picker (item id, child id: the file name).
+    Pick(String, String),
+}
+
+/// What the daemon needs to fill a gif_picker in: its id, the box its GIF must fit
+/// in, and the tallest a thumbnail can be.
+pub struct PickerSlot {
+    pub id: String,
+    pub gif_max: (u32, u32),
+    pub thumb_max: u32,
 }
 
 struct Button {
@@ -484,7 +497,9 @@ impl Scene {
         let i = self.menus.iter().position(|m| contains(m.rect, x, y))?;
         let m = &mut self.menus[i];
         m.fold.touch_down();
-        m.fold.expand(t);
+        if m.enabled {
+            m.fold.expand(t);
+        }
         Some(Capture::MenuTap(i, true))
     }
 
@@ -621,7 +636,12 @@ impl Scene {
                                 // The icon at the left folds it back.
                                 Part::Header => m.fold.collapse(t),
                                 Part::Child(j) => {
-                                    out.push(UiEvent::Tap(m.children[j].id.clone()));
+                                    let child = m.children[j].id.clone();
+                                    out.push(if m.picks {
+                                        UiEvent::Pick(m.id.clone(), child)
+                                    } else {
+                                        UiEvent::Tap(child)
+                                    });
                                     m.fold.collapse(t);
                                 }
                                 Part::Gap => {}
@@ -698,6 +718,72 @@ impl Scene {
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
+    }
+
+    /// The gif_pickers, for the daemon to fill in.
+    pub fn pickers(&self) -> Vec<PickerSlot> {
+        let thumb_max = |m: &Expandable| expandable::child_icon_max(m.rect.h) as u32;
+        self.menus
+            .iter()
+            .filter(|m| m.picks)
+            .map(|m| PickerSlot {
+                id: m.id.clone(),
+                gif_max: gif_box(m.rect),
+                thumb_max: thumb_max(m),
+            })
+            .collect()
+    }
+
+    fn picker_mut(&mut self, id: &str) -> Option<&mut Expandable> {
+        self.menus.iter_mut().find(|m| m.picks && m.id == id)
+    }
+
+    /// A gif_picker's thumbnails (`(name, image)`), the chosen one marked. With none,
+    /// a tap doesn't unfold it. Call `set_picker_gif` after it: the empty icon shows
+    /// whether there is anything to choose. Returns whether it exists.
+    pub fn set_picker_entries(
+        &mut self,
+        id: &str,
+        entries: Vec<(String, Rc<Image>)>,
+        chosen: Option<&str>,
+        font: &Font,
+    ) -> bool {
+        let Some(m) = self.picker_mut(id) else {
+            return false;
+        };
+        let children = entries
+            .into_iter()
+            .map(|(name, img)| Child {
+                active: chosen == Some(name.as_str()),
+                id: name,
+                glyph: Some(Glyph::Image(img)),
+                label: String::new(),
+            })
+            .collect::<Vec<_>>();
+        m.enabled = !children.is_empty();
+        for c in &mut m.children {
+            c.active = false; // only the chosen one, as given
+        }
+        m.set_children(children, font);
+        true
+    }
+
+    /// A gif_picker's icon: the chosen GIF, or the empty picture (grey when there is
+    /// nothing to choose).
+    pub fn set_picker_gif(&mut self, id: &str, gif: Option<(Gif, Play)>, font: &Font) -> bool {
+        let Some(m) = self.picker_mut(id) else {
+            return false;
+        };
+        let side = icon_side(m.rect.h);
+        let (face, width) = match gif {
+            Some((g, play)) => {
+                let w = g.width() as f32;
+                (PickerFace::gif(g, play), w.max(side))
+            }
+            None => (PickerFace::Empty { enabled: m.enabled }, side),
+        };
+        m.set_face(Box::new(face), width, font);
+        true
     }
 
     /// Marks an expandable's child (by id) active or not, e.g. "recording"; it keeps
@@ -1301,19 +1387,19 @@ pub fn bar(
                         Box::new(Still(static_glyph(name, color, icons, font, size)))
                     }
                 };
-                let width = item
-                    .expand_width
-                    .unwrap_or_else(|| expandable::default_width(ih, &children, font));
-                let fold = Fold::new(
-                    item.anim().unwrap_or(DEFAULT_ANIM),
-                    item.collapse_after().unwrap_or(DEFAULT_COLLAPSE_AFTER),
-                );
-                let active = item.active_color.map_or(DEFAULT_ACTIVE, |c| c.0);
-                let label = item.label.as_deref().unwrap_or("");
-                let open = expanded_rect(rect, area, width);
-                scene.menus.push(Expandable::new(
-                    id, rect, open, frame, face, label, children, active, fold,
-                ));
+                let spec = menu_spec(item, area, frame, face, false);
+                scene
+                    .menus
+                    .push(Expandable::new(id, rect, spec, children, font));
+            }
+            ItemKind::GifPicker => {
+                // Filled in by the daemon once its folder has been read: until then
+                // (and while it has no GIFs) a grey picture that doesn't unfold.
+                let face = Box::new(PickerFace::Empty { enabled: false });
+                let spec = menu_spec(item, area, frame, face, true);
+                let mut m = Expandable::new(id, rect, spec, Vec::new(), font);
+                m.enabled = false;
+                scene.menus.push(m);
             }
             ItemKind::Text => {
                 // Shown under its key (see `set_text`); tapped like a button.
@@ -1341,10 +1427,7 @@ fn gif_icon(item: &ItemConfig, rect: Rect, scaled: &mut HashMap<(usize, u32, u32
         eprintln!("bar: gif {:?}: not loaded", item.id().unwrap_or(""));
         return Icon::Letter('?');
     };
-    let (max_w, max_h) = (
-        (rect.w - 4.0).max(1.0) as u32,
-        (rect.h - 2.0).max(1.0) as u32,
-    );
+    let (max_w, max_h) = gif_box(rect);
     let key = (Rc::as_ptr(decoded) as usize, max_w, max_h);
     let gif = match scaled.get(&key) {
         Some(g) => g.clone(),
@@ -1392,6 +1475,38 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
             found.into()
         }
     }
+}
+
+/// How an `expandable` or a `gif_picker` unfolds, from its config.
+fn menu_spec(
+    item: &ItemConfig,
+    area: Rect,
+    frame: Frame,
+    face: Box<dyn Animated>,
+    picks: bool,
+) -> Spec {
+    Spec {
+        area,
+        width: item.expand_width,
+        frame,
+        face,
+        label: item.label.clone().unwrap_or_default(),
+        active_color: item.active_color.map_or(DEFAULT_ACTIVE, |c| c.0),
+        fold: Fold::new(
+            item.anim().unwrap_or(DEFAULT_ANIM),
+            item.collapse_after().unwrap_or(DEFAULT_COLLAPSE_AFTER),
+        ),
+        picks,
+    }
+}
+
+/// The largest a GIF can be in an item's `rect` (2 px clear of the edges), as for
+/// gif items.
+fn gif_box(rect: Rect) -> (u32, u32) {
+    (
+        (rect.w - 4.0).max(1.0) as u32,
+        (rect.h - 2.0).max(1.0) as u32,
+    )
 }
 
 /// Which built-in folder `icon` names, if any.
@@ -2101,6 +2216,145 @@ mod tests {
         assert!(again.menus[0].fold.is_open());
         assert!(again.menus[0].children[0].active);
         assert!(!again.menus[0].children[1].active);
+    }
+
+    const PICKER: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "gif_picker"
+        id = "gifs"
+        dir = "/nonexistent"
+        active_color = "#ff0000"
+    "##;
+
+    /// A `w`x`h` thumbnail of one colour.
+    fn thumb(w: u32, h: u32, rgb: [u8; 3]) -> Rc<Image> {
+        let px = [rgb[0], rgb[1], rgb[2], 0xff];
+        let data = px.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        Rc::new(Image::from_premultiplied(w, h, data).unwrap())
+    }
+
+    #[test]
+    fn gif_picker_unfolds_only_with_gifs_and_picks() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, PICKER);
+        let live = live();
+        let slots = s.pickers();
+        assert_eq!(slots.len(), 1);
+        // 80 px wide, 52 high: GIFs fit in 76x50, thumbnails up to 44 high.
+        assert_eq!((slots[0].gif_max, slots[0].thumb_max), ((76, 50), 44));
+        let r = s.menus[0].rect;
+
+        // Nothing found yet: a tap is reported (the daemon reads the folder) but
+        // doesn't unfold.
+        let (_, ev) = tap(&mut s, mid(r), MS(0), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("gifs".into())]);
+        assert!(!s.menus[0].fold.is_active(MS(0)));
+
+        let entries = vec![
+            ("a.gif".to_string(), thumb(44, 44, [0, 0xff, 0])),
+            ("b.gif".to_string(), thumb(80, 40, [0, 0, 0xff])),
+        ];
+        assert!(s.set_picker_entries("gifs", entries, Some("b.gif"), &font));
+        assert!(!s.set_picker_entries("nope", Vec::new(), None, &font));
+        s.set_picker_gif("gifs", None, &font);
+        let narrow = s.menus[0].open_rect.w;
+        // Room for the widest thumbnail in each slot.
+        assert!(narrow >= 52.0 + 2.0 * (80.0 + 16.0), "{narrow}");
+        tap(&mut s, mid(r), MS(1000), &font);
+        s.advance(MS(1400), &live);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(1400), &font, &live).unwrap();
+        let (a, b) = (child_mid(&s, 0), child_mid(&s, 1));
+        assert_eq!(pixel(&c, a.0, a.1), [0, 0xff, 0, 0xff], "thumbnail a");
+        assert_eq!(pixel(&c, b.0, b.1), [0, 0, 0xff, 0xff], "thumbnail b");
+        // The chosen one on active_color (seen above and below the thumbnail).
+        let open = s.menus[0].open_rect;
+        assert_eq!(pixel(&c, b.0, open.y + 5.0), [0xff, 0, 0, 0xff], "chosen");
+        assert_ne!(pixel(&c, a.0, open.y + 5.0), [0xff, 0, 0, 0xff]);
+
+        // A thumbnail is a choice, not an action; the row folds.
+        let (_, ev) = tap(&mut s, a, MS(1500), &font);
+        assert_eq!(ev, vec![UiEvent::Pick("gifs".into(), "a.gif".into())]);
+        assert!(!s.menus[0].fold.is_open());
+
+        // A wide GIF in the bar widens the header, and the unfolded row with it.
+        let gif: Gif = crate::gif::decode_fitted(
+            &{
+                let d = crate::gifpick::tests::temp_dir("scene");
+                crate::gifpick::tests::write_gif(&d.join("w.gif"), 300, 100, 2);
+                d.join("w.gif")
+            },
+            76,
+            50,
+            false,
+        )
+        .unwrap()
+        .into();
+        assert!(gif.width() > 52 && gif.width() <= 76, "{}", gif.width());
+        s.set_picker_gif("gifs", Some((gif, Play::Always)), &font);
+        assert!(s.menus[0].open_rect.w > narrow);
+        // Playing always: the bar wakes for its frames even while folded.
+        s.advance(MS(3000), &live);
+        assert!(s.next_change(MS(3000)).is_some());
+
+        // Emptied (e.g. the folder was cleared): no longer unfolds.
+        s.set_picker_entries("gifs", Vec::new(), None, &font);
+        tap(&mut s, mid(r), MS(4000), &font);
+        assert!(!s.menus[0].fold.is_active(MS(4000)));
+    }
+
+    /// Not a check: a gif_picker unfolded over the GIFs of $TOUCHBINUX_GIFS (or a
+    /// few generated ones), with the first one chosen; PNGs to $TOUCHBINUX_FRAMES.
+    #[test]
+    #[ignore]
+    fn dump_gif_picker() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let gifs = std::env::var("TOUCHBINUX_GIFS").map(PathBuf::from).unwrap_or_else(|_| {
+            let d = crate::gifpick::tests::temp_dir("dump");
+            for (i, (w, h)) in [(40, 40), (90, 30), (30, 60)].iter().enumerate() {
+                crate::gifpick::tests::write_gif(&d.join(format!("{i}.gif")), *w, *h, 3);
+            }
+            d
+        });
+        let font = font().unwrap();
+        let mut s = menu_scene(&font, &PICKER.replace("/nonexistent", &gifs.display().to_string()));
+        let slot = &s.pickers()[0];
+        let (thumb_h, (max_w, max_h)) = (slot.thumb_max, slot.gif_max);
+        let req = crate::gifpick::Request::Scan {
+            item: "gifs".into(),
+            dir: gifs.clone(),
+            thumb_h,
+            reader: None,
+        };
+        let crate::gifpick::Reply::Scanned { result: Ok(found), .. } = crate::gifpick::handle_now(req)
+        else {
+            panic!("scan failed");
+        };
+        let first = found[0].path.clone();
+        let entries = found.into_iter().map(|e| (e.name, Rc::new(e.thumb))).collect::<Vec<_>>();
+        let chosen = entries[0].0.clone();
+        s.set_picker_entries("gifs", entries, Some(&chosen), &font);
+        let gif: Gif = crate::gif::decode_fitted(&first, max_w, max_h, false).unwrap().into();
+        s.set_picker_gif("gifs", Some((gif, Play::Always)), &font);
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, t: Duration, name: &str| {
+            s.advance(t, &live);
+            s.draw(&mut canvas, t, &font, &live).unwrap();
+            canvas.save_png(Path::new(&format!("{dir}/g-{name}.png"))).unwrap();
+        };
+        shot(&mut s, MS(0), "a-folded");
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(100), &font);
+        shot(&mut s, MS(180), "b-unfolding");
+        shot(&mut s, MS(600), "c-open");
     }
 
     #[test]

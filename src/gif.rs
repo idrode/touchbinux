@@ -4,13 +4,20 @@ use crate::{
     anim::Animated,
     canvas::{Canvas, Image, Rect},
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use image::{
-    AnimationDecoder, RgbaImage,
+    AnimationDecoder, ImageDecoder, Limits, RgbaImage,
     codecs::gif::GifDecoder,
     imageops::{self, FilterType},
 };
 use std::{fs::File, io::BufReader, path::Path, rc::Rc, time::Duration};
+
+/// Limits for GIFs picked at run time from a user's folder (`gif_picker`), which,
+/// unlike a config's `gif` items, nobody vetted: bigger files are skipped, longer
+/// animations cut.
+pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_SIDE: u32 = 2048;
+pub const MAX_FRAMES: usize = 1000;
 
 /// Browsers treat tiny GIF delays (0-10 ms, common in old files) as 100 ms; so do we.
 const MIN_DELAY: Duration = Duration::from_millis(20);
@@ -48,17 +55,7 @@ impl Decoded {
         let mut total = Duration::ZERO;
         for frame in decoder.into_frames() {
             let frame = frame.with_context(|| format!("decoding {}", path.display()))?;
-            let (num, den) = frame.delay().numer_denom_ms();
-            let delay = if den == 0 {
-                DEFAULT_DELAY
-            } else {
-                Duration::from_micros(u64::from(num) * 1000 / u64::from(den))
-            };
-            let delay = if delay < MIN_DELAY {
-                DEFAULT_DELAY
-            } else {
-                delay
-            };
+            let delay = frame_delay(frame.delay());
             frames.push(frame.into_buffer());
             total += delay;
             ends.push(total);
@@ -92,6 +89,81 @@ impl Decoded {
         let (w, h) = self.frames[0].dimensions();
         let by_width = (max_w as f32 * h as f32 / w.max(1) as f32).floor() as u32;
         self.scaled(max_h.min(by_width).max(1))
+    }
+}
+
+/// A GIF from a user's folder, scaled to fit `max_w`x`max_h` as it is decoded (one
+/// full-size frame in memory at a time), within the `MAX_*` limits. Only the first
+/// frame if `first_only` (thumbnails). `Send`: built on a loader thread.
+pub fn decode_fitted(path: &Path, max_w: u32, max_h: u32, first_only: bool) -> Result<Frames> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let len = file.metadata()?.len();
+    if len > MAX_FILE_BYTES {
+        bail!("{} is {len} bytes, more than {MAX_FILE_BYTES}", path.display());
+    }
+    let mut decoder = GifDecoder::new(BufReader::new(file))
+        .with_context(|| format!("decoding {}", path.display()))?;
+    let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
+        bail!("{} is {w}x{h}, more than {MAX_SIDE} px a side", path.display());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    decoder.set_limits(limits)?;
+    let by_width = (max_w as f32 * h as f32 / w as f32).floor() as u32;
+    let height = max_h.min(by_width).max(1);
+    let mut out = Frames::default();
+    for frame in decoder.into_frames() {
+        if out.frames.len() == MAX_FRAMES {
+            eprintln!("gif: {}: only the first {MAX_FRAMES} frames", path.display());
+            break;
+        }
+        let frame = frame.with_context(|| format!("decoding {}", path.display()))?;
+        let delay = frame_delay(frame.delay());
+        out.frames.push(scale_premultiplied(frame.into_buffer(), height)?);
+        out.total += delay;
+        out.ends.push(out.total);
+        if first_only {
+            break;
+        }
+    }
+    if out.frames.is_empty() {
+        bail!("{} has no frames", path.display());
+    }
+    Ok(out)
+}
+
+/// Scaled frames that can cross threads; `Gif::from` makes them playable.
+#[derive(Default)]
+pub struct Frames {
+    pub frames: Vec<Image>,
+    ends: Vec<Duration>,
+    total: Duration,
+}
+
+impl From<Frames> for Gif {
+    fn from(f: Frames) -> Gif {
+        Gif {
+            frames: f.frames.into(),
+            ends: f.ends.into(),
+            total: f.total,
+        }
+    }
+}
+
+/// A frame's delay, with browsers' rules for tiny ones.
+fn frame_delay(delay: image::Delay) -> Duration {
+    let (num, den) = delay.numer_denom_ms();
+    let delay = if den == 0 {
+        DEFAULT_DELAY
+    } else {
+        Duration::from_micros(u64::from(num) * 1000 / u64::from(den))
+    };
+    if delay < MIN_DELAY {
+        DEFAULT_DELAY
+    } else {
+        delay
     }
 }
 

@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, anyhow};
 use resvg::{
     tiny_skia::{
-        Color, FillRule, FilterQuality, IntRect, LineCap, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect as SkRect,
+        Color, FillRule, FilterQuality, IntRect, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Rect as SkRect,
         Stroke, Transform,
     },
     usvg,
@@ -239,6 +239,37 @@ impl Canvas {
         }
     }
 
+    /// Lines through `points` with round caps and joins; `closed` joins the last
+    /// point back to the first.
+    pub fn stroke_polyline(&mut self, points: &[(f32, f32)], closed: bool, width: f32, color: Rgba) {
+        let mut pb = PathBuilder::new();
+        for (i, &(px, py)) in points.iter().enumerate() {
+            if i == 0 {
+                pb.move_to(px, py);
+            } else {
+                pb.line_to(px, py);
+            }
+        }
+        if closed {
+            pb.close();
+        }
+        if let Some(path) = pb.finish() {
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Stroke::default()
+            };
+            self.pixmap.stroke_path(
+                &path,
+                &Self::paint(color),
+                &stroke,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
     /// Draws `svg` scaled to fit (keeping aspect ratio) and centred in a `size`x`size` box.
     pub fn draw_svg(&mut self, svg: &Svg, x: f32, y: f32, size: f32) {
         let s = svg.tree.size();
@@ -298,11 +329,20 @@ impl Canvas {
     }
 
     pub fn draw_image(&mut self, image: &Image, x: i32, y: i32) {
+        self.draw_image_faded(image, x, y, 1.0);
+    }
+
+    /// `draw_image` at `opacity` (0..=1), e.g. while cross-fading.
+    pub fn draw_image_faded(&mut self, image: &Image, x: i32, y: i32, opacity: f32) {
+        let paint = PixmapPaint {
+            opacity: opacity.clamp(0.0, 1.0),
+            ..PixmapPaint::default()
+        };
         self.pixmap.draw_pixmap(
             x,
             y,
             image.pixmap.as_ref(),
-            &PixmapPaint::default(),
+            &paint,
             Transform::identity(),
             None,
         );

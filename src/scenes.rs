@@ -5,17 +5,18 @@
 use crate::{
     anim::Animated,
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
-    config::{ItemConfig, ItemKind, LayerConfig},
-    frame::Frame,
+    config::{BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, ItemConfig, ItemKind, LayerConfig},
+    expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
+    frame::Frame,
     gif::{Gif, GifPlayer, Play},
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
     touch::Phase,
     widgets::{
-        BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, Level, Live,
-        Widget,
+        BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, FolderStyle,
+        Level, Live, Widget, draw_folder, draw_folder_lines,
     },
 };
 use anyhow::{Result, bail};
@@ -215,7 +216,7 @@ impl TextItem {
 }
 
 /// Cuts `text` with "…" so it fits in `max_w`.
-fn ellipsize(font: &Font, text: &str, px: f32, max_w: f32) -> String {
+pub fn ellipsize(font: &Font, text: &str, px: f32, max_w: f32) -> String {
     if font.measure(text, px) <= max_w {
         return text.to_string();
     }
@@ -243,8 +244,20 @@ enum Capture {
     ExpanderDrag(usize),
     /// On the unfolded volume slider's icon; whether the finger is still on it.
     ExpanderMute(usize, bool),
-    /// A touch outside an unfolded expander: it folds, and the touch does nothing else.
+    /// Tap on a folded expandable (it unfolds); whether the finger is still on it.
+    MenuTap(usize, bool),
+    /// On a part of an unfolded expandable; whether the finger is still on that part.
+    Menu(usize, Part, bool),
+    /// A touch outside an unfolded item: it folds, and the touch does nothing else.
     Blocked,
+}
+
+/// The item that is unfolded or still moving, if any (at most one: while it is, it
+/// takes all touches).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Unfolded {
+    Slider(usize),
+    Menu(usize),
 }
 
 pub struct Scene {
@@ -255,6 +268,8 @@ pub struct Scene {
     widgets: Vec<(Rect, Box<dyn Widget>)>,
     /// Volume/brightness items that unfold into sliders (drawn every frame).
     expanders: Vec<Expander>,
+    /// `expandable` items, unfolding into a row of children (drawn every frame).
+    menus: Vec<Expandable>,
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
     texts: Vec<TextItem>,
@@ -281,6 +296,7 @@ impl Scene {
             animated: Vec::new(),
             widgets: Vec::new(),
             expanders: Vec::new(),
+            menus: Vec::new(),
             buttons: Vec::new(),
             sliders: Vec::new(),
             texts: Vec::new(),
@@ -337,28 +353,43 @@ impl Scene {
                 canvas.scale_region(b.rect, b.frame.pressed_scale, Rgba::BLACK);
             }
         }
-        let active = self.active_expander(t);
+        let active = self.unfolded(t);
         for (i, e) in self.expanders.iter().enumerate() {
-            if Some(i) != active {
+            if active != Some(Unfolded::Slider(i)) {
                 e.draw(canvas, t, font, live);
             }
         }
-        if let Some(i) = active {
-            // What the slider will cover fades out (to the black of the bar) as it
-            // unfolds, and back in as it folds.
-            let e = &self.expanders[i];
-            let k = e.fold.progress(t);
+        for (i, m) in self.menus.iter().enumerate() {
+            if active != Some(Unfolded::Menu(i)) {
+                m.draw(canvas, t, font, None);
+            }
+        }
+        if let Some(u) = active {
+            // What the unfolded item will cover fades out (to the black of the bar)
+            // as it unfolds, and back in as it folds.
+            let (k, open) = match u {
+                Unfolded::Slider(i) => (self.expanders[i].fold.progress(t), self.expanders[i].open_rect),
+                Unfolded::Menu(i) => (self.menus[i].fold.progress(t), self.menus[i].open_rect),
+            };
             let veil = Rgba::BLACK.with_alpha((k * 255.0).round() as u8);
-            let others = self.expanders.iter().enumerate().filter(|&(j, _)| j != i);
-            let rects = self
-                .buttons
-                .iter()
-                .map(|b| b.rect)
-                .chain(others.map(|(_, o)| o.rect));
-            for r in rects.filter(|r| overlaps(*r, e.open_rect)) {
+            let sliders = self.expanders.iter().enumerate();
+            let sliders = sliders.filter(|&(j, _)| u != Unfolded::Slider(j)).map(|(_, o)| o.rect);
+            let menus = self.menus.iter().enumerate();
+            let menus = menus.filter(|&(j, _)| u != Unfolded::Menu(j)).map(|(_, o)| o.rect);
+            let rects = self.buttons.iter().map(|b| b.rect).chain(sliders).chain(menus);
+            for r in rects.filter(|r| overlaps(*r, open)) {
                 canvas.fill_rect(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, veil);
             }
-            e.draw(canvas, t, font, live);
+            match u {
+                Unfolded::Slider(i) => self.expanders[i].draw(canvas, t, font, live),
+                Unfolded::Menu(i) => {
+                    let pressed = match self.capture {
+                        Capture::Menu(m, Part::Child(j), true) if m == i => Some(j),
+                        _ => None,
+                    };
+                    self.menus[i].draw(canvas, t, font, pressed);
+                }
+            }
         }
         for s in &self.sliders {
             s.draw(canvas, font);
@@ -376,7 +407,13 @@ impl Scene {
         let animated = self.animated.iter().map(|(_, a)| a.next_change(t));
         let widgets = self.widgets.iter().map(|(_, w)| w.next_change(t));
         let expanders = self.expanders.iter().map(|e| e.next_change(t));
-        animated.chain(widgets).chain(expanders).flatten().min()
+        let menus = self.menus.iter().map(|m| m.next_change(t));
+        animated
+            .chain(widgets)
+            .chain(expanders)
+            .chain(menus)
+            .flatten()
+            .min()
     }
 
     /// Brings time-driven state up to `t` (automatic folds, icons following the live
@@ -387,17 +424,22 @@ impl Scene {
         for e in &mut self.expanders {
             changed |= e.advance(t, live);
         }
+        for m in &mut self.menus {
+            changed |= m.advance(t);
+        }
         changed
     }
 
-    /// The expander that is unfolded or still moving, if any (at most one: while it
-    /// is, it takes all touches).
-    fn active_expander(&self, t: Duration) -> Option<usize> {
-        self.expanders.iter().position(|e| e.fold.is_active(t))
+    fn unfolded(&self, t: Duration) -> Option<Unfolded> {
+        let slider = self.expanders.iter().position(|e| e.fold.is_active(t));
+        let menu = || self.menus.iter().position(|m| m.fold.is_active(t));
+        slider
+            .map(Unfolded::Slider)
+            .or_else(|| menu().map(Unfolded::Menu))
     }
 
-    /// A finger comes down while an expander is unfolded, or on a folded one.
-    /// Returns what it captures, or `None` if no expander is involved.
+    /// A finger comes down while an item is unfolded, or on a folded slider or
+    /// expandable. Returns what it captures, or `None` if none of them is involved.
     fn expander_down(
         &mut self,
         (x, y): (f32, f32),
@@ -405,7 +447,17 @@ impl Scene {
         font: &Font,
         out: &mut Vec<UiEvent>,
     ) -> Option<Capture> {
-        if let Some(i) = self.active_expander(t) {
+        if let Some(Unfolded::Menu(i)) = self.unfolded(t) {
+            let m = &mut self.menus[i];
+            if !contains(m.open_rect, x, y) {
+                m.fold.collapse(t);
+                return Some(Capture::Blocked);
+            }
+            m.fold.touch_down();
+            m.fold.expand(t); // in case it was folding
+            return Some(Capture::Menu(i, m.part_at(x, y), true));
+        }
+        if let Some(Unfolded::Slider(i)) = self.unfolded(t) {
             let e = &mut self.expanders[i];
             if !contains(e.open_rect, x, y) {
                 e.fold.collapse(t);
@@ -421,13 +473,19 @@ impl Scene {
             out.push(UiEvent::Level(e.id.clone(), e.level, v));
             return Some(Capture::ExpanderDrag(i));
         }
-        let i = self.expanders.iter().position(|e| contains(e.rect, x, y))?;
-        let e = &mut self.expanders[i];
-        e.fold.touch_down();
-        if e.available {
-            e.fold.expand(t);
+        if let Some(i) = self.expanders.iter().position(|e| contains(e.rect, x, y)) {
+            let e = &mut self.expanders[i];
+            e.fold.touch_down();
+            if e.available {
+                e.fold.expand(t);
+            }
+            return Some(Capture::ExpanderTap(i, true));
         }
-        Some(Capture::ExpanderTap(i, true))
+        let i = self.menus.iter().position(|m| contains(m.rect, x, y))?;
+        let m = &mut self.menus[i];
+        m.fold.touch_down();
+        m.fold.expand(t);
+        Some(Capture::MenuTap(i, true))
     }
 
     /// Shortest wall-clock period any widget follows (see `Widget::wall_period`).
@@ -504,6 +562,13 @@ impl Scene {
                 let inside = self.expanders[i].in_mute_zone(x, y, font);
                 self.capture = Capture::ExpanderMute(i, inside);
             }
+            (Phase::Move, Capture::MenuTap(i, _)) => {
+                self.capture = Capture::MenuTap(i, contains(self.menus[i].rect, x, y));
+            }
+            (Phase::Move, Capture::Menu(i, part, _)) => {
+                let inside = self.menus[i].part_at(x, y) == part;
+                self.capture = Capture::Menu(i, part, inside);
+            }
             (Phase::Up | Phase::Cancel, capture) => {
                 match capture {
                     Capture::Button(i, _) => {
@@ -540,6 +605,30 @@ impl Scene {
                             out.push(UiEvent::ToggleMute(e.id.clone()));
                         }
                     }
+                    Capture::MenuTap(i, inside) => {
+                        let m = &mut self.menus[i];
+                        m.fold.touch_up(t);
+                        if phase == Phase::Up && inside {
+                            out.push(UiEvent::Tap(m.id.clone()));
+                            changed |= m.on_tap(t);
+                        }
+                    }
+                    Capture::Menu(i, part, inside) => {
+                        let m = &mut self.menus[i];
+                        m.fold.touch_up(t);
+                        if phase == Phase::Up && inside {
+                            match part {
+                                // The icon at the left folds it back.
+                                Part::Header => m.fold.collapse(t),
+                                Part::Child(j) => {
+                                    out.push(UiEvent::Tap(m.children[j].id.clone()));
+                                    m.fold.collapse(t);
+                                }
+                                Part::Gap => {}
+                            }
+                        }
+                        changed = true;
+                    }
                     Capture::None | Capture::Blocked => {}
                 }
                 self.capture = Capture::None;
@@ -558,9 +647,18 @@ impl Scene {
                 e.inherit(o);
             }
         }
+        for m in &mut self.menus {
+            if let Some(o) = old.menus.iter().find(|o| o.id == m.id) {
+                m.inherit(o);
+            }
+        }
         let expander = |i: usize| {
             let id = &old.expanders[i].id;
             self.expanders.iter().position(|e| &e.id == id)
+        };
+        let menu = |i: usize| {
+            let id = &old.menus[i].id;
+            self.menus.iter().position(|m| &m.id == id)
         };
         self.capture = match old.capture {
             Capture::Button(i, inside) => self
@@ -586,9 +684,31 @@ impl Scene {
             Capture::ExpanderMute(i, inside) => {
                 expander(i).map_or(Capture::None, |j| Capture::ExpanderMute(j, inside))
             }
+            Capture::MenuTap(i, inside) => menu(i).map_or(Capture::None, |j| Capture::MenuTap(j, inside)),
+            Capture::Menu(i, part, inside) => match (menu(i), part) {
+                // A child is followed by id: the new row may list them differently.
+                (Some(j), Part::Child(c)) => {
+                    let id = &old.menus[i].children[c].id;
+                    let found = self.menus[j].children.iter().position(|n| &n.id == id);
+                    found.map_or(Capture::Blocked, |c| Capture::Menu(j, Part::Child(c), inside))
+                }
+                (Some(j), part) => Capture::Menu(j, part, inside),
+                (None, _) => Capture::None,
+            },
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
+    }
+
+    /// Marks an expandable's child (by id) active or not, e.g. "recording"; it keeps
+    /// that state across reloads. Returns whether anything changed.
+    #[cfg_attr(not(test), allow(dead_code))] // set by the capture/player items (next)
+    pub fn set_active(&mut self, child: &str, active: bool) -> bool {
+        let mut changed = false;
+        for m in &mut self.menus {
+            changed |= m.set_active(child, active);
+        }
+        changed
     }
 
     /// Updates a slider from outside (e.g. Quickshell). Ignored while the finger is
@@ -1161,6 +1281,40 @@ pub fn bar(
                 spec.style.frame = frame;
                 scene.add_button(rect, font, spec);
             }
+            ItemKind::Expandable => {
+                let children: Vec<Child> = item
+                    .child_ids()
+                    .map(|(child_id, c)| Child {
+                        id: child_id,
+                        glyph: c.icon.as_deref().map(|name| {
+                            static_glyph(name, c.color.map(|c| c.0), icons, font, size)
+                        }),
+                        label: c.label.clone().unwrap_or_default(),
+                        active: false,
+                    })
+                    .collect();
+                let face: Box<dyn Animated> = match folder_style(item.icon.as_deref()) {
+                    Some(style) => Box::new(folder(item.color.map(|c| c.0), style, None)),
+                    None => {
+                        let name = item.icon.as_deref().unwrap_or("");
+                        let color = item.color.map(|c| c.0);
+                        Box::new(Still(static_glyph(name, color, icons, font, size)))
+                    }
+                };
+                let width = item
+                    .expand_width
+                    .unwrap_or_else(|| expandable::default_width(ih, &children, font));
+                let fold = Fold::new(
+                    item.anim().unwrap_or(DEFAULT_ANIM),
+                    item.collapse_after().unwrap_or(DEFAULT_COLLAPSE_AFTER),
+                );
+                let active = item.active_color.map_or(DEFAULT_ACTIVE, |c| c.0);
+                let label = item.label.as_deref().unwrap_or("");
+                let open = expanded_rect(rect, area, width);
+                scene.menus.push(Expandable::new(
+                    id, rect, open, frame, face, label, children, active, fold,
+                ));
+            }
             ItemKind::Text => {
                 // Shown under its key (see `set_text`); tapped like a button.
                 let key = item.key.as_deref().unwrap_or("");
@@ -1216,13 +1370,9 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
         return Icon::None;
     };
     let color = item.color.map(|c| c.0);
-    if name == crate::config::BUILTIN_FOLDER {
-        let folder = Folder {
-            color: color.unwrap_or(FOLDER_YELLOW),
-            state: FolderState::new(item.anim().unwrap_or(FOLDER_ANIM)),
-        };
+    if let Some(style) = folder_style(Some(name)) {
         return Icon::Animated {
-            item: Box::new(folder),
+            item: Box::new(folder(color, style, item.anim())),
             width: size,
         };
     }
@@ -1242,6 +1392,67 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
             found.into()
         }
     }
+}
+
+/// Which built-in folder `icon` names, if any.
+fn folder_style(icon: Option<&str>) -> Option<FolderStyle> {
+    match icon? {
+        BUILTIN_FOLDER => Some(FolderStyle::Lines),
+        BUILTIN_FOLDER_CLASSIC => Some(FolderStyle::Classic),
+        _ => None,
+    }
+}
+
+/// A built-in folder that opens when tapped, in `anim` (default `FOLDER_ANIM`).
+fn folder(color: Option<Rgba>, style: FolderStyle, anim: Option<Duration>) -> Folder {
+    Folder {
+        color: color.unwrap_or(FOLDER_YELLOW),
+        style,
+        state: FolderState::new(anim.unwrap_or(FOLDER_ANIM)),
+    }
+}
+
+/// An icon that doesn't animate (built-in folders are drawn closed), rasterised
+/// once at `size`, optionally painted in `color`. Not found or unreadable: a tile
+/// with "?".
+fn static_glyph(
+    name: &str,
+    color: Option<Rgba>,
+    icons: &mut IconResolver,
+    font: &Font,
+    size: f32,
+) -> Glyph {
+    let folder = color.unwrap_or(FOLDER_YELLOW);
+    match folder_style(Some(name)) {
+        Some(FolderStyle::Lines) => return Glyph::Drawn(draw_folder_lines, folder),
+        Some(FolderStyle::Classic) => return Glyph::Drawn(draw_folder, folder),
+        None => {}
+    }
+    let px = size as u32;
+    let glyph = match (icons.named(name), color) {
+        (Some(AppIcon::Svg(svg)), None) => svg.to_image(px).map(|i| Glyph::Image(Rc::new(i))),
+        (Some(AppIcon::Raster(img)), None) => Ok(Glyph::Image(img)),
+        (Some(AppIcon::Svg(svg)), Some(c)) => svg.to_mask(px).map(|m| Glyph::Mask(Rc::new(m), c)),
+        (Some(AppIcon::Raster(img)), Some(c)) => Ok(Glyph::Mask(Rc::new(img.to_mask()), c)),
+        (None, _) => letter_image('?', font, px).map(|i| Glyph::Image(Rc::new(i))),
+    };
+    glyph.unwrap_or_else(|e| {
+        eprintln!("bar: icon {name:?}: {e:#}");
+        Glyph::Drawn(|_, _, _, _| {}, Rgba::WHITE)
+    })
+}
+
+/// The generic icon (a grey tile with a letter, as `Icon::Letter`) as an image.
+fn letter_image(c: char, font: &Font, size: u32) -> Result<Image> {
+    let mut tile = Canvas::new(size, size)?;
+    let s = size as f32;
+    tile.fill_rounded_rect(0.0, 0.0, s, s, s * 0.22, GREY);
+    let text = c.to_string();
+    let px = s * 0.6;
+    let w = font.measure(&text, px);
+    let baseline = font.centered_baseline(s / 2.0, px);
+    tile.draw_text(font, &text, (s - w) / 2.0, baseline, px, Rgba::WHITE);
+    Image::from_premultiplied(size, size, tile.data().to_vec())
 }
 
 #[cfg(test)]
@@ -1716,6 +1927,201 @@ mod tests {
         assert_eq!(pixel(&c, open.x + open.w - 2.0, open.y + 1.0), [0, 0, 0, 0xff]);
     }
 
+    /// [btn] [spacer] [expandable "cap" with 3 children] [volume].
+    const MENU: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "spacer"
+        [[layers.items]]
+        type = "expandable"
+        id = "cap"
+        icon = "builtin:folder"
+        label = "Cap"
+        background = "#000080"
+        active_color = "#ff0000"
+        pressed_background = "#00ff00"
+        [[layers.items.children]]
+        id = "one"
+        label = "Uno"
+        action = { type = "socket" }
+        [[layers.items.children]]
+        icon = "builtin:folder_classic"
+        action = { type = "socket" }
+        [[layers.items.children]]
+        label = "Tres"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "volume"
+    "##;
+
+    fn menu_scene(font: &Font, toml: &str) -> Scene {
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        bar(W, H, font, &layer, &mut icons).unwrap()
+    }
+
+    fn mid(r: Rect) -> (f32, f32) {
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// Centre of the menu's child `j`, unfolded.
+    fn child_mid(s: &Scene, j: usize) -> (f32, f32) {
+        let m = &s.menus[0];
+        let r = m.open_rect;
+        let x = (r.x as i32..(r.x + r.w) as i32)
+            .map(|x| x as f32)
+            .filter(|&x| m.part_at(x, r.y + 10.0) == Part::Child(j))
+            .collect::<Vec<_>>();
+        ((x[0] + x[x.len() - 1]) / 2.0, r.y + r.h / 2.0)
+    }
+
+    #[test]
+    fn expandable_unfolds_runs_a_child_and_folds() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, MENU);
+        let live = live();
+        s.advance(MS(0), &live);
+        assert_eq!(s.next_change(MS(0)), None, "idle bar schedules nothing");
+        let (cap, btn) = (s.menus[0].rect, s.buttons[0].rect);
+        // Default width: the header, then room for the widest child's whole label.
+        let open = s.menus[0].open_rect;
+        let tres = font.measure("Tres", (H as f32 - 16.0) * 0.42);
+        assert!(open.w > 52.0 + 3.0 * (tres + 16.0), "{open:?}");
+        assert!(open.w < 52.0 + 3.0 * (tres + 40.0), "{open:?}");
+
+        // Tap: unfolds (and the folder opens), the tap goes out under its id.
+        let (changed, ev) = tap(&mut s, mid(cap), MS(1000), &font);
+        assert!(changed);
+        assert_eq!(ev, vec![UiEvent::Tap("cap".into())]);
+        assert_eq!(s.next_change(MS(1100)), Some(MS(1100)));
+        s.advance(MS(1300), &live);
+        assert_eq!(s.menus[0].fold.progress(MS(1300)), 1.0);
+        // Open, folder closed again: the only wake-up is the automatic fold.
+        assert_eq!(s.next_change(MS(2000)), Some(MS(4000)));
+
+        // A child: its own id, and the row folds.
+        let second = child_mid(&s, 1);
+        let (_, ev) = tap(&mut s, second, MS(2000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("cap.2".into())]);
+        assert!(!s.menus[0].fold.is_open());
+        s.advance(MS(2300), &live);
+        assert_eq!(s.next_change(MS(2300)), None);
+
+        // Pressing a child and sliding off it: nothing fires, it stays open.
+        tap(&mut s, mid(cap), MS(3000), &font);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, child_mid(&s, 0), MS(3300), &font, &mut out);
+        s.handle_touch(Phase::Move, child_mid(&s, 2), MS(3350), &font, &mut out);
+        s.handle_touch(Phase::Up, child_mid(&s, 2), MS(3400), &font, &mut out);
+        assert!(out.is_empty());
+        assert!(s.menus[0].fold.is_open());
+
+        // The icon at the left (the header) folds it, without a tap event.
+        let header = (open.x + 20.0, open.y + open.h / 2.0);
+        let (_, ev) = tap(&mut s, header, MS(3500), &font);
+        assert!(ev.is_empty());
+        assert!(!s.menus[0].fold.is_open());
+
+        // A touch elsewhere while open folds it and does nothing else.
+        tap(&mut s, mid(cap), MS(5000), &font);
+        let (_, ev) = tap(&mut s, mid(btn), MS(5300), &font);
+        assert!(ev.is_empty());
+        assert!(!s.menus[0].fold.is_open());
+        s.advance(MS(5600), &live);
+        let (_, ev) = tap(&mut s, mid(btn), MS(5600), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("btn".into())]);
+
+        // Left alone, it folds 3 s after the last touch.
+        tap(&mut s, mid(cap), MS(6000), &font);
+        assert!(!s.advance(MS(8999), &live));
+        assert!(s.advance(MS(9000), &live));
+        s.advance(MS(9300), &live);
+        assert_eq!(s.next_change(MS(9300)), None);
+    }
+
+    #[test]
+    fn only_one_item_unfolds_at_a_time() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, MENU);
+        let live = live();
+        let (cap, vol) = (s.menus[0].rect, s.expanders[0].rect);
+        tap(&mut s, mid(vol), MS(0), &font);
+        s.advance(MS(300), &live);
+        // The slider covers half the bar; a touch outside it only folds it.
+        let outside = if overlaps(s.expanders[0].open_rect, cap) { mid(s.buttons[0].rect) } else { mid(cap) };
+        tap(&mut s, outside, MS(400), &font);
+        assert!(!s.menus[0].fold.is_active(MS(400)));
+        s.advance(MS(700), &live);
+        tap(&mut s, mid(cap), MS(800), &font);
+        assert!(s.menus[0].fold.is_open());
+        assert!(!s.expanders[0].fold.is_active(MS(800)));
+    }
+
+    #[test]
+    fn expandable_draws_children_active_and_pressed() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, MENU);
+        let live = live();
+        let mut c = Canvas::new(W, H).unwrap();
+        let cap = s.menus[0].rect;
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        // Folded: its navy background, nothing at the row's place yet.
+        assert_eq!(pixel(&c, cap.x + 3.0, cap.y + cap.h / 2.0), [0, 0, 0x80, 0xff]);
+        let open = s.menus[0].open_rect;
+        tap(&mut s, mid(cap), MS(0), &font);
+        assert!(s.set_active("one", true));
+        assert!(!s.set_active("one", true));
+        assert!(!s.set_active("nope", true));
+        s.advance(MS(500), &live);
+        s.draw(&mut c, MS(500), &font, &live).unwrap();
+        let first = child_mid(&s, 0);
+        let edge = |(x, _): (f32, f32)| (x, open.y + 6.0); // clear of the label
+        assert_eq!(pixel(&c, edge(first).0, edge(first).1), [0xff, 0, 0, 0xff], "active");
+        assert_eq!(pixel(&c, open.x + open.w - 30.0, open.y + 2.0), [0, 0, 0x80, 0xff], "row bg");
+        assert!(has_colour(&c, open, [0xff, 0xff, 0xff]), "labels");
+        // Pressed: pressed_background over the child.
+        let mut out = Vec::new();
+        let third = child_mid(&s, 2);
+        s.handle_touch(Phase::Down, third, MS(600), &font, &mut out);
+        s.draw(&mut c, MS(600), &font, &live).unwrap();
+        assert_eq!(pixel(&c, edge(third).0, edge(third).1), [0, 0xff, 0, 0xff], "pressed");
+        s.handle_touch(Phase::Cancel, third, MS(610), &font, &mut out);
+        assert!(out.is_empty());
+
+        // A rebuild (config reload) keeps it open, and the child active.
+        let mut again = menu_scene(&font, MENU);
+        again.inherit_interaction(&s);
+        assert!(again.menus[0].fold.is_open());
+        assert!(again.menus[0].children[0].active);
+        assert!(!again.menus[0].children[1].active);
+    }
+
+    #[test]
+    fn line_folder_is_an_outline() {
+        let mut c = Canvas::new(60, 60).unwrap();
+        c.clear(Rgba::BLACK);
+        let icon = Rect::new(12.0, 12.0, 36.0, 36.0);
+        draw_folder_lines(&mut c, icon, Rgba::WHITE, 0.0);
+        // Hollow: black in the middle of the body, white on its bottom edge and
+        // on the line across it where the front begins.
+        assert_eq!(pixel(&c, 30.0, 38.0), [0, 0, 0, 0xff]);
+        let column: Vec<u8> = (12..48).map(|y| pixel(&c, 30.0, y as f32)[0]).collect();
+        let lines = column.windows(2).filter(|w| w[0] < 0x80 && w[1] >= 0x80).count();
+        assert_eq!(lines, 3, "tab-less top, front edge, bottom: {column:?}");
+        // Opening moves the front's top edge down.
+        let mut open = Canvas::new(60, 60).unwrap();
+        open.clear(Rgba::BLACK);
+        draw_folder_lines(&mut open, icon, Rgba::WHITE, 1.0);
+        assert_ne!(c.data(), open.data());
+    }
+
     /// Not a check: frames of a layer of circles (folder opening, pressed
     /// transparent button, volume unfolding into a pill), written as PNGs to
     /// $TOUCHBINUX_FRAMES (run with --ignored).
@@ -1780,6 +2186,106 @@ mod tests {
         // The automatic fold starts at the first frame after it is due.
         shot(&mut s, MS(9000), "g-folding");
         shot(&mut s, MS(9500), "h-folded-back");
+    }
+
+    /// Not a check: an expandable unfolding, open with an active and a pressed
+    /// child, and folding; the line and classic folders opening. PNGs written to
+    /// $TOUCHBINUX_FRAMES (run with --ignored).
+    #[test]
+    #[ignore]
+    fn dump_expandable() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = menu_scene(
+            &font,
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "button"
+            id = "lines"
+            icon = "builtin:folder"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "button"
+            id = "classic"
+            icon = "builtin:folder_classic"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "spacer"
+            [[layers.items]]
+            type = "expandable"
+            id = "menu"
+            icon = "builtin:folder"
+            color = "#e8e8e8"
+            [[layers.items.children]]
+            id = "a"
+            icon = "/usr/share/tiny-dfr/search.svg"
+            label = "Buscar"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            id = "b"
+            icon = "builtin:folder"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            id = "c"
+            label = "Texto"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            id = "d"
+            icon = "builtin:folder_classic"
+            label = "Clásica"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "expandable"
+            id = "pill"
+            icon = "builtin:folder"
+            shape = "circle"
+            active_color = "#c0392b"
+            [[layers.items.children]]
+            id = "p1"
+            label = "Uno"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            id = "p2"
+            label = "Dos"
+            action = { type = "socket" }
+            [[layers.items]]
+            type = "volume"
+            "##,
+        );
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, t: Duration, name: &str| {
+            s.advance(t, &live);
+            s.draw(&mut canvas, t, &font, &live).unwrap();
+            canvas
+                .save_png(Path::new(&format!("{dir}/x-{name}.png")))
+                .unwrap();
+        };
+        shot(&mut s, MS(0), "a-idle");
+        let (lines, classic) = (s.buttons[0].rect, s.buttons[1].rect);
+        tap(&mut s, mid(lines), MS(100), &font);
+        tap(&mut s, mid(classic), MS(100), &font);
+        shot(&mut s, MS(180), "b-folders-opening");
+        shot(&mut s, MS(450), "c-folders-open");
+        let menu = s.menus[0].rect;
+        tap(&mut s, mid(menu), MS(1000), &font);
+        shot(&mut s, MS(1080), "d-unfolding");
+        s.set_active("b", true);
+        shot(&mut s, MS(1400), "e-open-b-active");
+        let mut out = Vec::new();
+        let c = child_mid(&s, 2);
+        s.handle_touch(Phase::Down, c, MS(1500), &font, &mut out);
+        shot(&mut s, MS(1500), "f-c-pressed");
+        s.handle_touch(Phase::Up, c, MS(1550), &font, &mut out);
+        shot(&mut s, MS(1620), "g-folding");
+        s.advance(MS(2000), &live);
+        let pill = s.menus[1].rect;
+        tap(&mut s, mid(pill), MS(3000), &font);
+        s.set_active("p2", true);
+        shot(&mut s, MS(3080), "h-circle-unfolding");
+        shot(&mut s, MS(3400), "i-pill-open");
     }
 
     /// Not a check: a layer showing `size`, `pressed_background` and

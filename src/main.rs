@@ -3,6 +3,7 @@ mod battery;
 mod canvas;
 mod config;
 mod display;
+mod expandable;
 mod expander;
 mod frame;
 mod gif;

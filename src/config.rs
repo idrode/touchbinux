@@ -24,8 +24,11 @@ pub const DEFAULT_PATH: &str = "/etc/touchbinux/config.toml";
 const MAX_TIMEOUT_MS: u64 = 60_000;
 /// Where install.sh copies the icons; also where the battery looks for its own.
 pub const ICON_DIR: &str = "/etc/touchbinux/icons";
-/// The only built-in icon so far: a folder drawn by code (see `widgets::Folder`).
+/// Icons drawn by code (see `widgets::Folder`): an outline folder, and the older
+/// filled one. Both open when their button is tapped.
 pub const BUILTIN_FOLDER: &str = "builtin:folder";
+pub const BUILTIN_FOLDER_CLASSIC: &str = "builtin:folder_classic";
+pub const BUILTIN_ICONS: &[&str] = &[BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC];
 pub const DEFAULT_CLOCK_FORMAT: &str = "%H:%M";
 /// Layer built from `[[buttons]]` when there are no `[[layers]]`.
 const LEGACY_LAYER: &str = "buttons";
@@ -39,6 +42,8 @@ const MIN_COLLAPSE_MS: u64 = 500;
 const PRESSED_SCALE: std::ops::RangeInclusive<f32> = 0.8..=1.2;
 /// Longest key a socket client may set (and so a `text` item may show).
 pub const MAX_KEY_LEN: usize = 64;
+/// An expandable's children must fit in one unfolded row.
+const MAX_CHILDREN: usize = 12;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +109,7 @@ pub enum ItemKind {
     Brightness,
     Gif,
     Text,
+    Expandable,
     Spacer,
 }
 
@@ -117,6 +123,7 @@ impl ItemKind {
             ItemKind::Brightness => "brightness",
             ItemKind::Gif => "gif",
             ItemKind::Text => "text",
+            ItemKind::Expandable => "expandable",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -132,7 +139,7 @@ pub struct ItemConfig {
     /// Required for buttons; widgets default to their type name ("clock"...).
     #[serde(default)]
     pub id: Option<String>,
-    /// button: absolute .svg/.png path, icon theme name, or `builtin:folder`.
+    /// button, expandable: absolute .svg/.png path, icon theme name, or `builtin:*`.
     #[serde(default)]
     pub icon: Option<String>,
     /// button: text next to the icon. Without it the icon is centred alone.
@@ -156,14 +163,15 @@ pub struct ItemConfig {
     /// Share of the free space, by weight (spacers default to 1).
     #[serde(default)]
     pub stretch: Option<f32>,
-    /// Animation length: the `builtin:folder` opening (and closing), or a
-    /// volume/brightness slider unfolding (and folding).
+    /// Animation length: a `builtin:folder*` opening (and closing), or a
+    /// volume/brightness slider or an expandable unfolding (and folding).
     #[serde(default)]
     pub anim_ms: Option<u64>,
-    /// volume/brightness: width of the unfolded slider, px (default half the bar).
+    /// volume/brightness: width of the unfolded slider, px (default half the bar);
+    /// expandable: of the unfolded row (default: enough for its children).
     #[serde(default)]
     pub expand_width: Option<f32>,
-    /// volume/brightness: fold back after this long without touches.
+    /// volume/brightness/expandable: fold back after this long without touches.
     #[serde(default)]
     pub collapse_after_ms: Option<u64>,
     /// gif: absolute path of the .gif.
@@ -195,10 +203,43 @@ pub struct ItemConfig {
     /// text: the socket key whose value it shows (`{"type":"set","key":...}`).
     #[serde(default)]
     pub key: Option<String>,
+    /// expandable: what it unfolds into, left to right.
+    #[serde(default)]
+    pub children: Option<Vec<ChildConfig>>,
+    /// expandable: background of the children the daemon marks as active.
+    #[serde(default)]
+    pub active_color: Option<Color>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
     pub gif: Option<Rc<Decoded>>,
+}
+
+/// One of an expandable's children: a small button in its unfolded row.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildConfig {
+    /// Reported on taps and used to find its action; default `<parent id>.<n>`
+    /// (n from 1).
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Paints the icon in this one colour.
+    #[serde(default)]
+    pub color: Option<Color>,
+    /// Required.
+    #[serde(default)]
+    pub action: Option<Action>,
+}
+
+impl ChildConfig {
+    /// Its id, `n` being its position (0-based) among `parent`'s children.
+    pub fn id(&self, parent: &str, n: usize) -> String {
+        self.id.clone().unwrap_or_else(|| format!("{parent}.{}", n + 1))
+    }
 }
 
 /// "#rrggbb" or "#rrggbbaa".
@@ -242,8 +283,12 @@ impl ItemConfig {
             (None, Some(k)) => Size::Stretch(k),
             (None, None) => Size::Fixed(match self.kind {
                 ItemKind::Spacer => return Size::Stretch(1.0),
-                ItemKind::Button if self.label.as_deref().is_none_or(str::is_empty) => 80.0,
-                ItemKind::Button => 160.0,
+                ItemKind::Button | ItemKind::Expandable
+                    if self.label.as_deref().is_none_or(str::is_empty) =>
+                {
+                    80.0
+                }
+                ItemKind::Button | ItemKind::Expandable => 160.0,
                 ItemKind::Clock => 120.0,
                 ItemKind::Battery => 80.0,
                 ItemKind::Gif => 60.0,
@@ -269,6 +314,20 @@ impl ItemConfig {
         self.icon_dir.as_deref().unwrap_or(ICON_DIR)
     }
 
+    /// An expandable's children (empty for other types).
+    pub fn children(&self) -> &[ChildConfig] {
+        self.children.as_deref().unwrap_or_default()
+    }
+
+    /// An expandable's children with their ids.
+    pub fn child_ids(&self) -> impl Iterator<Item = (String, &ChildConfig)> {
+        let parent = self.id().unwrap_or("");
+        self.children()
+            .iter()
+            .enumerate()
+            .map(move |(n, c)| (c.id(parent, n), c))
+    }
+
     fn validate(&self) -> Result<()> {
         let kind = self.kind.name();
         let what = match self.id() {
@@ -281,6 +340,14 @@ impl ItemConfig {
             ItemKind::Spacer => &[],
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
+            // Its pressed_background is its children's highlight.
+            ItemKind::Expandable => &[
+                "shape",
+                "radius",
+                "background",
+                "size",
+                "pressed_background",
+            ],
             _ => &[
                 "shape",
                 "radius",
@@ -313,6 +380,19 @@ impl ItemConfig {
             ],
             ItemKind::Gif => &["id", "path", "play", "action"],
             ItemKind::Text => &["id", "key", "action", "text_color"],
+            ItemKind::Expandable => &[
+                "id",
+                "icon",
+                "label",
+                "color",
+                "action",
+                "anim_ms",
+                "expand_width",
+                "collapse_after_ms",
+                "children",
+                "active_color",
+                "text_color",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -336,6 +416,8 @@ impl ItemConfig {
             ("size", self.diameter.is_some()),
             ("pressed_scale", self.pressed_scale.is_some()),
             ("text_color", self.text_color.is_some()),
+            ("children", self.children.is_some()),
+            ("active_color", self.active_color.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -363,15 +445,17 @@ impl ItemConfig {
             if self.icon.as_deref().is_none_or(str::is_empty) && label.is_empty() {
                 bail!("{what}: a button needs an `icon`, a `label` or both");
             }
-            if let Some(icon) = self.icon.as_deref()
-                && icon.starts_with("builtin:")
-                && icon != BUILTIN_FOLDER
+            if self.anim_ms.is_some()
+                && !self.icon.as_deref().is_some_and(|i| BUILTIN_ICONS.contains(&i))
             {
-                bail!("{what}: unknown built-in icon {icon:?} (there is {BUILTIN_FOLDER:?})");
+                bail!("{what}: `anim_ms` only applies to the built-in folders {BUILTIN_ICONS:?}");
             }
-            if self.anim_ms.is_some() && self.icon.as_deref() != Some(BUILTIN_FOLDER) {
-                bail!("{what}: `anim_ms` only applies to icon = {BUILTIN_FOLDER:?}");
-            }
+        }
+        if let Some(icon) = self.icon.as_deref() {
+            validate_icon(&what, icon)?;
+        }
+        if self.kind == ItemKind::Expandable {
+            self.validate_expandable(&what)?;
         }
         if self.kind == ItemKind::Gif
             && !self
@@ -418,6 +502,43 @@ impl ItemConfig {
         }
         Ok(())
     }
+
+    fn validate_expandable(&self, what: &str) -> Result<()> {
+        if self.id.is_none() {
+            bail!("{what}: an expandable needs an `id`");
+        }
+        // Unfolded, the icon stays at the left as the row's header.
+        if self.icon.as_deref().is_none_or(str::is_empty) {
+            bail!("{what}: an expandable needs an `icon`");
+        }
+        let n = self.children().len();
+        if !(1..=MAX_CHILDREN).contains(&n) {
+            bail!("{what}: an expandable needs 1 to {MAX_CHILDREN} `children`, it has {n}");
+        }
+        for (id, child) in self.child_ids() {
+            let what = format!("{what}: child {id:?}");
+            let Some(action) = &child.action else {
+                bail!("{what}: a child needs an `action`");
+            };
+            validate_action(&what, action)?;
+            if child.icon.as_deref().is_none_or(str::is_empty)
+                && child.label.as_deref().is_none_or(str::is_empty)
+            {
+                bail!("{what}: a child needs an `icon`, a `label` or both");
+            }
+            if let Some(icon) = child.icon.as_deref() {
+                validate_icon(&what, icon)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_icon(what: &str, icon: &str) -> Result<()> {
+    if icon.starts_with("builtin:") && !BUILTIN_ICONS.contains(&icon) {
+        bail!("{what}: unknown built-in icon {icon:?} (there are {BUILTIN_ICONS:?})");
+    }
+    Ok(())
 }
 
 impl LayerConfig {
@@ -642,8 +763,11 @@ impl Config {
             if !layer_ids.insert(layer.id.as_str()) {
                 bail!("layer id {:?} is repeated", layer.id);
             }
-            for id in layer.items.iter().filter_map(ItemConfig::id) {
-                check_id(id).with_context(|| format!("layer {:?}", layer.id))?;
+            for item in &layer.items {
+                let ids = item.id().map(str::to_string).into_iter();
+                for id in ids.chain(item.child_ids().map(|(id, _)| id)) {
+                    check_id(&id).with_context(|| format!("layer {:?}", layer.id))?;
+                }
             }
         }
         if let Some(d) = &self.default_layer
@@ -682,11 +806,14 @@ impl Config {
         if let Some(b) = self.button(id) {
             return Some(&b.action);
         }
-        self.layers
-            .iter()
-            .flat_map(|l| &l.items)
-            .find(|i| i.id() == Some(id))
-            .and_then(|i| i.action.as_ref())
+        let items = || self.layers.iter().flat_map(|l| &l.items);
+        if let Some(item) = items().find(|i| i.id() == Some(id)) {
+            return item.action.as_ref();
+        }
+        items()
+            .flat_map(ItemConfig::child_ids)
+            .find(|(child, _)| child == id)
+            .and_then(|(_, c)| c.action.as_ref())
     }
 
     /// The layer the `bar` scene starts with: `default_layer`, else the first
@@ -722,6 +849,8 @@ impl Config {
                 path: None,
                 play: None,
                 key: None,
+                children: None,
+                active_color: None,
                 shape: None,
                 radius: None,
                 background: None,
@@ -1296,6 +1425,119 @@ mod tests {
             parse(&item("", "type='clock'\nshape='circle'\nwidth=80")).unwrap_err()
         );
         assert!(err.contains("a circle is as wide as the row is tall"), "{err}");
+    }
+
+    const CAPTURE: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "expandable"
+        id = "capture"
+        icon = "builtin:folder"
+        expand_width = 600
+        collapse_after_ms = 4000
+        anim_ms = 150
+        active_color = "#ff000080"
+        radius = "full"
+        pressed_background = "#00ff00"
+        text_color = "#ffcc00"
+        [[layers.items.children]]
+        id = "shot"
+        icon = "/etc/touchbinux/icons/search.svg"
+        label = "Región"
+        action = { type = "key", key = "KEY_F13" }
+        [[layers.items.children]]
+        icon = "builtin:folder_classic"
+        color = "#ffffff"
+        action = { type = "command", argv = ["true"] }
+        [[layers.items.children]]
+        label = "Todo"
+        action = { type = "socket" }
+    "##;
+
+    #[test]
+    fn expandables_and_their_children() {
+        let c = parse(CAPTURE).unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.kind, ItemKind::Expandable);
+        assert_eq!(item.size(), Size::Fixed(80.0)); // icon only
+        let ids: Vec<_> = item.child_ids().map(|(id, _)| id).collect();
+        // Without an id, a child is `<parent>.<n>`, n from 1.
+        assert_eq!(ids, ["shot", "capture.2", "capture.3"]);
+        assert!(matches!(c.action("shot"), Some(Action::Key { .. })));
+        assert!(matches!(c.action("capture.2"), Some(Action::Command { .. })));
+        assert!(matches!(c.action("capture.3"), Some(Action::Socket)));
+        assert!(c.action("capture").is_none()); // its own tap only goes to the socket
+        assert!(c.action("capture.4").is_none());
+        assert!(matches!(item.active_color, Some(Color(Rgba(0xff, 0, 0, 0x80)))));
+        let f = c.layers[0].frame_for(item);
+        assert_eq!(f.pressed, Some(Rgba(0, 0xff, 0, 0xff)));
+        assert_eq!(f.text, Some(Rgba(0xff, 0xcc, 0, 0xff)));
+        // Inline tables work too, on one line.
+        let inline = parse(
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\nicon='x'\n\
+             children=[{icon='a', action={type='socket'}}, {label='b', action={type='socket'}}]",
+        )
+        .unwrap();
+        assert_eq!(inline.layers[0].items[0].children().len(), 2);
+    }
+
+    #[test]
+    fn rejects_bad_expandables() {
+        let child = "[[layers.items.children]]\nlabel='c'\naction={type='socket'}";
+        let item = |body: &str, children: &str| {
+            format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\n{body}\n{children}")
+        };
+        let base = "id='e'\nicon='x'";
+        let bad = [
+            // id, icon and children are required.
+            item("icon='x'", child),
+            item("id='e'\nlabel='only a label'", child),
+            item(base, ""),
+            item(base, &[child; 13].join("\n")),
+            // Children: action and something to show; known fields and built-ins only.
+            item(base, "[[layers.items.children]]\nlabel='c'"),
+            item(base, "[[layers.items.children]]\naction={type='socket'}"),
+            item(base, "[[layers.items.children]]\nlabel='c'\naction={type='key',key='KEY_NOPE'}"),
+            item(base, "[[layers.items.children]]\nicon='builtin:rocket'\naction={type='socket'}"),
+            item(base, "[[layers.items.children]]\nlabel='c'\nwidth=40\naction={type='socket'}"),
+            item(base, "[[layers.items.children]]\nid='workspace:1'\nlabel='c'\naction={type='socket'}"),
+            // Its own fields.
+            item("id='e'\nicon='builtin:rocket'", child),
+            item(&format!("{base}\npressed_scale=0.9"), child),
+            item(&format!("{base}\nformat='%H'"), child),
+            item(&format!("{base}\nexpand_width=0"), child),
+            item(&format!("{base}\ncollapse_after_ms=10"), child),
+            item(&format!("{base}\nactive_color='green'"), child),
+            // Children ids clash with each other or with other items.
+            item(base, &format!("{child}\nid='x'\n{child}\nid='x'")),
+            item(base, &format!("{child}\nid='e'")),
+            format!("{}\n[[layers.items]]\ntype='clock'\nid='e.1'", item(base, child)),
+            // `children` and `active_color` only on expandables.
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nchildren=[]".into(),
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nactive_color='#ffffff'".into(),
+        ];
+        for body in &bad {
+            assert!(parse(body).is_err(), "accepted: {body}");
+        }
+        let err = format!("{:#}", parse(&item(base, "[[layers.items.children]]\nlabel='c'")).unwrap_err());
+        assert!(err.contains("child \"e.1\": a child needs an `action`"), "{err}");
+        assert!(parse(&item(base, child)).is_ok());
+    }
+
+    #[test]
+    fn builtin_icons() {
+        let button = |icon: &str, extra: &str| {
+            format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\n\
+                 icon='{icon}'\n{extra}\naction={{type='socket'}}"
+            )
+        };
+        for icon in BUILTIN_ICONS {
+            assert!(parse(&button(icon, "anim_ms=250")).is_ok(), "{icon}");
+        }
+        let err = format!("{:#}", parse(&button("builtin:rocket", "")).unwrap_err());
+        assert!(err.contains("builtin:folder_classic"), "lists the built-ins: {err}");
     }
 
     /// The shipped example must load anywhere: valid, no files of its own, and every

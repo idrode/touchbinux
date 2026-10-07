@@ -456,15 +456,29 @@ impl FolderState {
     }
 }
 
+/// How `builtin:folder` and `builtin:folder_classic` look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FolderStyle {
+    /// Outline only, thin round lines (`builtin:folder`).
+    Lines,
+    /// Filled, with a back panel and a sheet inside (`builtin:folder_classic`).
+    Classic,
+}
+
 /// The wallpaper button's icon: a folder drawn by code.
 pub struct Folder {
     pub color: Rgba,
+    pub style: FolderStyle,
     pub state: FolderState,
 }
 
 impl Animated for Folder {
     fn draw(&self, canvas: &mut Canvas, rect: Rect, t: Duration) {
-        draw_folder(canvas, rect, self.color, self.state.openness(t));
+        let open = self.state.openness(t);
+        match self.style {
+            FolderStyle::Lines => draw_folder_lines(canvas, rect, self.color, open),
+            FolderStyle::Classic => draw_folder(canvas, rect, self.color, open),
+        }
     }
 
     fn next_change(&self, t: Duration) -> Option<Duration> {
@@ -477,8 +491,51 @@ impl Animated for Folder {
     }
 }
 
-/// Folder in `icon` (a square). `open` in 0..=1 tilts the front flap down and shows
-/// a sheet inside; 0 is the plain closed folder.
+/// Outline folder in `icon` (a square): the back with its tab, and the front as a
+/// second outline over the body. `open` in 0..=1 drops the front's top edge and
+/// slides it right, as in the classic folder; 0 is closed.
+pub fn draw_folder_lines(canvas: &mut Canvas, icon: Rect, color: Rgba, open: f32) {
+    let open = open.clamp(0.0, 1.0);
+    let s = icon.w.min(icon.h);
+    let line = (s * 0.075).max(1.8);
+    let (cx, cy) = icon.center();
+    // Inset by half a line so the strokes stay inside the square.
+    let (w, h) = (s * 0.86 - line, s * 0.68 - line);
+    let (x, y) = (cx - w / 2.0, cy - h / 2.0);
+    let bottom = y + h;
+    let shoulder = y + h * 0.18;
+    let top = y + h * (0.36 + 0.2 * open);
+    let skew = w * 0.16 * open;
+    // Back: left side, tab, right side down to where the front starts.
+    canvas.stroke_polyline(
+        &[
+            (x, bottom),
+            (x, y),
+            (x + w * 0.36, y),
+            (x + w * 0.46, shoulder),
+            (x + w, shoulder),
+            (x + w, top),
+        ],
+        false,
+        line,
+        color,
+    );
+    // Front: closed it is the body's lower part; opening, its top edge tilts away.
+    canvas.stroke_polyline(
+        &[
+            (x + skew, top),
+            (x + w + skew, top),
+            (x + w, bottom),
+            (x, bottom),
+        ],
+        true,
+        line,
+        color,
+    );
+}
+
+/// Classic filled folder in `icon` (a square). `open` in 0..=1 tilts the front flap
+/// down and shows a sheet inside; 0 is the plain closed folder.
 pub fn draw_folder(canvas: &mut Canvas, icon: Rect, color: Rgba, open: f32) {
     let open = open.clamp(0.0, 1.0);
     let s = icon.w.min(icon.h);
@@ -573,6 +630,7 @@ mod tests {
 
         let mut folder = Folder {
             color: ICON,
+            style: FolderStyle::Lines,
             state: FolderState::new(ms(300)),
         };
         assert_eq!(folder.next_change(Duration::ZERO), None);

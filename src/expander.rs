@@ -88,6 +88,13 @@ impl Fold {
         }
     }
 
+    /// Takes over the state of the fold it replaces (scene rebuilt on reload).
+    pub fn inherit(&mut self, old: &Fold) {
+        self.progress = old.progress;
+        self.collapse_at = old.collapse_at;
+        self.held = old.held;
+    }
+
     /// Starts the automatic fold if its time has come. Returns whether it did.
     pub fn advance(&mut self, t: Duration) -> bool {
         if self.collapse_at.is_some_and(|at| at <= t) {
@@ -210,9 +217,7 @@ impl Expander {
         self.drag = old.drag;
         self.shown = old.shown;
         self.waves = old.waves;
-        self.fold.progress = old.fold.progress;
-        self.fold.collapse_at = old.fold.collapse_at;
-        self.fold.held = old.fold.held;
+        self.fold.inherit(&old.fold);
     }
 
     fn live_value(&self, live: &Live) -> Option<u8> {

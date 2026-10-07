@@ -43,6 +43,10 @@ TimeoutStopSec=5
 # whatever icon paths the config names); button commands run as a normal user, who can't write there anyway.
 # /run (socket), /dev and /sys (backlight) stay writable.
 ProtectSystem=full
+# /var/lib/touchbinux, created by systemd (root, 0755) and passed in
+# $STATE_DIRECTORY: choices made on the bar (a gif_picker's GIF) in state.toml.
+# The config in /etc is never written.
+StateDirectory=touchbinux
 # /proc/sys and similar read-only. On this systemd (262) /sys itself stays writable:
 # tiny-dfr runs with the same option and writes its backlight in /sys/class/backlight.
 ProtectKernelTunables=true

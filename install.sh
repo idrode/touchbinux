@@ -274,5 +274,8 @@ Back to tiny-dfr at any time:
   sudo systemctl unmask tiny-dfr
   sudo systemctl start tiny-dfr
 
-If you ran install.sh again after an update: sudo systemctl restart touchbinux
+If you ran install.sh again after an update:
+
+  sudo systemctl daemon-reload              # in case the unit changed
+  sudo systemctl restart touchbinux
 EOF

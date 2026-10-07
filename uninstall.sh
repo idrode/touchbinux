@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Removes what install.sh installed. Refuses while touchbinux is enabled or running
-# (prints the commands to go back to tiny-dfr first). Keeps /etc/touchbinux unless
-# --purge is given.
+# (prints the commands to go back to tiny-dfr first). Keeps /etc/touchbinux and
+# /var/lib/touchbinux (choices made on the bar) unless --purge is given.
 #
 # Usage: ./uninstall.sh [--purge]
 
@@ -12,6 +12,7 @@ UNITS=(/etc/systemd/system/touchbinux.service /etc/systemd/system/touchbinux-res
 UDEV_RULE=/etc/udev/rules.d/99-touchbinux.rules
 MODULES=/etc/modules-load.d/touchbinux.conf
 CONF_DIR=/etc/touchbinux
+STATE_DIR=/var/lib/touchbinux
 
 purge=false
 case "${1:-}" in
@@ -48,8 +49,10 @@ echo "To be removed:"
 if ((${#files[@]})); then printf '  %s\n' "${files[@]}"; else echo "  (no installed files found)"; fi
 if $purge; then
     [[ -e $CONF_DIR ]] && echo "  $CONF_DIR (configuration, --purge)"
+    [[ -e $STATE_DIR ]] && echo "  $STATE_DIR (choices made on the bar, --purge)"
 else
     [[ -e $CONF_DIR ]] && echo "Kept: $CONF_DIR (use --purge to remove it)"
+    [[ -e $STATE_DIR ]] && echo "Kept: $STATE_DIR (use --purge to remove it)"
 fi
 echo
 read -r -p "Proceed? [y/N] " answer
@@ -58,6 +61,7 @@ read -r -p "Proceed? [y/N] " answer
 set -x
 ((${#files[@]})) && sudo rm -f -- "${files[@]}"
 if $purge && [[ -e $CONF_DIR ]]; then sudo rm -rf -- "$CONF_DIR"; fi
+if $purge && [[ -e $STATE_DIR ]]; then sudo rm -rf -- "$STATE_DIR"; fi
 set +x
 
 cat <<'EOF'

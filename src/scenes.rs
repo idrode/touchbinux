@@ -11,6 +11,7 @@ use crate::{
     frame::Frame,
     gif::{Gif, GifPlayer, Play},
     gifpick::PickerFace,
+    player::{PlayerFace, SeekBar},
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
@@ -102,6 +103,8 @@ pub enum UiEvent {
     ToggleMute(String),
     /// A choice in a gif_picker (item id, child id: the file name).
     Pick(String, String),
+    /// The player's seek bar was released here (item id, seconds from the start).
+    Seek(String, f64),
 }
 
 /// What the daemon needs to fill a gif_picker in: its id, the box its GIF must fit
@@ -374,7 +377,7 @@ impl Scene {
         }
         for (i, m) in self.menus.iter().enumerate() {
             if active != Some(Unfolded::Menu(i)) {
-                m.draw(canvas, t, font, None);
+                m.draw(canvas, t, font, None, live);
             }
         }
         if let Some(u) = active {
@@ -400,7 +403,7 @@ impl Scene {
                         Capture::Menu(m, Part::Child(j), true) if m == i => Some(j),
                         _ => None,
                     };
-                    self.menus[i].draw(canvas, t, font, pressed);
+                    self.menus[i].draw(canvas, t, font, pressed, live);
                 }
             }
         }
@@ -438,7 +441,7 @@ impl Scene {
             changed |= e.advance(t, live);
         }
         for m in &mut self.menus {
-            changed |= m.advance(t);
+            changed |= m.advance(t, live);
         }
         changed
     }
@@ -468,7 +471,15 @@ impl Scene {
             }
             m.fold.touch_down();
             m.fold.expand(t); // in case it was folding
-            return Some(Capture::Menu(i, m.part_at(x, y), true));
+            let part = m.part_at(x, y);
+            if part == Part::Seek
+                && let Some((seek, r)) = m.seek_mut()
+                && !seek.press(r, x, font)
+            {
+                // No duration (a stream, nothing loaded): nothing to drag.
+                return Some(Capture::Menu(i, Part::Gap, true));
+            }
+            return Some(Capture::Menu(i, part, true));
         }
         if let Some(Unfolded::Slider(i)) = self.unfolded(t) {
             let e = &mut self.expanders[i];
@@ -580,6 +591,12 @@ impl Scene {
             (Phase::Move, Capture::MenuTap(i, _)) => {
                 self.capture = Capture::MenuTap(i, contains(self.menus[i].rect, x, y));
             }
+            (Phase::Move, Capture::Menu(i, Part::Seek, _)) => {
+                // Follows the finger wherever it goes, like the sliders.
+                if let Some((seek, r)) = self.menus[i].seek_mut() {
+                    changed |= seek.drag_to(r, x, font);
+                }
+            }
             (Phase::Move, Capture::Menu(i, part, _)) => {
                 let inside = self.menus[i].part_at(x, y) == part;
                 self.capture = Capture::Menu(i, part, inside);
@@ -628,6 +645,19 @@ impl Scene {
                             changed |= m.on_tap(t);
                         }
                     }
+                    Capture::Menu(i, Part::Seek, _) => {
+                        // Seeks only now, when the finger lifts; a cancelled touch
+                        // (e.g. a palm) doesn't.
+                        let m = &mut self.menus[i];
+                        m.fold.touch_up(t);
+                        let id = m.id.clone();
+                        if let Some((seek, _)) = m.seek_mut()
+                            && let Some(secs) = seek.release(t, phase == Phase::Up)
+                        {
+                            out.push(UiEvent::Seek(id, secs));
+                        }
+                        changed = true;
+                    }
                     Capture::Menu(i, part, inside) => {
                         let m = &mut self.menus[i];
                         m.fold.touch_up(t);
@@ -644,7 +674,7 @@ impl Scene {
                                     });
                                     m.fold.collapse(t);
                                 }
-                                Part::Gap => {}
+                                Part::Seek | Part::Gap => {}
                             }
                         }
                         changed = true;
@@ -718,6 +748,12 @@ impl Scene {
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
+    }
+
+    /// Whether the player is unfolded (or unfolding): its seek bar wants mpv's
+    /// position only then.
+    pub fn player_open(&self) -> bool {
+        self.menus.iter().any(|m| m.seek.is_some() && m.fold.is_open())
     }
 
     /// The gif_pickers, for the daemon to fill in.
@@ -1368,17 +1404,7 @@ pub fn bar(
                 scene.add_button(rect, font, spec);
             }
             ItemKind::Expandable => {
-                let children: Vec<Child> = item
-                    .child_ids()
-                    .map(|(child_id, c)| Child {
-                        id: child_id,
-                        glyph: c.icon.as_deref().map(|name| {
-                            static_glyph(name, c.color.map(|c| c.0), icons, font, size)
-                        }),
-                        label: c.label.clone().unwrap_or_default(),
-                        active: false,
-                    })
-                    .collect();
+                let children = children(item, icons, font, size);
                 let face: Box<dyn Animated> = match folder_style(item.icon.as_deref()) {
                     Some(style) => Box::new(folder(item.color.map(|c| c.0), style, None)),
                     None => {
@@ -1388,6 +1414,20 @@ pub fn bar(
                     }
                 };
                 let spec = menu_spec(item, area, frame, face, false);
+                scene
+                    .menus
+                    .push(Expandable::new(id, rect, spec, children, font));
+            }
+            ItemKind::Player => {
+                let children = children(item, icons, font, size);
+                let face = Box::new(PlayerFace::new(item.color.map(|c| c.0)));
+                let mut spec = menu_spec(item, area, frame, face, false);
+                spec.seek = Some(SeekBar::new(
+                    item.seek_color.map(|c| c.0),
+                    item.seek_height,
+                    item.show_time.unwrap_or(true),
+                    frame.text,
+                ));
                 scene
                     .menus
                     .push(Expandable::new(id, rect, spec, children, font));
@@ -1497,7 +1537,23 @@ fn menu_spec(
             item.collapse_after().unwrap_or(DEFAULT_COLLAPSE_AFTER),
         ),
         picks,
+        seek: None,
     }
+}
+
+/// An expandable's (or player's) children from the config.
+fn children(item: &ItemConfig, icons: &mut IconResolver, font: &Font, size: f32) -> Vec<Child> {
+    item.child_ids()
+        .map(|(id, c)| Child {
+            id,
+            glyph: c
+                .icon
+                .as_deref()
+                .map(|name| static_glyph(name, c.color.map(|c| c.0), icons, font, size)),
+            label: c.label.clone().unwrap_or_default(),
+            active: false,
+        })
+        .collect()
 }
 
 /// The largest a GIF can be in an item's `rect` (2 px clear of the edges), as for
@@ -1616,6 +1672,7 @@ mod tests {
             brightness: Some(70),
             battery: None,
             now: chrono::Local::now(),
+            player: Default::default(),
         }
     }
 
@@ -2355,6 +2412,178 @@ mod tests {
         tap(&mut s, mid(r), MS(100), &font);
         shot(&mut s, MS(180), "b-unfolding");
         shot(&mut s, MS(600), "c-open");
+    }
+
+    const PLAYER: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "player"
+        seek_color = "#ff0000"
+        [[layers.items.children]]
+        id = "pp"
+        icon = "builtin:folder"
+        action = { type = "socket" }
+        [[layers.items.children]]
+        id = "stop"
+        label = "Stop"
+        action = { type = "socket" }
+    "##;
+
+    fn mpv(paused: bool, duration: Option<f64>, position: f64) -> crate::mpv::MpvState {
+        crate::mpv::MpvState {
+            connected: true,
+            idle: false,
+            paused,
+            title: "song".into(),
+            duration,
+            position: Some(position),
+        }
+    }
+
+    #[test]
+    fn player_seeks_on_release_only() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, PLAYER);
+        let mut live = live();
+        live.player = mpv(false, Some(200.0), 50.0);
+        let r = s.menus[0].rect;
+        assert!(!s.player_open());
+        // Playing: the bars move all the time, even folded.
+        s.advance(MS(0), &live);
+        assert_eq!(s.next_change(MS(5000)), Some(MS(5000)));
+
+        tap(&mut s, mid(r), MS(1000), &font);
+        assert!(s.player_open());
+        s.advance(MS(1400), &live);
+        let (_, seek_r) = s.menus[0].seek_mut().unwrap();
+        // Press at the track's start, drag to its end, past it: one seek, at the end,
+        // when the finger lifts.
+        let mut out = Vec::new();
+        let y = seek_r.y + seek_r.h / 2.0;
+        s.handle_touch(Phase::Down, (seek_r.x + 1.0, y), MS(1500), &font, &mut out);
+        assert!(s.handle_touch(Phase::Move, (seek_r.x + seek_r.w / 2.0, y), MS(1550), &font, &mut out));
+        s.handle_touch(Phase::Move, (W as f32 + 50.0, 0.0), MS(1600), &font, &mut out);
+        assert!(out.is_empty(), "nothing sent while dragging: {out:?}");
+        s.handle_touch(Phase::Up, (W as f32 + 50.0, 0.0), MS(1650), &font, &mut out);
+        assert_eq!(out, vec![UiEvent::Seek("player".into(), 200.0)]);
+        // Still open: seeking doesn't fold it.
+        assert!(s.menus[0].fold.is_open());
+
+        // A cancelled drag seeks nothing.
+        out.clear();
+        s.handle_touch(Phase::Down, (seek_r.x + 30.0, y), MS(2000), &font, &mut out);
+        s.handle_touch(Phase::Cancel, (seek_r.x + 30.0, y), MS(2100), &font, &mut out);
+        assert!(out.is_empty());
+
+        // No duration (a stream): the bar takes no drags.
+        live.player = mpv(false, None, 10.0);
+        s.advance(MS(2200), &live);
+        s.handle_touch(Phase::Down, (seek_r.x + 30.0, y), MS(2300), &font, &mut out);
+        s.handle_touch(Phase::Up, (seek_r.x + 30.0, y), MS(2400), &font, &mut out);
+        assert!(out.is_empty());
+
+        // Children still work as an expandable's (and fold it).
+        let stop = child_mid(&s, 1);
+        let (_, ev) = tap(&mut s, stop, MS(2500), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("stop".into())]);
+        assert!(!s.player_open());
+
+        // Paused: once the bars have folded, no frames at all.
+        live.player = mpv(true, Some(200.0), 50.0);
+        s.advance(MS(3000), &live);
+        s.advance(MS(4000), &live);
+        assert_eq!(s.next_change(MS(4000)), None);
+    }
+
+    #[test]
+    fn player_draws_position_and_times() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, PLAYER);
+        let mut live = live();
+        live.player = mpv(true, Some(200.0), 100.0);
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(0), &font);
+        s.advance(MS(0), &live);
+        s.advance(MS(1000), &live);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(1000), &font, &live).unwrap();
+        let (_, r) = s.menus[0].seek_mut().unwrap();
+        // Half the track red (seek_color), times in white at the ends.
+        assert!(has_colour(&c, r, [0xff, 0, 0]), "fill");
+        let left = Rect { w: 60.0, ..r };
+        let right = Rect { x: r.x + r.w - 60.0, w: 60.0, ..r };
+        assert!(has_colour(&c, left, [0xff, 0xff, 0xff]), "current time");
+        assert!(has_colour(&c, right, [0xff, 0xff, 0xff]), "total time");
+        // No duration: no fill, grey dashes.
+        live.player = mpv(true, None, 100.0);
+        s.advance(MS(1100), &live);
+        s.draw(&mut c, MS(1100), &font, &live).unwrap();
+        assert!(!has_colour(&c, r, [0xff, 0, 0]), "no fill without duration");
+    }
+
+    /// Not a check: the player folded (no mpv, stopped, paused, playing) and unfolded
+    /// (playing, dragging the seek bar, a stream), as PNGs in $TOUCHBINUX_FRAMES.
+    #[test]
+    #[ignore]
+    fn dump_player() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = menu_scene(
+            &font,
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "player"
+            [[layers.items.children]]
+            icon = "/usr/share/tiny-dfr/fast_rewind.svg"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            icon = "/usr/share/tiny-dfr/play_pause.svg"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            icon = "/usr/share/tiny-dfr/fast_forward.svg"
+            action = { type = "socket" }
+            [[layers.items.children]]
+            label = "Stop"
+            action = { type = "socket" }
+            "##,
+        );
+        let mut live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        // Each state drawn once its morph is over (400 ms after it starts).
+        let mut shot = |s: &mut Scene, live: &Live, t: u64, name: &str| {
+            s.advance(MS(t), live);
+            s.draw(&mut canvas, MS(t + 400), &font, live).unwrap();
+            canvas.save_png(Path::new(&format!("{dir}/p-{name}.png"))).unwrap();
+        };
+        shot(&mut s, &live, 0, "a-no-mpv");
+        live.player = crate::mpv::MpvState { connected: true, idle: true, ..Default::default() };
+        shot(&mut s, &live, 1000, "b-stopped");
+        live.player = mpv(true, Some(212.0), 61.0);
+        shot(&mut s, &live, 2000, "c-paused");
+        live.player = mpv(false, Some(212.0), 61.0);
+        shot(&mut s, &live, 2100, "d-playing");
+        shot(&mut s, &live, 3000, "e-playing");
+        shot(&mut s, &live, 3150, "f-playing");
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(4000), &font);
+        shot(&mut s, &live, 3680, "g-unfolding");
+        shot(&mut s, &live, 4500, "h-open");
+        let (_, seek) = s.menus[0].seek_mut().unwrap();
+        let mut out = Vec::new();
+        let y = seek.y + seek.h / 2.0;
+        s.handle_touch(Phase::Down, (seek.x + seek.w * 0.8, y), MS(4600), &font, &mut out);
+        shot(&mut s, &live, 4600, "i-dragging");
+        s.handle_touch(Phase::Cancel, (seek.x + seek.w * 0.8, y), MS(4700), &font, &mut out);
+        live.player = mpv(false, None, 61.0);
+        shot(&mut s, &live, 4800, "j-stream");
     }
 
     #[test]

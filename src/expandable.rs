@@ -11,8 +11,9 @@ use crate::{
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
     expander::{Fold, expanded_rect, lerp_rect},
     frame::{DEFAULT_PRESSED, Frame, Shape},
+    player::SeekBar,
     scenes::{PADDING, ellipsize, icon_side},
-    widgets::{DIM, TEXT},
+    widgets::{DIM, Live, TEXT},
 };
 use std::{rc::Rc, time::Duration};
 
@@ -20,6 +21,8 @@ use std::{rc::Rc, time::Duration};
 pub const DEFAULT_ACTIVE: Rgba = Rgba(0x00, 0xff, 0xb7, 0x50);
 /// Narrowest child when `expand_width` is not set (icon only).
 const MIN_CHILD_W: f32 = 64.0;
+/// The seek bar's share of an unfolded player when `expand_width` is not set.
+const SEEK_W: f32 = 480.0;
 /// Between children.
 const CHILD_GAP: f32 = 4.0;
 /// Between the folded icon and its label.
@@ -87,6 +90,8 @@ pub enum Part {
     /// The item's own icon, at the left: folds it.
     Header,
     Child(usize),
+    /// The player's seek bar.
+    Seek,
     /// Between children, or at the ends.
     Gap,
 }
@@ -113,6 +118,11 @@ pub struct Expandable {
     pub enabled: bool,
     /// Its children are choices (`UiEvent::Pick`) rather than actions.
     pub picks: bool,
+    /// The player's seek bar, after the children, to the end of the row.
+    pub seek: Option<SeekBar>,
+    /// With a seek bar, children are this wide (the widest one's natural width)
+    /// and the bar takes the rest; otherwise they share the row equally.
+    child_w: Option<f32>,
 }
 
 /// What `Expandable::new` needs besides its id, rect and children.
@@ -125,6 +135,7 @@ pub struct Spec {
     pub active_color: Rgba,
     pub fold: Fold,
     pub picks: bool,
+    pub seek: Option<SeekBar>,
 }
 
 impl Expandable {
@@ -144,6 +155,8 @@ impl Expandable {
             fold: spec.fold,
             enabled: true,
             picks: spec.picks,
+            seek: spec.seek,
+            child_w: None,
         };
         e.place(font);
         e
@@ -152,10 +165,47 @@ impl Expandable {
     /// Works out `open_rect` for the current children and icon.
     fn place(&mut self, font: &Font) {
         let header = self.header_w(self.rect.h);
+        let widest = widest_child(self.rect.h, &self.children, font);
+        let n = self.children.len() as f32;
+        let children = n * (widest + CHILD_GAP);
+        let seek = if self.seek.is_some() { SEEK_W } else { 0.0 };
         let width = self
             .width
-            .unwrap_or_else(|| default_width(self.rect.h, header, &self.children, font));
+            .unwrap_or_else(|| (header + CHILD_GAP + children + seek + PADDING).ceil());
+        self.child_w = self.seek.is_some().then_some(widest);
         self.open_rect = expanded_rect(self.rect, self.area, width);
+    }
+
+    /// Child `j` in the row `r`.
+    fn child_rect(&self, r: Rect, j: usize) -> Rect {
+        let (x0, end) = self.content(r);
+        let n = self.children.len().max(1) as f32;
+        let w = self
+            .child_w
+            .unwrap_or_else(|| ((end - x0 - CHILD_GAP * (n - 1.0)) / n).max(1.0));
+        let x = x0 + j as f32 * (w + CHILD_GAP);
+        Rect::new(x.round(), r.y + CHILD_INSET, w.round(), child_icon_max(r.h))
+    }
+
+    /// The seek bar, after the children, in the row `r`.
+    fn seek_rect(&self, r: Rect) -> Rect {
+        let (x0, end) = self.content(r);
+        let n = self.children.len() as f32;
+        let x = x0 + n * (self.child_w.unwrap_or(0.0) + CHILD_GAP);
+        Rect::new(
+            x.round(),
+            r.y + CHILD_INSET,
+            (end - x).max(1.0),
+            child_icon_max(r.h),
+        )
+    }
+
+    /// Where children (and the seek bar) go in the row `r`: after the header, clear
+    /// of the row's round end.
+    fn content(&self, r: Rect) -> (f32, f32) {
+        let x0 = self.header_end(r) + CHILD_GAP;
+        let end = r.x + r.w - (self.frame.corner(r) * 0.5).max(CHILD_GAP);
+        (x0, end)
     }
 
     /// Replaces the children (e.g. the GIFs found in a folder), keeping the active
@@ -189,6 +239,9 @@ impl Expandable {
     /// it is unfolded, and which children are active.
     pub fn inherit(&mut self, old: &Expandable) {
         self.fold.inherit(&old.fold);
+        if let (Some(s), Some(o)) = (&mut self.seek, &old.seek) {
+            s.inherit(o);
+        }
         for c in &mut self.children {
             c.active = old.children.iter().any(|o| o.id == c.id && o.active);
         }
@@ -213,15 +266,26 @@ impl Expandable {
         self.face.on_tap(t)
     }
 
-    pub fn advance(&mut self, t: Duration) -> bool {
-        self.fold.advance(t)
+    pub fn advance(&mut self, t: Duration, live: &Live) -> bool {
+        if let Some(s) = &mut self.seek {
+            s.advance(t, &live.player);
+        }
+        let face = self.face.advance(t, live);
+        self.fold.advance(t) | face
     }
 
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
-        [self.fold.next_change(t), self.face.next_change(t)]
+        let seek = self.seek.as_ref().and_then(|s| s.next_change(t));
+        [self.fold.next_change(t), self.face.next_change(t), seek]
             .into_iter()
             .flatten()
             .min()
+    }
+
+    /// The seek bar, where it is drawn unfolded, for touches on it.
+    pub fn seek_mut(&mut self) -> Option<(&mut SeekBar, Rect)> {
+        let r = self.seek_rect(self.open_rect);
+        self.seek.as_mut().map(|s| (s, r))
     }
 
     pub fn current_rect(&self, t: Duration) -> Rect {
@@ -234,20 +298,32 @@ impl Expandable {
         if !(y >= r.y && y < r.y + r.h && x >= r.x && x < r.x + r.w) {
             return Part::Gap;
         }
-        let header = self.header_end(r);
-        if x < header {
+        if x < self.header_end(r) {
             return Part::Header;
         }
-        (0..self.children.len())
-            .find(|&j| {
-                let c = child_rect(r, header, &self.frame, self.children.len(), j);
-                x >= c.x && x < c.x + c.w
-            })
-            .map_or(Part::Gap, Part::Child)
+        let child = (0..self.children.len()).find(|&j| {
+            let c = self.child_rect(r, j);
+            x >= c.x && x < c.x + c.w
+        });
+        if let Some(j) = child {
+            return Part::Child(j);
+        }
+        let s = self.seek_rect(r);
+        if self.seek.is_some() && x >= s.x - CHILD_GAP {
+            return Part::Seek;
+        }
+        Part::Gap
     }
 
     /// `pressed`: the child under a finger, highlighted.
-    pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, pressed: Option<usize>) {
+    pub fn draw(
+        &self,
+        canvas: &mut Canvas,
+        t: Duration,
+        font: &Font,
+        pressed: Option<usize>,
+        live: &Live,
+    ) {
         let k = self.fold.progress(t);
         let r = self.current_rect(t);
         self.frame.draw_background(canvas, r);
@@ -305,9 +381,8 @@ impl Expandable {
             r.h - 2.0 * sep,
             fade(DIM, unfolded * 0.6),
         );
-        let n = self.children.len();
         for (j, child) in self.children.iter().enumerate() {
-            let slot = child_rect(r, header_end, &self.frame, n, j);
+            let slot = self.child_rect(r, j);
             let corner = self.frame.corner(slot);
             if child.active {
                 let c = fade(self.active_color, unfolded);
@@ -327,6 +402,9 @@ impl Expandable {
                 unfolded,
             );
         }
+        if let Some(s) = &self.seek {
+            s.draw(canvas, self.seek_rect(r), font, &live.player, unfolded);
+        }
     }
 }
 
@@ -342,7 +420,8 @@ fn draw_child(
 ) {
     let px = label_px(slot.h);
     let icon_w = child.glyph.as_ref().map_or(0.0, |g| g.width(side));
-    let room = (slot.w - 2.0 * PADDING - icon_w - ICON_LABEL_GAP).max(0.0);
+    let icon_gap = if icon_w > 0.0 { ICON_LABEL_GAP } else { 0.0 };
+    let room = (slot.w - 2.0 * PADDING - icon_w - icon_gap).max(0.0);
     let mut label = ellipsize(font, &child.label, px, room);
     // Next to an icon, a label cut down to (almost) nothing is just noise; while the
     // row is still opening, a cut label would only flicker through "…" states.
@@ -366,22 +445,6 @@ fn draw_child(
     canvas.draw_text(font, &label, x + icon_w + gap, baseline, px, text);
 }
 
-/// Child `j` of `n` in the row `r`: equal shares of what the header (ending at
-/// `header_end`) leaves, clear of the row's round end.
-fn child_rect(r: Rect, header_end: f32, frame: &Frame, n: usize, j: usize) -> Rect {
-    let x0 = header_end + CHILD_GAP;
-    let end = r.x + r.w - (frame.corner(r) * 0.5).max(CHILD_GAP);
-    let n = n.max(1) as f32;
-    let w = ((end - x0 - CHILD_GAP * (n - 1.0)) / n).max(1.0);
-    let x = x0 + j as f32 * (w + CHILD_GAP);
-    Rect::new(
-        x.round(),
-        r.y + CHILD_INSET,
-        w.round(),
-        (r.h - 2.0 * CHILD_INSET).max(1.0),
-    )
-}
-
 /// Tallest a child's icon (e.g. a GIF thumbnail) can be in a row `row_h` px high.
 pub fn child_icon_max(row_h: f32) -> f32 {
     (row_h - 2.0 * CHILD_INSET).max(1.0)
@@ -392,12 +455,12 @@ fn label_px(slot_h: f32) -> f32 {
     slot_h * 0.42
 }
 
-/// `expand_width` when not configured: the header, then every child as wide as the
-/// widest one needs to show its icon and whole label.
-fn default_width(row_h: f32, header: f32, children: &[Child], font: &Font) -> f32 {
+/// How wide the widest child needs to be to show its icon and whole label (when
+/// `expand_width` is not configured, every child gets that).
+fn widest_child(row_h: f32, children: &[Child], font: &Font) -> f32 {
     let slot_h = (row_h - 2.0 * CHILD_INSET).max(1.0);
     let side = icon_side(row_h);
-    let widest = children
+    children
         .iter()
         .map(|c| {
             let icon = c.glyph.as_ref().map_or(0.0, |g| g.width(side));
@@ -409,9 +472,7 @@ fn default_width(row_h: f32, header: f32, children: &[Child], font: &Font) -> f3
             };
             icon + gap + label + 2.0 * PADDING
         })
-        .fold(MIN_CHILD_W, f32::max);
-    let n = children.len() as f32;
-    (header + CHILD_GAP + n * (widest + CHILD_GAP) + PADDING).ceil()
+        .fold(MIN_CHILD_W, f32::max)
 }
 
 impl Animated for Still {
@@ -427,23 +488,69 @@ impl Animated for Still {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{expander::Fold, player::SeekBar};
+
+    /// An item at x 100 with `n` children, unfolding to exactly 500 px.
+    fn menu(frame: Frame, n: usize, seek: bool) -> Expandable {
+        let font = Font::find(&[]);
+        let rect = Rect::new(100.0, 4.0, 80.0, 52.0);
+        let spec = Spec {
+            area: Rect::new(4.0, 4.0, 2000.0, 52.0),
+            width: Some(500.0),
+            frame,
+            face: Box::new(Still(Glyph::Drawn(|_, _, _, _| {}, Rgba::WHITE))),
+            label: String::new(),
+            active_color: DEFAULT_ACTIVE,
+            fold: Fold::new(Duration::ZERO, Duration::from_secs(3)),
+            picks: false,
+            seek: seek.then(|| SeekBar::new(None, None, true, None)),
+        };
+        let children = (0..n)
+            .map(|j| Child {
+                id: j.to_string(),
+                glyph: None,
+                label: "ab".into(),
+                active: false,
+            })
+            .collect();
+        Expandable::new("m", rect, spec, children, &font)
+    }
 
     #[test]
     fn children_share_the_row_after_the_header() {
-        let frame = Frame::default();
-        let r = Rect::new(100.0, 4.0, 500.0, 52.0);
-        let a = child_rect(r, 152.0, &frame, 3, 0);
-        let c = child_rect(r, 152.0, &frame, 3, 2);
-        assert!(a.x >= 152.0, "after the header: {a:?}");
+        let m = menu(Frame::default(), 3, false);
+        let r = m.open_rect;
+        assert_eq!(r.w, 500.0);
+        let (a, c) = (m.child_rect(r, 0), m.child_rect(r, 2));
+        assert!(a.x >= r.x + 52.0, "after the header: {a:?}");
         assert!(c.x + c.w <= r.x + r.w, "inside the row: {c:?}");
         assert!((a.w - c.w).abs() <= 1.0);
         assert_eq!((a.y, a.h), (8.0, 44.0));
+        assert_eq!(m.part_at(r.x + 10.0, 30.0), Part::Header);
+        assert_eq!(m.part_at(c.x + 2.0, 30.0), Part::Child(2));
         // A pill keeps the last child clear of its round end.
         let pill = Frame {
             shape: Shape::Circle,
             ..Frame::default()
         };
-        let p = child_rect(r, 152.0, &pill, 3, 2);
-        assert!(p.x + p.w <= r.x + r.w - 13.0, "{p:?}");
+        let m = menu(pill, 3, false);
+        let p = m.child_rect(m.open_rect, 2);
+        assert!(p.x + p.w <= m.open_rect.x + m.open_rect.w - 13.0, "{p:?}");
+    }
+
+    #[test]
+    fn a_seek_bar_takes_what_the_children_leave() {
+        let m = menu(Frame::default(), 2, true);
+        let r = m.open_rect;
+        let (a, b, s) = (m.child_rect(r, 0), m.child_rect(r, 1), m.seek_rect(r));
+        // Children at their natural width (the minimum here), the bar after them.
+        assert_eq!((a.w, b.w), (MIN_CHILD_W, MIN_CHILD_W));
+        assert!(s.x >= b.x + b.w && s.x + s.w <= r.x + r.w, "{s:?}");
+        assert!(s.w > 200.0);
+        assert_eq!(m.part_at(s.x + 50.0, 30.0), Part::Seek);
+        assert_eq!(m.part_at(b.x + 5.0, 30.0), Part::Child(1));
+        // Without children: all of it.
+        let m = menu(Frame::default(), 0, true);
+        assert!(m.seek_rect(m.open_rect).w > 400.0);
     }
 }

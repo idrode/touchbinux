@@ -16,6 +16,8 @@ mod ipc;
 mod keys;
 mod layout;
 mod levels;
+mod mpv;
+mod player;
 mod runner;
 mod scenes;
 mod state;
@@ -123,6 +125,8 @@ const TOKEN_HYPR_MOUNTS: u64 = 9;
 const TOKEN_CLOCK: u64 = 10;
 const TOKEN_UEVENT: u64 = 11;
 const TOKEN_GIF_LOADER: u64 = 12;
+const TOKEN_MPV: u64 = 13;
+const TOKEN_MPV_WATCH: u64 = 14;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -201,6 +205,8 @@ struct App {
     pickers: BTreeMap<String, Picker>,
     /// Choices made on the bar (the gif_pickers' GIFs), saved across restarts.
     state: state::StateFile,
+    /// mpv's state, while the config has a player.
+    mpv: Option<mpv::Mpv>,
 }
 
 /// A gif_picker's folder as last read, and its GIF.
@@ -224,6 +230,7 @@ impl App {
             brightness: self.brightness,
             battery: self.battery_status,
             now: chrono::Local::now(),
+            player: self.mpv.as_ref().map(|m| m.state.clone()).unwrap_or_default(),
         }
     }
 
@@ -255,6 +262,24 @@ impl App {
         self.scene = scene;
         self.sync_pickers();
         Ok(())
+    }
+
+    /// Connects to mpv if the config has a player (and only then), as the session
+    /// user's; a new socket path or user means a new connection.
+    fn sync_mpv(&mut self) {
+        let path = self.config.player().map(|p| {
+            PathBuf::from(p.socket.as_deref().unwrap_or(mpv::DEFAULT_SOCKET))
+        });
+        let owner = self.runner.user().map(|u| u.uid);
+        let want = path.zip(owner);
+        let have = self.mpv.as_ref().map(|m| (m.path().to_path_buf(), m.owner()));
+        if want == have {
+            return;
+        }
+        if let (Some(_), None) = (self.config.player(), owner) {
+            eprintln!("player: no session user (run_as); not connecting to mpv as root");
+        }
+        self.mpv = want.map(|(path, owner)| mpv::Mpv::new(&path, owner));
     }
 
     /// The config of gif_picker `id`.
@@ -645,6 +670,7 @@ impl App {
                 );
                 self.runner
                     .set_user(user::resolve(self.config.run_as.as_deref(), Some(&path)));
+                self.sync_mpv();
             }
             Err(e) => eprintln!("config: {e:#}\nconfig: keeping the previous configuration"),
         }
@@ -789,10 +815,25 @@ fn main() -> Result<()> {
             // Previews read the folders inline, so the PNG shows the chosen GIFs.
             loader: None,
         };
-        let app = new_app(parts, (w, h), hypr, home.as_deref())?;
+        let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
+        // Give mpv a moment to report its state, so the preview shows it.
+        if let Some(m) = &mut app.mpv {
+            let end = Instant::now() + Duration::from_millis(300);
+            while let Some((_, fd)) = m.stream_fd()
+                && Instant::now() < end
+            {
+                let mut fds = [nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN)];
+                let _ = nix::poll::poll(&mut fds, 50u16);
+                m.on_readable();
+            }
+        }
         let mut canvas = Canvas::new(w, h)?;
+        // Advanced at 0 and drawn a second later: state changes (the player's icon
+        // following mpv) have finished their morph by then.
+        let live = app.live();
+        app.scene.advance(Duration::ZERO, &live);
         app.scene
-            .draw(&mut canvas, Duration::ZERO, &app.font, &app.live())?;
+            .draw(&mut canvas, Duration::from_secs(1), &app.font, &live)?;
         canvas.save_png(&path)?;
         eprintln!("wrote {}", path.display());
         return Ok(());
@@ -908,7 +949,9 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         loader: p.loader,
         pickers: BTreeMap::new(),
         state: state::StateFile::open(),
+        mpv: None,
     };
+    app.sync_mpv();
     app.refresh_battery();
     app.scene = app.build_scene()?;
     app.sync_pickers();
@@ -1016,6 +1059,7 @@ fn ui_event_json(ev: &UiEvent) -> Value {
         }
         UiEvent::ToggleMute(id) => json!({"type": "mute", "id": id}),
         UiEvent::Pick(id, value) => json!({"type": "pick", "id": id, "value": value}),
+        UiEvent::Seek(id, secs) => json!({"type": "seek", "id": id, "value": secs}),
     }
 }
 
@@ -1091,6 +1135,9 @@ fn run(
     let mut touches: Vec<RawTouch> = Vec::new();
     let mut ui_events: Vec<UiEvent> = Vec::new();
     let mut monitor_watched = false;
+    // Which mpv watch and connection are registered with epoll (see `Mpv`).
+    let mut mpv_watch: Option<u64> = None;
+    let mut mpv_stream: Option<u64> = None;
     let debug_touch = app.args.scene == "touch";
     let start = Instant::now();
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
@@ -1106,6 +1153,27 @@ fn run(
         app.vol.poll(now, &mut app.runner);
         if let Some(b) = &mut app.backlight {
             b.poll(now);
+        }
+        // mpv: connection retries, and its fds (they change with each connection,
+        // and with the client on a reload; closed ones leave epoll by themselves).
+        let player_open = app.scene.player_open();
+        if let Some(m) = &mut app.mpv {
+            dirty |= m.poll(now);
+            // The position only while the seek bar is on screen with something
+            // loaded: mpv sends it many times a second.
+            m.observe_position(player_open && m.state.loaded());
+            if let Some((id, fd)) = m.watch_fd()
+                && mpv_watch != Some(id)
+            {
+                epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_MPV_WATCH))?;
+                mpv_watch = Some(id);
+            }
+            if let Some((id, fd)) = m.stream_fd()
+                && mpv_stream != Some(id)
+            {
+                epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_MPV))?;
+                mpv_stream = Some(id);
+            }
         }
         if !monitor_watched && let Some(fd) = app.vol.monitor_fd() {
             epoll.add(
@@ -1156,6 +1224,7 @@ fn run(
             app.runner.next_deadline(),
             app.vol.next_deadline(now, &app.runner),
             app.backlight.as_ref().and_then(|b| b.next_deadline(now)),
+            app.mpv.as_ref().and_then(mpv::Mpv::next_deadline),
         ]
         .into_iter()
         .flatten()
@@ -1213,6 +1282,16 @@ fn run(
                     app.refresh_battery();
                     dirty = true;
                 }
+                TOKEN_MPV => {
+                    if let Some(m) = &mut app.mpv {
+                        dirty |= m.on_readable();
+                    }
+                }
+                TOKEN_MPV_WATCH => {
+                    if let Some(m) = &mut app.mpv {
+                        dirty |= m.on_watch(Instant::now());
+                    }
+                }
                 TOKEN_GIF_LOADER => {
                     let replies = app.loader.as_ref().map(Loader::drain).unwrap_or_default();
                     for r in replies {
@@ -1265,6 +1344,11 @@ fn run(
                             UiEvent::Level(_, level, v) => app.on_level(*level, *v),
                             UiEvent::ToggleMute(_) => app.vol.toggle_mute(),
                             UiEvent::Pick(item, name) => app.on_pick(item, name),
+                            UiEvent::Seek(_, secs) => {
+                                if let Some(m) = &mut app.mpv {
+                                    m.seek(*secs);
+                                }
+                            }
                         }
                     }
                 }

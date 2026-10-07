@@ -46,6 +46,8 @@ pub const MAX_KEY_LEN: usize = 64;
 const MAX_CHILDREN: usize = 12;
 /// `thumb_size` of a gif_picker, px (it is also capped to the row's height).
 const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
+/// `seek_height` of a player's seek bar, px.
+const SEEK_HEIGHT: std::ops::RangeInclusive<f32> = 1.0..=40.0;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +115,7 @@ pub enum ItemKind {
     Text,
     Expandable,
     GifPicker,
+    Player,
     Spacer,
 }
 
@@ -128,6 +131,7 @@ impl ItemKind {
             ItemKind::Text => "text",
             ItemKind::Expandable => "expandable",
             ItemKind::GifPicker => "gif_picker",
+            ItemKind::Player => "player",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -221,6 +225,18 @@ pub struct ItemConfig {
     /// allows).
     #[serde(default)]
     pub thumb_size: Option<u32>,
+    /// player: mpv's IPC socket (`--input-ipc-server`), absolute.
+    #[serde(default)]
+    pub socket: Option<String>,
+    /// player: the seek bar's filled part.
+    #[serde(default)]
+    pub seek_color: Option<Color>,
+    /// player: the seek bar's thickness, px.
+    #[serde(default)]
+    pub seek_height: Option<f32>,
+    /// player: current and total time at the seek bar's ends (default true).
+    #[serde(default)]
+    pub show_time: Option<bool>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
@@ -306,7 +322,7 @@ impl ItemConfig {
                 ItemKind::Gif => 60.0,
                 ItemKind::Text => 200.0,
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
-                ItemKind::GifPicker => 80.0,
+                ItemKind::GifPicker | ItemKind::Player => 80.0,
             }),
         }
     }
@@ -354,7 +370,7 @@ impl ItemConfig {
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
-            ItemKind::Expandable | ItemKind::GifPicker => &[
+            ItemKind::Expandable | ItemKind::GifPicker | ItemKind::Player => &[
                 "shape",
                 "radius",
                 "background",
@@ -417,6 +433,21 @@ impl ItemConfig {
                 "collapse_after_ms",
                 "active_color",
             ],
+            ItemKind::Player => &[
+                "id",
+                "color",
+                "children",
+                "action",
+                "anim_ms",
+                "expand_width",
+                "collapse_after_ms",
+                "active_color",
+                "text_color",
+                "socket",
+                "seek_color",
+                "seek_height",
+                "show_time",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -444,6 +475,10 @@ impl ItemConfig {
             ("active_color", self.active_color.is_some()),
             ("dir", self.dir.is_some()),
             ("thumb_size", self.thumb_size.is_some()),
+            ("socket", self.socket.is_some()),
+            ("seek_color", self.seek_color.is_some()),
+            ("seek_height", self.seek_height.is_some()),
+            ("show_time", self.show_time.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -482,6 +517,16 @@ impl ItemConfig {
         }
         if self.kind == ItemKind::Expandable {
             self.validate_expandable(&what)?;
+        }
+        if self.kind == ItemKind::Player {
+            // Its icon is its own; the children are optional (the seek bar alone).
+            self.validate_children(&what, 0)?;
+            if self.socket.as_deref().is_some_and(|p| !Path::new(p).is_absolute()) {
+                bail!("{what}: socket must be an absolute path");
+            }
+            if self.seek_height.is_some_and(|h| !SEEK_HEIGHT.contains(&h)) {
+                bail!("{what}: seek_height must be in {SEEK_HEIGHT:?} px");
+            }
         }
         if self.kind == ItemKind::Gif
             && !self
@@ -548,9 +593,15 @@ impl ItemConfig {
         if self.icon.as_deref().is_none_or(str::is_empty) {
             bail!("{what}: an expandable needs an `icon`");
         }
+        self.validate_children(what, 1)
+    }
+
+    /// Children's count (`min` to `MAX_CHILDREN`), actions and icons.
+    fn validate_children(&self, what: &str, min: usize) -> Result<()> {
+        let kind = self.kind.name();
         let n = self.children().len();
-        if !(1..=MAX_CHILDREN).contains(&n) {
-            bail!("{what}: an expandable needs 1 to {MAX_CHILDREN} `children`, it has {n}");
+        if !(min..=MAX_CHILDREN).contains(&n) {
+            bail!("{what}: a {kind} needs {min} to {MAX_CHILDREN} `children`, it has {n}");
         }
         for (id, child) in self.child_ids() {
             let what = format!("{what}: child {id:?}");
@@ -807,6 +858,11 @@ impl Config {
                 }
             }
         }
+        // One mpv connection: one player.
+        let players = self.layers.iter().flat_map(|l| &l.items);
+        if players.filter(|i| i.kind == ItemKind::Player).count() > 1 {
+            bail!("only one `player` item is supported");
+        }
         if let Some(d) = &self.default_layer
             && !layer_ids.contains(d.as_str())
         {
@@ -836,6 +892,14 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// The player item, if any (there is at most one).
+    pub fn player(&self) -> Option<&ItemConfig> {
+        self.layers
+            .iter()
+            .flat_map(|l| &l.items)
+            .find(|i| i.kind == ItemKind::Player)
     }
 
     /// The action configured for a tap on `id`, from `[[buttons]]` or any layer.
@@ -890,6 +954,10 @@ impl Config {
                 active_color: None,
                 dir: None,
                 thumb_size: None,
+                socket: None,
+                seek_color: None,
+                seek_height: None,
+                show_time: None,
                 shape: None,
                 radius: None,
                 background: None,
@@ -1618,6 +1686,58 @@ mod tests {
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif'\npath='/a.gif'\nthumb_size=40").is_err());
         let err = format!("{:#}", parse(&item("")).unwrap_err());
         assert!(err.contains("a gif_picker needs `dir`"), "{err}");
+    }
+
+    #[test]
+    fn players() {
+        let c = parse(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "player"
+            color = "#00ffb7"
+            seek_color = "#ff0000"
+            seek_height = 6
+            show_time = false
+            text_color = "#ffcc00"
+            socket = "/tmp/other-mpv"
+            [[layers.items.children]]
+            icon = "/etc/touchbinux/icons/play_pause.svg"
+            action = { type = "command", argv = ["/home/u/.local/bin/mpvctl", "playpause"] }
+            "##,
+        )
+        .unwrap();
+        let p = c.player().unwrap();
+        assert_eq!(p.id(), Some("player"));
+        assert_eq!(p.socket.as_deref(), Some("/tmp/other-mpv"));
+        assert_eq!((p.seek_height, p.show_time), (Some(6.0), Some(false)));
+        assert!(matches!(c.action("player.1"), Some(Action::Command { .. })));
+        // No children: just the icon and the seek bar.
+        let bare = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='player'").unwrap();
+        assert!(bare.player().unwrap().children().is_empty());
+        assert!(parse("[[layers]]\nid='m'").unwrap().player().is_none());
+        let item = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='player'\n{body}");
+        for body in [
+            "socket='mpv-socket'",
+            "seek_height=0",
+            "seek_height=41",
+            "seek_color='red'",
+            "show_time='yes'",
+            "icon='x'",
+            "label='x'",
+            "dir='/g'",
+            "pressed_scale=0.9",
+            "seek_width=10",
+            "[[layers.items.children]]\nlabel='x'",
+        ] {
+            assert!(parse(&item(body)).is_err(), "accepted: {body}");
+        }
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nseek_color='#ffffff'").is_err());
+        // One mpv, one player.
+        let two = format!("{}\n[[layers.items]]\ntype='player'\nid='p2'", item(""));
+        let err = format!("{:#}", parse(&two).unwrap_err());
+        assert!(err.contains("only one `player`"), "{err}");
     }
 
     /// The shipped example must load anywhere: valid, no files of its own, and every

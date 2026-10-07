@@ -1,7 +1,10 @@
 //! Time-driven drawables: the Rust counterpart of a QML Canvas `onPaint` that reads a
 //! clock. `draw` must be a pure function of `t` so frames can be skipped or repeated.
 
-use crate::canvas::{AlphaMask, Canvas, Rect, Rgba};
+use crate::{
+    canvas::{AlphaMask, Canvas, Rect, Rgba},
+    widgets::Live,
+};
 use std::{
     f32::consts::{PI, TAU},
     time::Duration,
@@ -85,6 +88,12 @@ pub trait Animated {
     /// The button it sits in was tapped at `t` (e.g. the folder opens). Returns
     /// whether that changed anything.
     fn on_tap(&mut self, _t: Duration) -> bool {
+        false
+    }
+
+    /// Follows outside state (e.g. the player's icon follows mpv) up to `t`.
+    /// Returns whether something started moving. Called before drawing.
+    fn advance(&mut self, _t: Duration, _live: &Live) -> bool {
         false
     }
 }

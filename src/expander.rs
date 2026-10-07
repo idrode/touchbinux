@@ -19,8 +19,8 @@ use std::time::Duration;
 pub const DEFAULT_ANIM: Duration = Duration::from_millis(200);
 pub const DEFAULT_COLLAPSE_AFTER: Duration = Duration::from_millis(3000);
 pub const DEFAULT_FILL: Rgba = Rgba(0x00, 0xff, 0xb7, 0xff);
-/// The empty part of the track.
-const TRACK: Rgba = Rgba(0x55, 0x55, 0x58, 0xff);
+/// The empty part of the track (also the player's seek bar).
+pub const TRACK: Rgba = Rgba(0x55, 0x55, 0x58, 0xff);
 /// How long a wave takes to appear or go, and the sun's rays to follow the level.
 const LEVEL_ANIM: Duration = Duration::from_millis(180);
 const TRACK_H: f32 = 8.0;

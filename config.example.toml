@@ -141,6 +141,38 @@ format = "%H:%M"
 # The clock above as plain text: add `shape = "none"` to it. The battery in a
 # circle: add `shape = "circle"` to it.
 
+# A button that unfolds into a row of its children (see "expandable" in
+# docs/GUIA.md). Tapping a child runs its action and folds the row; so does
+# tapping outside it (without running anything) or leaving it alone for
+# collapse_after_ms. A child's id defaults to "<parent id>.<n>" (media.1, ...).
+# [[layers.items]]
+# type = "expandable"
+# id = "media"
+# icon = "/etc/touchbinux/icons/play_pause.svg"   # required; also "builtin:folder"
+# label = "Media"                  # optional, shown only while folded
+# expand_width = 400               # default: just enough for the children
+# collapse_after_ms = 3000
+# anim_ms = 200
+# active_color = "#00ffb750"       # background of children marked active
+# pressed_background = "#1793d1"   # a child's highlight while pressed
+#
+# [[layers.items.children]]
+# icon = "/etc/touchbinux/icons/fast_rewind.svg"
+# action = { type = "key", key = "KEY_PREVIOUSSONG" }
+#
+# [[layers.items.children]]
+# id = "media_play"
+# icon = "/etc/touchbinux/icons/play_pause.svg"
+# label = "Play"
+# action = { type = "key", key = "KEY_PLAYPAUSE" }
+#
+# [[layers.items.children]]
+# label = "Next"
+# action = { type = "key", key = "KEY_NEXTSONG" }
+#
+# Built-in icons drawn by code: "builtin:folder" (thin outline) and
+# "builtin:folder_classic" (filled); both open when their button is tapped.
+
 # More examples, commented out (see "Recetas" in docs/GUIA.md):
 #
 # Open an app through Hyprland (it keeps running after the tap):

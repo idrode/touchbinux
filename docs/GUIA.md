@@ -397,8 +397,10 @@ stretch = 2              # el doble que un spacer
 ### Forma y fondo
 
 Todos los tipos menos `spacer` aceptan `shape`, `radius`, `background` y `size`;
-todos menos `spacer`, `volume` y `brightness` (que se despliegan en vez de
-resaltarse) aceptan también `pressed_background` y `pressed_scale`. Lo que un
+todos menos `spacer`, `volume`, `brightness` y `expandable` (que se despliegan en
+vez de resaltarse) aceptan también `pressed_background` y `pressed_scale`. En un
+`expandable`, `pressed_background` es el resaltado de sus hijos al pulsarlos (no
+admite `pressed_scale`). Lo que un
 elemento no indique lo toma de su capa (`item_shape`, `item_radius`,
 `item_background`, `item_size`, `item_pressed_background`, `item_pressed_scale`)
 y, si la capa tampoco lo indica, del valor por defecto.
@@ -430,8 +432,8 @@ y, si la capa tampoco lo indica, del valor por defecto.
 - **`none`** o **`transparent`**: no se dibuja fondo (con `none`, aunque haya
   `background`). Al pulsar se ve igualmente un resaltado con el contorno del
   elemento (redondeado según `radius`, o circular).
-- Los sliders de `volume`/`brightness` conservan forma, radio y fondo al
-  desplegarse; un círculo se despliega en píldora.
+- Los sliders de `volume`/`brightness` y los `expandable` conservan forma, radio y
+  fondo al desplegarse; un círculo se despliega en píldora.
 - Un valor desconocido (`shape = "square"`), un radio negativo o no numérico, o un
   color mal escrito es un error de configuración: al recargar se conserva la
   configuración anterior.
@@ -488,10 +490,10 @@ un error.
 |---|---|---|
 | `id` | **obligatorio** | |
 | `action` | **obligatorio** | ver [Acciones](#acciones) |
-| `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o `"builtin:folder"` |
+| `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o un icono integrado (`"builtin:folder"`, `"builtin:folder_classic"`) |
 | `label` | — | texto junto al icono. Sin él, el icono va solo y centrado |
 | `color` | — | pinta el icono de un solo color (`"#rrggbb"` o `"#rrggbbaa"`) |
-| `anim_ms` | `300` | solo con `icon = "builtin:folder"`: duración de la apertura (0-2000) |
+| `anim_ms` | `300` | solo con las carpetas integradas: duración de la apertura (0-2000) |
 
 Necesita `icon`, `label` o ambos.
 
@@ -519,9 +521,15 @@ action = { type = "key", key = "KEY_PLAYPAUSE" }
    luego `hicolor`, `Adwaita` y `/usr/share/pixmaps`. Carpetas `apps`, `actions`,
    `status`, `devices`, `places` y `panel`. No es la especificación freedesktop
    completa (ignora `Inherits`).
-3. **`builtin:folder`**: una carpeta dibujada por código que se abre al tocarla
-   (`anim_ms` de apertura, la mitad abierta, y se cierra sola; la acción sale al
-   momento). `color` cambia su color (por defecto `#f2b73f`).
+3. **Integrados**, dibujados por código:
+   - **`builtin:folder`**: una carpeta de líneas finas, sin relleno, que se abre al
+     tocarla (`anim_ms` de apertura, la mitad abierta, y se cierra sola; la acción
+     sale al momento).
+   - **`builtin:folder_classic`**: la carpeta rellena de antes, con una hoja que
+     asoma al abrirse; misma animación.
+
+   `color` cambia su color (por defecto `#f2b73f`). Otro nombre `builtin:...` es un
+   error de configuración. Como hijo de un `expandable` se dibujan cerradas.
 
 Si no se encuentra, se dibuja un **`?`** y el log dice `icons: icon "..." not found`.
 La barra es negra: usa iconos claros o `color`.
@@ -646,6 +654,79 @@ width = 200
 
 La clave `volume` está reservada para el volumen (no se muestra en un `text`).
 
+#### `expandable`
+
+Un botón que **se despliega** sobre la barra (con la misma animación que los
+sliders) en una fila de **hijos**: botones pequeños, cada uno con su acción.
+Desplegado, su icono queda a la izquierda como cabecera y los hijos a la derecha,
+a partes iguales. Se pliega:
+
+- al **elegir un hijo** (su acción se ejecuta y el toque se avisa por el socket con
+  el `id` del hijo);
+- al **tocar fuera** (ese toque no hace nada más) o **su icono** de la izquierda;
+- tras **`collapse_after_ms`** sin tocarlo.
+
+Si se pulsa un hijo y se desliza el dedo fuera de él, no se ejecuta nada. Mientras
+está desplegado, lo que queda debajo se oscurece y no responde. Solo hay un elemento
+desplegado a la vez (slider o `expandable`).
+
+| Campo | Por defecto | Rango | Qué hace |
+|---|---|---|---|
+| `id` | **obligatorio** | | |
+| `icon` | **obligatorio** | | como en `button` (ruta, tema o `builtin:*`); con una carpeta integrada, se abre al tocarlo |
+| `label` | — | | texto junto al icono, solo plegado (no en círculos) |
+| `color` | — | | pinta el icono de un color |
+| `children` | **obligatorio** | 1-12 | los hijos, ver abajo |
+| `expand_width` | lo justo para los hijos | (0, 4000] px | ancho desplegado. Por defecto: la cabecera y cada hijo tan ancho como necesite el más ancho para su icono y su texto enteros |
+| `collapse_after_ms` | `3000` | 500-60000 | se pliega tras este tiempo sin tocarlo |
+| `anim_ms` | `200` | 0-2000 | duración de desplegar/plegar |
+| `active_color` | `"#00ffb750"` | | fondo de los hijos que el daemon marca como activos |
+| `pressed_background` | velo blanco | | fondo del hijo mientras se pulsa |
+| `text_color` | blanco | | su texto y el de los hijos |
+| `action` | — | | se ejecuta además al tocarlo plegado |
+
+Cada hijo (`[[layers.items.children]]`, en orden de izquierda a derecha):
+
+| Campo | Por defecto | Qué hace |
+|---|---|---|
+| `action` | **obligatorio** | como cualquier [acción](#acciones) |
+| `icon` | — | como en `button` |
+| `label` | — | texto junto al icono. Si no cabe se recorta con `…`, y junto a un icono se omite si apenas queda nada |
+| `color` | — | pinta el icono de un color |
+| `id` | `"<id del padre>.<n>"` | `n` desde 1: `capture.1`, `capture.2`... Único en todo el archivo, como cualquier `id` |
+
+Necesita `icon`, `label` o ambos. Cualquier otro campo en un hijo es un error.
+
+**Estado activo.** El daemon puede marcar hijos como activos (por ejemplo "grabando"
+o "reproduciendo"); se dibujan sobre `active_color`. Lo usarán los elementos de
+captura y reproductor; por ahora no se puede fijar desde el socket. El estado se
+conserva al recargar la configuración.
+
+```toml
+[[layers.items]]
+type = "expandable"
+id = "media"
+icon = "/etc/touchbinux/icons/play_pause.svg"
+collapse_after_ms = 4000
+
+[[layers.items.children]]
+id = "media_prev"
+icon = "/etc/touchbinux/icons/fast_rewind.svg"
+action = { type = "key", key = "KEY_PREVIOUSSONG" }
+
+[[layers.items.children]]
+icon = "/etc/touchbinux/icons/play_pause.svg"     # id "media.2"
+action = { type = "key", key = "KEY_PLAYPAUSE" }
+
+[[layers.items.children]]
+label = "Siguiente"                               # id "media.3"
+action = { type = "key", key = "KEY_NEXTSONG" }
+```
+
+Los hijos también se pueden escribir en una línea, como tablas en línea:
+`children = [{ icon = "...", action = { type = "socket" } }, ...]` (en TOML una
+tabla en línea no puede partirse en varias líneas).
+
 #### `spacer`
 
 Espacio vacío. Solo `width` o `stretch` (por defecto `stretch = 1`).
@@ -744,8 +825,8 @@ el código (`src/widgets.rs`).
 
 | Qué | Opción | Por defecto |
 |---|---|---|
-| Carpeta (`builtin:folder`) | `anim_ms` | 300 ms |
-| Desplegar volumen/brillo | `anim_ms` | 200 ms |
+| Carpetas (`builtin:folder`, `builtin:folder_classic`) | `anim_ms` | 300 ms |
+| Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF | `play` | `"on_tap"` |
 
@@ -1026,8 +1107,9 @@ una suspensión real.
 | `config.rs` | el TOML: tipos, valores por defecto y validación estricta |
 | `scenes.rs` | escenas (qué hay en la barra), botones, hit-testing y toques; `bar()` monta una capa |
 | `layout.rs` | reparto de anchos (`width`/`stretch`) |
-| `widgets.rs` | reloj, batería, iconos de volumen/brillo y la carpeta |
-| `expander.rs` | sliders desplegables de volumen y brillo |
+| `widgets.rs` | reloj, batería, iconos de volumen/brillo y las carpetas |
+| `expander.rs` | sliders desplegables de volumen y brillo; el plegado (`Fold`) |
+| `expandable.rs` | elementos `expandable`: fila desplegable de hijos |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |
 | `canvas.rs` | lienzo apaisado: rectángulos, texto (`fontdue`), SVG (`resvg`) |
@@ -1066,6 +1148,17 @@ que miden tiempos: `cargo test --release -- --ignored --nocapture`.
 Carga y **valida** el config igual que el daemon, dibuja un fotograma de 2008x60 a un
 PNG y sale. No abre DRM ni el táctil: no hace falta root ni parar el servicio. Lee el
 brillo, la batería y tu Hyprland reales; el volumen sale siempre como 50.
+
+Para ver animaciones (desplegar, pulsar, abrir carpetas) fotograma a fotograma hay
+tests `#[ignore]` que escriben PNG en la carpeta que indiques:
+
+```sh
+mkdir -p /tmp/frames
+TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
+```
+
+`dump_expandable` (elementos `expandable` y carpetas), `dump_frame_shapes`,
+`dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de
 orientación, por defecto), `touch` (rejilla que marca el dedo y escribe las

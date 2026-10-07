@@ -727,6 +727,72 @@ Los hijos también se pueden escribir en una línea, como tablas en línea:
 `children = [{ icon = "...", action = { type = "socket" } }, ...]` (en TOML una
 tabla en línea no puede partirse en varias líneas).
 
+#### `gif_picker`
+
+Un GIF decorativo **elegible desde la propia barra**. Al tocarlo se despliega (como un
+`expandable`) en una fila de **miniaturas** de los GIF de una carpeta; al tocar una,
+ese GIF pasa a mostrarse en el hueco del elemento y la fila se pliega. Desplegado, el
+GIF actual queda a la izquierda (tocarlo pliega) y su miniatura aparece sobre
+`active_color`.
+
+| Campo | Por defecto | Qué hace |
+|---|---|---|
+| `dir` | **obligatorio** | ruta **absoluta** de la carpeta, p. ej. `"/home/ana/Pictures/gifs"` |
+| `id` | `"gif_picker"` | |
+| `play` | `"on_tap"` | como en `gif`: `"on_tap"` (una vez por toque) o `"always"` (siempre animado, gasta CPU continuamente) |
+| `thumb_size` | lo que permita la fila | alto de las miniaturas en px (8-200; nunca más que la fila desplegada, 44 px en el M2 con `margin = 4`) |
+| `width` / `stretch` | `80` | el GIF elegido se ajusta a su hueco (2 px de margen), manteniendo la proporción |
+| `expand_width` | lo justo | ancho desplegado. Mejor no fijarlo: si es pequeño, las miniaturas se solapan |
+| `collapse_after_ms`, `anim_ms`, `active_color` | como en `expandable` | |
+| `shape`, `radius`, `background`, `size`, `pressed_background` | | como en `expandable` |
+| `action` | — | se ejecuta además al tocarlo plegado |
+
+```toml
+[[layers.items]]
+type = "gif_picker"
+dir = "/home/ana/Pictures/gifs"
+play = "always"
+width = 80
+```
+
+- **La carpeta se relee cada vez que se toca** (al abrir el panel): los GIF nuevos
+  aparecen sin recargar nada. Se muestran los 16 primeros por nombre (los archivos
+  `.gif`, sin mirar subcarpetas).
+- **Se lee como el usuario de `run_as`**, nunca como root (ver
+  [Seguridad](#8-seguridad)), en un hilo aparte: el bucle de la barra no espera por
+  el disco ni por la decodificación. Sin usuario de sesión no se lee nada.
+- **Límites**: archivos de hasta 16 MiB y 2048 px por lado; de los más largos se usan
+  los 1000 primeros fotogramas. Cada fotograma se escala al decodificarlo, así que en
+  memoria solo queda el GIF ya reducido.
+- **Archivos inválidos** (no son GIF aunque se llamen `.gif`, demasiado grandes...):
+  se omiten con un aviso en el log, una vez por archivo:
+  `gif_picker: skipping /home/ana/Pictures/gifs/x.gif: malformed GIF header`.
+- **Sin carpeta o sin GIF válidos**: el elemento se ve como un marco gris y no se
+  despliega; no es un error de configuración. Lo dice el log una vez
+  (`gif_picker "gif_picker": reading ...: No such file or directory; disabled`).
+  Tocarlo vuelve a mirar la carpeta.
+- **Mientras no se ha elegido ninguno** muestra un marco de foto blanco.
+- **La elección se guarda** en `/var/lib/touchbinux/state.toml` (lo crea systemd con
+  `StateDirectory=`), así que sobrevive a reinicios y recargas. **El config de
+  `/etc` no se modifica.** Si el archivo elegido ya no está en `dir` (o cambias
+  `dir`), se ignora. Arrancado a mano sin root (p. ej. `--png`), se lee pero no se
+  escribe.
+- **Socket**: además del `{"type":"tap","id":"gif_picker"}` al tocarlo, cada elección
+  se avisa como `{"type":"pick","id":"gif_picker","value":"gato.gif"}`.
+
+**Fondo blanco.** Un GIF con fondo blanco se ve como un cuadrado blanco en la barra
+negra: touchbinux no lo cambia. Para hacerlo transparente, con ImageMagick:
+
+```sh
+magick gato.gif -coalesce -fuzz 10% -transparent white -set dispose background gato-t.gif
+```
+
+`-coalesce` convierte cada fotograma en una imagen completa; `-fuzz 10%` incluye los
+casi-blancos; `-set dispose background` evita que, al ser transparentes, se vean los
+fotogramas anteriores por debajo (efecto "fantasma"). Ojo: **todo** el blanco se
+vuelve transparente, también el de dentro del dibujo (ojos, dientes). El archivo
+puede crecer bastante (uno de 1,3 MB pasó a 3,7 MB; el límite es 16 MiB).
+
 #### `spacer`
 
 Espacio vacío. Solo `width` o `stretch` (por defecto `stretch = 1`).
@@ -828,7 +894,8 @@ el código (`src/widgets.rs`).
 | Carpetas (`builtin:folder`, `builtin:folder_classic`) | `anim_ms` | 300 ms |
 | Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
-| GIF | `play` | `"on_tap"` |
+| GIF y `gif_picker` | `play` | `"on_tap"` |
+| Desplegar `gif_picker` | `anim_ms` | 200 ms |
 
 Mientras algo se anima o se arrastra, ~30 fps; después, 0 fps.
 
@@ -1026,9 +1093,18 @@ acciones**. Límites: 32 clientes, líneas de 64 KiB, 1 MiB de salida pendiente.
 **Teclas virtuales.** El teclado virtual llega a tu sesión como cualquier teclado:
 una acción `key` puede hacer lo que haga esa tecla.
 
+**Archivos del usuario** (las carpetas de los `gif_picker`). Los lee un hilo del
+daemon que, solo para sí mismo, cambia su identidad de acceso a archivos (`setfsuid`
+y `setfsgid`, que en Linux son por hilo) a la del usuario de sesión: solo abre lo
+que ese usuario puede abrir (sin sus grupos suplementarios), y el resto del daemon
+sigue como estaba. Sin usuario de sesión no se lee nada. Lo que el usuario elige en
+la barra se guarda en `/var/lib/touchbinux/state.toml` (de root, `0644`), nunca en
+`/etc`.
+
 **El servicio** aplica `ProtectSystem=full`, `ProtectKernelTunables`,
 `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups` y
-`RestrictSUIDSGID`. Otras protecciones (p. ej. `ProtectHome`, `NoNewPrivileges`) están
+`RestrictSUIDSGID`, y `StateDirectory=touchbinux` para el estado (`/var` sigue
+escribible con `ProtectSystem=full`). Otras protecciones (p. ej. `ProtectHome`, `NoNewPrivileges`) están
 listadas y comentadas en `dist/touchbinux.service` con el motivo: los comandos de los
 botones heredan el sandbox y dejarían de funcionar.
 
@@ -1109,7 +1185,9 @@ una suspensión real.
 | `layout.rs` | reparto de anchos (`width`/`stretch`) |
 | `widgets.rs` | reloj, batería, iconos de volumen/brillo y las carpetas |
 | `expander.rs` | sliders desplegables de volumen y brillo; el plegado (`Fold`) |
-| `expandable.rs` | elementos `expandable`: fila desplegable de hijos |
+| `expandable.rs` | elementos `expandable` y `gif_picker`: fila desplegable de hijos |
+| `gifpick.rs` | `gif_picker`: hilo que lee carpetas y GIF como el usuario de sesión |
+| `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |
 | `canvas.rs` | lienzo apaisado: rectángulos, texto (`fontdue`), SVG (`resvg`) |
@@ -1157,7 +1235,8 @@ mkdir -p /tmp/frames
 TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 ```
 
-`dump_expandable` (elementos `expandable` y carpetas), `dump_frame_shapes`,
+`dump_expandable` (elementos `expandable` y carpetas), `dump_gif_picker` (con
+`TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de

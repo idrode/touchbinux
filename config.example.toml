@@ -170,6 +170,18 @@ format = "%H:%M"
 # label = "Next"
 # action = { type = "key", key = "KEY_NEXTSONG" }
 #
+# A GIF you choose on the bar: tap it to unfold thumbnails of the GIFs in `dir`
+# (read again on every tap, as the run_as user); tap one to show it here. The choice
+# is kept in /var/lib/touchbinux/state.toml, not in this file. Without the folder or
+# without valid GIFs it shows a grey frame and doesn't unfold (not an error).
+# [[layers.items]]
+# type = "gif_picker"
+# dir = "/home/your-user/Pictures/gifs"   # required, absolute
+# play = "on_tap"                  # or "always" (redraws all the time: costs CPU)
+# width = 80                       # the GIF is fitted to this slot
+# thumb_size = 44                  # thumbnails' height, px (default: the row's)
+# active_color = "#00ffb750"       # behind the chosen GIF's thumbnail
+
 # Built-in icons drawn by code: "builtin:folder" (thin outline) and
 # "builtin:folder_classic" (filled); both open when their button is tapped.
 

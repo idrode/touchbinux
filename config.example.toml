@@ -182,6 +182,21 @@ format = "%H:%M"
 # thumb_size = 44                  # thumbnails' height, px (default: the row's)
 # active_color = "#00ffb750"       # behind the chosen GIF's thumbnail
 
+# mpv's state (it reads it from mpv's IPC socket; it never starts or controls mpv):
+# sound bars while playing, a still pause/play glyph otherwise (0 fps). Tapped, it
+# unfolds into its children and a seek bar: drag it, mpv jumps when you let go.
+# Start mpv with --input-ipc-server=/tmp/mpv-socket. One player at most.
+# [[layers.items]]
+# type = "player"
+# socket = "/tmp/mpv-socket"       # default
+# seek_color = "#00ffb7"
+# seek_height = 8
+# show_time = true                 # current and total time at the bar's ends
+#
+# [[layers.items.children]]
+# icon = "/etc/touchbinux/icons/play_pause.svg"
+# action = { type = "key", key = "KEY_PLAYPAUSE" }
+
 # Built-in icons drawn by code: "builtin:folder" (thin outline) and
 # "builtin:folder_classic" (filled); both open when their button is tapped.
 

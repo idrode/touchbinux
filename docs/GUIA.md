@@ -793,6 +793,72 @@ fotogramas anteriores por debajo (efecto "fantasma"). Ojo: **todo** el blanco se
 vuelve transparente, también el de dentro del dibujo (ojos, dientes). El archivo
 puede crecer bastante (uno de 1,3 MB pasó a 3,7 MB; el límite es 16 MiB).
 
+#### `player`
+
+El reproductor: muestra el estado de **mpv** y, al tocarlo, se despliega (como un
+`expandable`) en sus hijos (anterior, play/pausa...) y una **barra de posición**.
+
+- **Reproduciendo**: barras de sonido animadas (simuladas: alturas pseudoaleatorias
+  suavizadas, no el sonido real) a ~30 fps.
+- **En pausa**: dos barras verticales (‖). **Parado** (mpv sin nada cargado): un
+  triángulo de play. **Sin mpv**: el triángulo en gris.
+- Entre estados hay una transición corta (~250 ms) y al tocarlo un pequeño rebote;
+  fuera de eso, **en pausa, parado o sin mpv no gasta ningún fotograma (0 fps)**.
+
+Solo **lee el estado** de mpv por su socket IPC (`--input-ipc-server`, por defecto
+`/tmp/mpv-socket`): `pause`, `idle-active`, `media-title` y `duration` con
+`observe_property` (mpv avisa de cada cambio, sin sondeo), y `time-pos` **solo
+mientras el panel está desplegado y hay algo cargado** (es lo que más mensajes
+genera; en pausa no cambia, así que tampoco cuesta). **No lanza mpv** ni lo controla:
+las acciones de los hijos son las tuyas (p. ej. un script con `mpvctl`). Si mpv no
+está, espera a que aparezca su socket (inotify, sin sondear); si se cierra, lo nota
+al instante y vuelve a esperar. Convive con otros clientes del socket (Quickshell).
+
+**Barra de posición.** Tras los hijos, hasta el final del panel: tiempo actual a la
+izquierda, total a la derecha (`m:ss`, o `h:mm:ss`). Arrastrar muestra la posición
+provisional y **el salto se manda al soltar** (`seek <segundos> absolute`), no en cada
+movimiento; si el toque se cancela, no salta. Sigue el dedo aunque salga de la barra.
+Sin duración (un stream, o nada cargado) queda **deshabilitada**: gris, `–:––`, sin
+arrastre.
+
+| Campo | Por defecto | Qué hace |
+|---|---|---|
+| `id` | `"player"` | |
+| `socket` | `"/tmp/mpv-socket"` | ruta **absoluta** del socket IPC de mpv |
+| `color` | `"#e8e8e8"` | color del icono y las barras |
+| `seek_color` | `"#00ffb7"` | parte recorrida de la barra de posición |
+| `seek_height` | `8` | grosor de la barra, px (1-40) |
+| `show_time` | `true` | tiempos a los lados de la barra |
+| `text_color` | blanco | los tiempos (y las etiquetas de los hijos) |
+| `children` | ninguno | como en `expandable` (0-12); `[[layers.items.children]]` |
+| `expand_width` | hijos + 480 px | ancho desplegado: los hijos a su ancho natural, la barra ocupa el resto |
+| `collapse_after_ms`, `anim_ms`, `active_color`, `action` | como en `expandable` | |
+| `shape`, `radius`, `background`, `size`, `pressed_background` | | como en `expandable` |
+
+Solo puede haber **un** `player` (una conexión con mpv).
+
+```toml
+[[layers.items]]
+type = "player"
+seek_color = "#00ffb7"
+collapse_after_ms = 5000          # más tiempo para usar la barra
+
+[[layers.items.children]]
+icon = "/etc/touchbinux/icons/fast_rewind.svg"
+action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "prev"] }
+
+[[layers.items.children]]
+icon = "/etc/touchbinux/icons/play_pause.svg"
+action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "playpause"] }
+
+[[layers.items.children]]
+icon = "/etc/touchbinux/icons/fast_forward.svg"
+action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
+```
+
+Por el socket de touchbinux, cada salto se avisa como
+`{"type":"seek","id":"player","value":61.24}`.
+
 #### `spacer`
 
 Espacio vacío. Solo `width` o `stretch` (por defecto `stretch = 1`).
@@ -895,7 +961,8 @@ el código (`src/widgets.rs`).
 | Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF y `gif_picker` | `play` | `"on_tap"` |
-| Desplegar `gif_picker` | `anim_ms` | 200 ms |
+| Desplegar `gif_picker` y `player` | `anim_ms` | 200 ms |
+| Barras del `player` | — | ~30 fps solo reproduciendo |
 
 Mientras algo se anima o se arrastra, ~30 fps; después, 0 fps.
 
@@ -1101,6 +1168,13 @@ sigue como estaba. Sin usuario de sesión no se lee nada. Lo que el usuario elig
 la barra se guarda en `/var/lib/touchbinux/state.toml` (de root, `0644`), nunca en
 `/etc`.
 
+**El socket de mpv** (`player`) suele estar en `/tmp`, donde cualquiera puede crear
+archivos. Antes de conectar se comprueba que es un socket (no un enlace) del usuario
+de sesión, y después, con las credenciales del otro extremo (`SO_PEERCRED`), que el
+proceso que escucha corre como ese usuario; si no, no se usa. Sin usuario de sesión
+no se conecta. Solo se le piden propiedades y, al soltar la barra de posición, un
+`seek`.
+
 **El servicio** aplica `ProtectSystem=full`, `ProtectKernelTunables`,
 `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups` y
 `RestrictSUIDSGID`, y `StateDirectory=touchbinux` para el estado (`/var` sigue
@@ -1187,6 +1261,8 @@ una suspensión real.
 | `expander.rs` | sliders desplegables de volumen y brillo; el plegado (`Fold`) |
 | `expandable.rs` | elementos `expandable` y `gif_picker`: fila desplegable de hijos |
 | `gifpick.rs` | `gif_picker`: hilo que lee carpetas y GIF como el usuario de sesión |
+| `mpv.rs` | cliente del socket IPC de mpv: estado por `observe_property`, seek |
+| `player.rs` | `player`: icono (barras simuladas, trait `Levels`), barra de posición |
 | `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |
@@ -1236,7 +1312,8 @@ TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 ```
 
 `dump_expandable` (elementos `expandable` y carpetas), `dump_gif_picker` (con
-`TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_frame_shapes`,
+`TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_player`
+(estados del reproductor y su panel), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de

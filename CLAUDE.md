@@ -38,6 +38,8 @@ Bucle principal: esperar evento (toque, mensaje externo o tick de reloj) -> actu
 5. Integración con Hyprland (ventana/workspace activo) y socket para Quickshell.
 6. Acciones al tocar (comandos y teclas virtuales).
 7. Servicio systemd y regla udev para arrancar solo.
+8. Barra final, en fases (una cada vez, probada en la barra antes de seguir): 0) elemento `expandable` (fila desplegable de hijos) y `builtin:folder` de líneas; 1) `gif_picker`; 2) `capture` (capturas y grabación); 3) `player` (MPRIS, barras simuladas).
+9. Espectro de audio real en el `player` (FFT sobre el monitor de PipeWire) en lugar de las barras simuladas.
 
 No saltarse hitos ni mezclar DRM, render y táctil en una misma iteración: cada hito debe poder comprobarse por separado.
 

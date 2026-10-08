@@ -16,6 +16,12 @@ pub fn ease_out(k: f32) -> f32 {
     1.0 - (1.0 - k).powi(3)
 }
 
+/// Slow start, slow stop (smoothstep): 3k² - 2k³, `k` in 0..=1.
+pub fn ease_in_out(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    k * k * (3.0 - 2.0 * k)
+}
+
 /// Inverse of `ease_out`: the `k` at which it reaches `v`.
 pub fn ease_out_inverse(v: f32) -> f32 {
     1.0 - (1.0 - v.clamp(0.0, 1.0)).cbrt()
@@ -162,6 +168,8 @@ mod tests {
         for v in [0.0, 0.1, 0.5, 0.9, 1.0] {
             assert!((ease_out(ease_out_inverse(v)) - v).abs() < 1e-5);
         }
+        assert_eq!((ease_in_out(0.0), ease_in_out(0.5), ease_in_out(1.0)), (0.0, 0.5, 1.0));
+        assert!(ease_in_out(0.1) < 0.1 && ease_in_out(0.9) > 0.9);
     }
 
     #[test]

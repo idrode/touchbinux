@@ -1,10 +1,10 @@
 //! Bar items that show live values (clock, battery, volume, brightness) and icons
-//! drawn by code (the folder). Like `anim::Animated`, each one keeps its own state
+//! drawn by code (the folders, the grid). Like `anim::Animated`, each one keeps its own state
 //! and paints itself as a function of the time `t`, so milestone 8b can animate them
 //! (folder opening on tap, sliders unfolding) without changing the structure.
 
 use crate::{
-    anim::{Animated, ease_out, ease_out_inverse},
+    anim::{Animated, ease_in_out, ease_out, ease_out_inverse},
     battery::BatteryStatus,
     canvas::{Canvas, Font, Image, Rect, Rgba, Svg},
     scenes::icon_side,
@@ -591,9 +591,161 @@ pub fn draw_folder(canvas: &mut Canvas, icon: Rect, color: Rgba, open: f32) {
     );
 }
 
+// --- Grid wave ----------------------------------------------------------------------
+
+/// `builtin:grid_wave`'s default tap animation; config `anim_ms`.
+pub const GRID_WAVE_ANIM: Duration = Duration::from_millis(450);
+/// Default `grid`: squares per side.
+pub const DEFAULT_GRID: u8 = 3;
+/// Default colour of `builtin:grid_wave`.
+pub const GRID_WHITE: Rgba = Rgba::WHITE;
+/// The grid's side, as a share of the icon's square.
+const GRID_SIDE: f32 = 0.74;
+/// Gap between squares, as a share of a square's side.
+const GRID_GAP: f32 = 0.3;
+/// A square at the bottom of its dip: this much of its size...
+const DIP_SCALE: f32 = 0.55;
+/// ...and this much of its size lower.
+const DIP_DROP: f32 = 0.15;
+/// Each square's dip lasts this share of the whole wave; the rest staggers them.
+const DIP_SHARE: f32 = 0.55;
+
+/// A grid of rounded squares; tapped, a wave runs through it diagonally, from the
+/// top-left corner to the bottom-right one: each square shrinks and sinks a little,
+/// then comes back, later the further it is (row + column). A pure function of `t`
+/// and the tap time; still (no frames) the rest of the time.
+pub struct GridWave {
+    pub color: Rgba,
+    /// Squares per side.
+    pub n: u8,
+    anim: Duration,
+    tapped: Option<Duration>,
+}
+
+impl GridWave {
+    pub fn new(color: Rgba, n: u8, anim: Duration) -> GridWave {
+        GridWave {
+            color,
+            n: n.max(1),
+            anim,
+            tapped: None,
+        }
+    }
+
+    pub fn animating(&self, t: Duration) -> bool {
+        self.tapped.is_some_and(|at| t < at + self.anim)
+    }
+
+    /// How deep square (`row`, `col`) is in its dip at `t`: 0 at rest, 1 smallest.
+    pub fn dip(&self, row: usize, col: usize, t: Duration) -> f32 {
+        let Some(at) = self.tapped.filter(|_| self.animating(t)) else {
+            return 0.0;
+        };
+        let total = self.anim.as_secs_f32();
+        let pulse = total * DIP_SHARE;
+        let last = 2.0 * (self.n as f32 - 1.0);
+        let delay = if last > 0.0 {
+            (row + col) as f32 / last * (total - pulse)
+        } else {
+            0.0
+        };
+        let k = (t.saturating_sub(at).as_secs_f32() - delay) / pulse;
+        if !(0.0..1.0).contains(&k) {
+            return 0.0;
+        }
+        // Down and back up, each half eased in and out.
+        ease_in_out(1.0 - (2.0 * k - 1.0).abs())
+    }
+}
+
+impl Animated for GridWave {
+    fn draw(&self, canvas: &mut Canvas, rect: Rect, t: Duration) {
+        draw_grid(canvas, rect, self.color, self.n as usize, |r, c| self.dip(r, c, t));
+    }
+
+    fn next_change(&self, t: Duration) -> Option<Duration> {
+        self.animating(t).then_some(t)
+    }
+
+    /// Starts the wave; a tap while it runs lets it finish (no jump).
+    fn on_tap(&mut self, t: Duration) -> bool {
+        if self.animating(t) {
+            return false;
+        }
+        self.tapped = Some(t);
+        true
+    }
+}
+
+/// An `n`x`n` grid of rounded squares centred in `icon`'s square, each drawn
+/// `dip(row, col)` (0..=1) of the way into its dip.
+pub fn draw_grid(canvas: &mut Canvas, icon: Rect, color: Rgba, n: usize, dip: impl Fn(usize, usize) -> f32) {
+    let s = icon.w.min(icon.h);
+    let (cx, cy) = icon.center();
+    let n_f = n as f32;
+    // Whole pixels at rest: crisp edges, and the same on every side.
+    let cell = (s * GRID_SIDE / (n_f + GRID_GAP * (n_f - 1.0))).round().max(1.0);
+    let gap = (cell * GRID_GAP).round().max(1.0);
+    let step = cell + gap;
+    let side = n_f * cell + (n_f - 1.0) * gap;
+    let (x0, y0) = ((cx - side / 2.0).round(), (cy - side / 2.0).round());
+    for row in 0..n {
+        for col in 0..n {
+            let d = dip(row, col).clamp(0.0, 1.0);
+            let size = cell * (1.0 - (1.0 - DIP_SCALE) * d);
+            let mx = x0 + col as f32 * step + cell / 2.0;
+            let my = y0 + row as f32 * step + cell / 2.0 + cell * DIP_DROP * d;
+            let r = size * 0.22;
+            canvas.fill_rounded_rect(mx - size / 2.0, my - size / 2.0, size, size, r, color);
+        }
+    }
+}
+
+/// The grid at rest (3x3), for places that draw built-ins still (an expandable's
+/// children).
+pub fn draw_grid_still(canvas: &mut Canvas, icon: Rect, color: Rgba, _open: f32) {
+    draw_grid(canvas, icon, color, DEFAULT_GRID as usize, |_, _| 0.0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_wave_runs_diagonally_and_ends_at_rest() {
+        let ms = Duration::from_millis;
+        let mut g = GridWave::new(GRID_WHITE, 3, ms(450));
+        assert_eq!(g.next_change(ms(0)), None, "still: no frames");
+        assert_eq!(g.dip(1, 1, ms(100)), 0.0);
+        assert!(g.on_tap(ms(1000)));
+        assert!(!g.on_tap(ms(1100)), "a tap mid-wave doesn't restart it");
+        assert_eq!(g.next_change(ms(1100)), Some(ms(1100)));
+        // Early on only the top-left corner has started; the far corner waits.
+        let early = ms(1080);
+        assert!(g.dip(0, 0, early) > 0.0);
+        assert_eq!(g.dip(2, 2, early), 0.0);
+        // Squares on the same diagonal move together.
+        let mid = ms(1225);
+        assert_eq!(g.dip(0, 2, mid), g.dip(2, 0, mid));
+        assert_eq!(g.dip(0, 2, mid), g.dip(1, 1, mid));
+        // Late: the corner that started is back, the far one is still dipping.
+        let late = ms(1400);
+        assert_eq!(g.dip(0, 0, late), 0.0);
+        assert!(g.dip(2, 2, late) > 0.0);
+        // The deepest point of a square's dip is a full dip.
+        let peak = (0..450).map(|i| g.dip(1, 1, ms(1000 + i))).fold(0.0, f32::max);
+        assert!(peak > 0.99, "{peak}");
+        // Over: all at rest, no more frames; a new tap starts again.
+        for (r, c) in [(0, 0), (1, 2), (2, 2)] {
+            assert_eq!(g.dip(r, c, ms(1450)), 0.0);
+        }
+        assert_eq!(g.next_change(ms(1450)), None);
+        assert!(g.on_tap(ms(2000)));
+        // One square only: it just dips.
+        let mut one = GridWave::new(GRID_WHITE, 1, ms(450));
+        one.on_tap(ms(0));
+        assert!(one.dip(0, 0, ms(120)) > 0.0);
+    }
 
     #[test]
     fn clock_period_follows_format() {

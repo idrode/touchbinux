@@ -31,7 +31,14 @@ pub const BUILTIN_FOLDER: &str = "builtin:folder";
 pub const BUILTIN_FOLDER_CLASSIC: &str = "builtin:folder_classic";
 /// A grid of squares that a wave runs through when tapped (see `widgets::GridWave`).
 pub const BUILTIN_GRID_WAVE: &str = "builtin:grid_wave";
-pub const BUILTIN_ICONS: &[&str] = &[BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE];
+/// The battery drawn by code (see `widgets::BatteryIcon`); buttons only.
+pub const BUILTIN_BATTERY: &str = "builtin:battery";
+pub const BUILTIN_ICONS: &[&str] = &[
+    BUILTIN_FOLDER,
+    BUILTIN_FOLDER_CLASSIC,
+    BUILTIN_GRID_WAVE,
+    BUILTIN_BATTERY,
+];
 /// `grid` of a `builtin:grid_wave` button: squares per side.
 const GRID: std::ops::RangeInclusive<u8> = 2..=4;
 pub const DEFAULT_CLOCK_FORMAT: &str = "%H:%M";
@@ -248,6 +255,13 @@ pub struct ItemConfig {
     /// button with `icon = "builtin:grid_wave"`: squares per side (default 3).
     #[serde(default)]
     pub grid: Option<u8>,
+    /// button with `icon = "builtin:battery"`: fill colours from 60 %, 30-59 %,
+    /// 15-29 % and under 15 %.
+    #[serde(default)]
+    pub battery_colors: Option<Vec<Color>>,
+    /// button with `icon = "builtin:battery"`: the colour when full.
+    #[serde(default)]
+    pub full_color: Option<Color>,
     /// capture: absolute path of the screenshot script, run with `region`,
     /// `window` or `full`.
     #[serde(default)]
@@ -520,6 +534,8 @@ impl ItemConfig {
                 "anim_ms",
                 "text_color",
                 "grid",
+                "battery_colors",
+                "full_color",
             ],
             ItemKind::Clock => &["id", "format", "action", "text_color"],
             ItemKind::Battery => &["id", "icon_dir", "action", "text_color"],
@@ -618,6 +634,8 @@ impl ItemConfig {
             ("seek_height", self.seek_height.is_some()),
             ("show_time", self.show_time.is_some()),
             ("grid", self.grid.is_some()),
+            ("battery_colors", self.battery_colors.is_some()),
+            ("full_color", self.full_color.is_some()),
             ("screenshot", self.screenshot.is_some()),
             ("record", self.record.is_some()),
             ("record_color", self.record_color.is_some()),
@@ -661,6 +679,32 @@ impl ItemConfig {
                     bail!("{what}: grid must be {GRID:?} (squares per side)");
                 }
             }
+            let battery = self.icon.as_deref() == Some(BUILTIN_BATTERY);
+            for (field, set) in [
+                ("battery_colors", self.battery_colors.is_some()),
+                ("full_color", self.full_color.is_some()),
+            ] {
+                if set && !battery {
+                    bail!("{what}: `{field}` only applies to icon = \"{BUILTIN_BATTERY}\"");
+                }
+            }
+            if battery && self.color.is_some() {
+                bail!(
+                    "{what}: `color` doesn't apply to icon = \"{BUILTIN_BATTERY}\" \
+                     (use battery_colors and full_color)"
+                );
+            }
+            if let Some(c) = &self.battery_colors
+                && c.len() != 4
+            {
+                bail!(
+                    "{what}: battery_colors needs 4 colours (from 60 %, 30-59, 15-29, \
+                     under 15), it has {}",
+                    c.len()
+                );
+            }
+        } else if self.icon.as_deref() == Some(BUILTIN_BATTERY) {
+            bail!("{what}: icon = \"{BUILTIN_BATTERY}\" is only for buttons");
         }
         if let Some(icon) = self.icon.as_deref() {
             validate_icon(&what, icon)?;
@@ -805,6 +849,9 @@ impl ItemConfig {
             for icon in [&child.icon, &child.icon_playing, &child.icon_paused] {
                 if let Some(icon) = icon.as_deref() {
                     validate_icon(&what, icon)?;
+                    if icon == BUILTIN_BATTERY {
+                        bail!("{what}: icon = \"{BUILTIN_BATTERY}\" is only for buttons");
+                    }
                 }
             }
             if child.diameter.is_some() && child.shape != Some(Shape::Circle) {
@@ -1167,6 +1214,8 @@ impl Config {
                 seek_height: None,
                 show_time: None,
                 grid: None,
+                battery_colors: None,
+                full_color: None,
                 screenshot: None,
                 record: None,
                 record_color: None,
@@ -1872,6 +1921,41 @@ mod tests {
         }
         let err = format!("{:#}", parse(&button(BUILTIN_FOLDER, "grid=3")).unwrap_err());
         assert!(err.contains("only applies to icon = \"builtin:grid_wave\""), "{err}");
+        // builtin:battery: its own options, only on it, only on buttons.
+        let ok = "battery_colors=['#00ff00','#ffff00','#ff8800','#ff0000']\nfull_color='#00ffff'\nanim_ms=300";
+        let c = parse(&button(BUILTIN_BATTERY, ok)).unwrap();
+        let b = &c.layers[0].items[0];
+        assert_eq!(b.battery_colors.as_ref().unwrap()[1].0, Rgba(0xff, 0xff, 0, 0xff));
+        assert_eq!(b.full_color.unwrap().0, Rgba(0, 0xff, 0xff, 0xff));
+        assert!(parse(&button(BUILTIN_BATTERY, "shape='circle'\npressed_scale=0.9\npressed_background='#ffffff'")).is_ok());
+        for (icon, extra) in [
+            (BUILTIN_BATTERY, "battery_colors=['#00ff00','#ffff00','#ff8800']"),
+            (BUILTIN_BATTERY, "battery_colors=['#00ff00','#ffff00','#ff8800','#ff0000','#000000']"),
+            (BUILTIN_BATTERY, "battery_colors=['green','#ffff00','#ff8800','#ff0000']"),
+            (BUILTIN_BATTERY, "battery_colors='#00ff00'"),
+            (BUILTIN_BATTERY, "full_color='cyan'"),
+            (BUILTIN_BATTERY, "color='#ffffff'"),
+            (BUILTIN_BATTERY, "grid=3"),
+            (BUILTIN_BATTERY, "anim_ms=99999"),
+            (BUILTIN_GRID_WAVE, "full_color='#00ffff'"),
+            ("/etc/touchbinux/icons/arch.svg", "battery_colors=['#00ff00','#ffff00','#ff8800','#ff0000']"),
+        ] {
+            assert!(parse(&button(icon, extra)).is_err(), "accepted: {icon} {extra}");
+        }
+        let err = format!("{:#}", parse(&button(BUILTIN_FOLDER, "full_color='#00ffff'")).unwrap_err());
+        assert!(err.contains("only applies to icon = \"builtin:battery\""), "{err}");
+        let err = format!("{:#}", parse(&button(BUILTIN_BATTERY, "battery_colors=['#00ff00']")).unwrap_err());
+        assert!(err.contains("needs 4 colours"), "{err}");
+        for not_a_button in [
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\nicon='builtin:battery'\n\
+             [[layers.items.children]]\nlabel='a'\naction={type='socket'}",
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\nicon='/i.svg'\n\
+             [[layers.items.children]]\nicon='builtin:battery'\naction={type='socket'}",
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='capture'\nscreenshot='/s'\nicon='builtin:battery'",
+        ] {
+            let err = format!("{:#}", parse(not_a_button).unwrap_err());
+            assert!(err.contains("is only for buttons"), "{err}");
+        }
         let expandable = "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\n\
             icon='builtin:grid_wave'\ngrid=3\n[[layers.items.children]]\nlabel='a'\naction={type='socket'}";
         assert!(parse(expandable).is_err(), "grid is a button option");

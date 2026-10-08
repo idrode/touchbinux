@@ -7,8 +7,8 @@ use crate::{
     capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
-        BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE, ItemConfig, ItemKind,
-        LayerConfig,
+        BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE, ItemConfig,
+        ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
@@ -21,6 +21,7 @@ use crate::{
     layout,
     touch::Phase,
     widgets::{
+        BATTERY_ANIM, BATTERY_COLORS, BATTERY_FULL, BatteryIcon,
         BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, FolderStyle,
         DEFAULT_GRID, GRID_WAVE_ANIM, GRID_WHITE, GridWave, ICON, Level, Live, TEXT, Widget,
         draw_folder, draw_folder_lines, draw_grid_still,
@@ -299,6 +300,8 @@ pub struct Scene {
     capture: Capture,
     /// Draw a marker under the finger (touch calibration scene).
     show_finger: bool,
+    /// Has a `builtin:battery` icon: the battery is re-read every `battery::POLL`.
+    battery_icon: bool,
     finger: Option<(f32, f32)>,
 }
 
@@ -325,7 +328,13 @@ impl Scene {
             capture: Capture::None,
             show_finger: false,
             finger: None,
+            battery_icon: false,
         }
+    }
+
+    /// Whether the battery must be polled for a `builtin:battery` icon.
+    pub fn has_battery_icon(&self) -> bool {
+        self.battery_icon
     }
 
     pub fn show_finger(&mut self) {
@@ -442,6 +451,10 @@ impl Scene {
     /// something started moving.
     pub fn advance(&mut self, t: Duration, live: &Live) -> bool {
         let mut changed = false;
+        // Icons that follow outside state (e.g. builtin:battery).
+        for (_, a) in &mut self.animated {
+            changed |= a.advance(t, live);
+        }
         for e in &mut self.expanders {
             changed |= e.advance(t, live);
         }
@@ -1362,6 +1375,7 @@ pub fn bar(
         let frame = layer.frame_for(item);
         match item.kind {
             ItemKind::Button => {
+                scene.battery_icon |= item.icon.as_deref() == Some(BUILTIN_BATTERY);
                 let icon = button_icon(item, icons, size);
                 let label = item.label.as_deref().unwrap_or("");
                 let mut spec = ButtonSpec::new(id, icon, label);
@@ -1555,6 +1569,12 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
             width: size,
         };
     }
+    if name == BUILTIN_BATTERY {
+        return Icon::Animated {
+            item: Box::new(battery_icon(item)),
+            width: size,
+        };
+    }
     let found = icons.named(name);
     let Some(color) = color else {
         return found.into();
@@ -1661,6 +1681,16 @@ fn folder(color: Option<Rgba>, style: FolderStyle, anim: Option<Duration>) -> Fo
         style,
         state: FolderState::new(anim.unwrap_or(FOLDER_ANIM)),
     }
+}
+
+/// `builtin:battery` with `item`'s `battery_colors`, `full_color` and `anim_ms`.
+fn battery_icon(item: &ItemConfig) -> BatteryIcon {
+    let colors = match item.battery_colors.as_deref() {
+        Some([a, b, c, d]) => [a.0, b.0, c.0, d.0],
+        _ => BATTERY_COLORS,
+    };
+    let full = item.full_color.map_or(BATTERY_FULL, |c| c.0);
+    BatteryIcon::new(colors, full, item.anim().unwrap_or(BATTERY_ANIM))
 }
 
 /// `builtin:grid_wave` with `item`'s `color`, `grid` and `anim_ms`.
@@ -3442,5 +3472,121 @@ mod tests {
         shot(&mut s, &live, 1300, "c-fade-start");
         shot(&mut s, &live, 1375, "d-fade-mid");
         shot(&mut s, &live, 1500, "e-playing");
+    }
+
+    const BATTERY_BUTTON: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "battery"
+        icon = "builtin:battery"
+        width = 80
+        pressed_background = "#2a2a2a"
+        pressed_scale = 0.9
+        action = { type = "socket" }
+    "##;
+
+    fn battery(percent: u8, state: crate::battery::ChargeState) -> Option<crate::battery::BatteryStatus> {
+        use crate::battery::ChargeState;
+        let charging = matches!(state, ChargeState::Charging | ChargeState::Full);
+        Some(crate::battery::BatteryStatus { percent, charging, state })
+    }
+
+    #[test]
+    fn battery_button_follows_the_battery_and_animates_on_tap() {
+        use crate::battery::ChargeState;
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, BATTERY_BUTTON);
+        assert!(s.has_battery_icon());
+        assert!(!scene(&font).has_battery_icon(), "no poll without the icon");
+        let mut live = live();
+        let r = s.buttons[0].rect;
+        let (cx, cy) = mid(r);
+        let mut c = Canvas::new(W, H).unwrap();
+        // No battery: drawn (grey), nothing fails.
+        live.battery = None;
+        s.advance(MS(0), &live);
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        assert_eq!(s.next_change(MS(0)), None);
+        // A battery appears / changes: a redraw, and still 0 fps after it.
+        live.battery = battery(80, ChargeState::Discharging);
+        assert!(s.advance(MS(100), &live));
+        assert!(!s.advance(MS(200), &live), "same state: nothing");
+        assert_eq!(s.next_change(MS(200)), None);
+        let mut rest = Canvas::new(W, H).unwrap();
+        s.draw(&mut rest, MS(200), &font, &live).unwrap();
+        let green = crate::widgets::BATTERY_COLORS[0];
+        assert_eq!(pixel(&rest, cx - 6.0, cy), [green.0, green.1, green.2, 0xff]);
+        // Tapped: its action goes out at once; the fill empties and refills.
+        let (_, ev) = tap(&mut s, (cx, cy), MS(1000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("battery".into())]);
+        assert_eq!(s.next_change(MS(1100)), Some(MS(1100)));
+        s.draw(&mut c, MS(1225), &font, &live).unwrap();
+        assert_ne!(pixel(&c, cx - 6.0, cy), pixel(&rest, cx - 6.0, cy), "empty half-way");
+        tap(&mut s, (cx, cy), MS(1300), &font);
+        assert_eq!(s.next_change(MS(1450)), None, "a tap mid-way didn't restart it");
+        s.draw(&mut c, MS(1450), &font, &live).unwrap();
+        assert!(c.data() == rest.data(), "the end is the rest");
+        // Pressed: its pressed_background and scale, like any button.
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (cx, cy), MS(2000), &font, &mut out);
+        s.draw(&mut c, MS(2000), &font, &live).unwrap();
+        assert_eq!(pixel(&c, r.x + r.w / 2.0, r.y + 4.0), [0x2a, 0x2a, 0x2a, 0xff]);
+        s.handle_touch(Phase::Cancel, (cx, cy), MS(2050), &font, &mut out);
+    }
+
+    /// Not a check: builtin:battery at 0, 10, 25, 50, 80 and 100 %, charging, full on
+    /// the charger, held at 80 % and mid-animation, plus no battery, as PNGs in
+    /// $TOUCHBINUX_FRAMES (`b-*.png`, the button 4x larger).
+    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_battery_icon -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_battery_icon() {
+        use crate::battery::ChargeState::*;
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = menu_scene(&font, BATTERY_BUTTON);
+        let mut live = live();
+        let r = s.buttons[0].rect;
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, live: &Live, t: u64, name: &str| {
+            s.advance(MS(t), live);
+            s.draw(&mut canvas, MS(t), &font, live).unwrap();
+            let (x0, w) = (r.x as u32, r.w as u32 + 8);
+            let mut big = Canvas::new(w * 4, H * 4).unwrap();
+            for y in 0..H * 4 {
+                for x in 0..w * 4 {
+                    let [cr, cg, cb, _] = pixel(&canvas, (x0 + x / 4) as f32, (y / 4) as f32);
+                    big.fill_rect(x as f32, y as f32, 1.0, 1.0, Rgba(cr, cg, cb, 0xff));
+                }
+            }
+            big.save_png(Path::new(&format!("{dir}/b-{name}.png"))).unwrap();
+        };
+        let mut t = 0;
+        for (p, state, name) in [
+            (0, Discharging, "00"),
+            (10, Discharging, "10"),
+            (25, Discharging, "25"),
+            (50, Discharging, "50"),
+            (80, Discharging, "80"),
+            (100, Discharging, "100"),
+            (20, Charging, "charging-20"),
+            (65, Charging, "charging-65"),
+            (100, Full, "full-plugged"),
+            (80, NotCharging, "limit-80"),
+        ] {
+            t += 100;
+            live.battery = battery(p, state);
+            shot(&mut s, &live, t, name);
+        }
+        live.battery = battery(65, Charging);
+        s.advance(MS(2000), &live);
+        tap(&mut s, mid(r), MS(2000), &font);
+        shot(&mut s, &live, 2110, "anim-110ms");
+        shot(&mut s, &live, 2225, "anim-225ms");
+        shot(&mut s, &live, 2340, "anim-340ms");
+        live.battery = None;
+        shot(&mut s, &live, 3000, "missing");
     }
 }

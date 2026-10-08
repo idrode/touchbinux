@@ -778,10 +778,6 @@ impl BatteryIcon {
         }
     }
 
-    pub fn look(&self) -> BatteryLook {
-        self.look
-    }
-
     pub fn animating(&self, t: Duration) -> bool {
         self.tapped.is_some_and(|at| t < at + self.anim)
     }

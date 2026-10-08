@@ -129,6 +129,7 @@ const TOKEN_UEVENT: u64 = 11;
 const TOKEN_GIF_LOADER: u64 = 12;
 const TOKEN_MPV: u64 = 13;
 const TOKEN_MPV_WATCH: u64 = 14;
+const TOKEN_BATTERY_POLL: u64 = 15;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -1216,6 +1217,14 @@ fn run(
     epoll.add(&clock, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_CLOCK))?;
     let mut clock_period = app.scene.wall_period();
     arm_clock(&clock, clock_period)?;
+    // A builtin:battery icon re-reads the battery every battery::POLL (redrawing
+    // only if it changed); without one, nothing is armed.
+    let battery_poll = TimerFd::new(
+        ClockId::CLOCK_MONOTONIC,
+        TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
+    )?;
+    epoll.add(&battery_poll, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_BATTERY_POLL))?;
+    let mut battery_polled = false;
     // Charger plugged/unplugged and other power supply changes, as they happen.
     let uevents = match &app.battery {
         Some(_) => Uevents::open()
@@ -1314,6 +1323,16 @@ fn run(
             clock_period = app.scene.wall_period();
             arm_clock(&clock, clock_period)?;
         }
+        let poll = app.scene.has_battery_icon() && app.battery.is_some();
+        if poll != battery_polled {
+            battery_polled = poll;
+            if poll {
+                let every = TimeSpec::from_duration(battery::POLL);
+                battery_poll.set(Expiration::Interval(every), TimerSetTimeFlags::empty())?;
+            } else {
+                battery_poll.unset()?;
+            }
+        }
 
         if frame_due.is_some_and(|d| d <= now) {
             let t = now - start;
@@ -1402,6 +1421,10 @@ fn run(
                     }
                 }
                 TOKEN_TIMER => drain_timer(&timer)?,
+                TOKEN_BATTERY_POLL => {
+                    drain_timer(&battery_poll)?;
+                    dirty |= app.refresh_battery();
+                }
                 TOKEN_CLOCK => {
                     drain_timer(&clock)?;
                     arm_clock(&clock, clock_period)?;

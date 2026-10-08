@@ -550,23 +550,23 @@ action = { type = "key", key = "KEY_PLAYPAUSE" }
      color del nivel (`battery_colors`: verde desde 60 %, amarillo 30-59, naranja
      15-29, rojo por debajo). Solo cambia el aspecto: la `action` del botón es la
      tuya.
-     - **Cargando** (`status` = `Charging`): un rayo en zigzag de trazo grueso y
-       redondeado, en diagonal, de un tercio del ancho del cuerpo, que sobresale
-       por arriba y por abajo. Va en el color del nivel y lo rodea un halo
-       transparente (1,5 px en la barra) que corta el contorno y el relleno: el
-       contorno queda interrumpido arriba y abajo por donde pasa el rayo, y debajo
-       se ve el fondo del botón.
+     - **Cargando** (`status` = `Charging`): un rayo pequeño en zigzag de trazo
+       grueso y redondeado, en diagonal, centrado y completamente dentro del
+       cuerpo: un cuarto de su ancho y tan alto como el interior del contorno menos
+       un margen de una unidad de la rejilla (1 px en la barra) arriba y abajo. Va
+       en el color del nivel; como sobre el relleno no contrastaría, un halo
+       transparente (1,5 px en la barra) lo separa del relleno, por el que se ve
+       el fondo del botón. El halo nunca toca el contorno, que queda cerrado.
      - **Llena** (100 % o `status` = `Full`): todo el cuerpo relleno de
        `full_color`, contorno incluido, sin hueco; con el cargador puesto, el rayo
-       en negro sobre el relleno, con el mismo halo.
+       en negro sobre el relleno (sin halo: el negro ya contrasta).
      - **Sin cargar** (`Discharging`, `Not charging`, llena sin cargador): sin
-       rayo y con el contorno cerrado, sin cortes. `Not charging` (enchufada pero
-       retenida, p. ej. por un límite al 80 %) se ve como descargando, sin pasar a
-       llena.
+       rayo. `Not charging` (enchufada pero retenida, p. ej. por un límite al
+       80 %) se ve como descargando, sin pasar a llena.
      - **Sin batería**: contorno gris vacío con un `?`. No es un error.
      - **Al tocarlo**, el relleno se vacía y vuelve a su nivel en `anim_ms`
-       (450 ms) mientras el rayo destella (crece un poco y se aclara, con el halo
-       siguiéndolo); un toque durante la animación no la reinicia. No hay más
+       (450 ms) mientras el rayo destella (crece hasta un 15 % y se aclara, con
+       el halo siguiéndolo; nunca sale del interior del cuerpo); un toque durante la animación no la reinicia. No hay más
        animación: ni pulso cargando ni con batería baja.
      - **Datos**: la entrada de `/sys/class/power_supply` cuyo `type` es `Battery`
        (en Asahi, `macsmc-battery`; los `Mains` y `USB` se ignoran), con su

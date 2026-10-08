@@ -238,6 +238,19 @@ format = "%H:%M"
 
 # Built-in icons drawn by code: "builtin:folder" (thin outline) and
 # "builtin:folder_classic" (filled); both open when their button is tapped.
+# "builtin:battery" (buttons only): the system battery drawn by code, filled to
+# its level in the level's colour, a bolt while charging, solid full_color when
+# full; tapped, the fill empties and refills. Re-read every 30 s while shown.
+# [[layers.items]]
+# type = "button"
+# id = "battery_button"
+# icon = "builtin:battery"
+# width = 80
+# battery_colors = ["#00ffb7", "#ffd60a", "#ff9500", "#ff2d2d"]   # >=60, 30-59, 15-29, <15 %
+# full_color = "#00ffff"
+# anim_ms = 450
+# action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "battery", "toggle"] }
+#
 # "builtin:grid_wave": a grid of rounded squares; a diagonal wave runs through it
 # when tapped (0 fps otherwise).
 # [[layers.items]]

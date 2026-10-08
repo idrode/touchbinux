@@ -490,11 +490,13 @@ un error.
 |---|---|---|
 | `id` | **obligatorio** | |
 | `action` | **obligatorio** | ver [Acciones](#acciones) |
-| `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o un icono integrado (`"builtin:folder"`, `"builtin:folder_classic"`, `"builtin:grid_wave"`) |
+| `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o un icono integrado (`"builtin:folder"`, `"builtin:folder_classic"`, `"builtin:grid_wave"`, `"builtin:battery"`) |
 | `label` | — | texto junto al icono. Sin él, el icono va solo y centrado |
-| `color` | — | pinta el icono de un solo color (`"#rrggbb"` o `"#rrggbbaa"`) |
-| `anim_ms` | `300` / `450` | solo con los iconos integrados: duración de la apertura de las carpetas (300) o de la ola de `grid_wave` (450); 0-2000 |
+| `color` | — | pinta el icono de un solo color (`"#rrggbb"` o `"#rrggbbaa"`); no vale con `builtin:battery` |
+| `anim_ms` | `300` / `450` | solo con los iconos integrados: duración de la apertura de las carpetas (300), de la ola de `grid_wave` (450) o del vaciado y llenado de `battery` (450); 0-2000 |
 | `grid` | `3` | solo con `builtin:grid_wave`: cuadrados por lado (2-4) |
+| `battery_colors` | `["#00ffb7", "#ffd60a", "#ff9500", "#ff2d2d"]` | solo con `builtin:battery`: cuatro colores, desde 60 %, 30-59 %, 15-29 % y menos de 15 % |
+| `full_color` | `"#00ffff"` | solo con `builtin:battery`: color cuando está llena |
 
 Necesita `icon`, `label` o ambos.
 
@@ -539,6 +541,39 @@ action = { type = "key", key = "KEY_PLAYPAUSE" }
      la reinicia. En reposo, 0 fps. `color` por defecto blanco (`#ffffff`). Como hijo
      o icono de un `expandable` se dibuja quieta (3x3); como icono de un `expandable`
      también hace la ola al tocarlo.
+   - **`builtin:battery`** (solo en `button`): la batería del sistema dibujada por
+     código, centrada en el botón. Un cuerpo horizontal redondeado con contorno y
+     borne a la derecha, y dentro un relleno proporcional a la carga. Relleno y
+     contorno van del color del nivel (`battery_colors`: verde desde 60 %, amarillo
+     30-59, naranja 15-29, rojo por debajo). Solo cambia el aspecto: la `action` del
+     botón es la tuya.
+     - **Cargando** (`status` = `Charging`): un rayo encima, negro sobre el relleno
+       y blanco si el relleno queda por debajo de la mitad.
+     - **Llena** (100 % o `status` = `Full`): todo el cuerpo relleno de
+       `full_color`, sin hueco; con el cargador puesto, el rayo en negro.
+     - **`Not charging`** (enchufada pero retenida, p. ej. por un límite al 80 %):
+       como descargando, sin rayo y sin pasar a llena.
+     - **Sin batería**: contorno gris vacío con un `?`. No es un error.
+     - **Al tocarlo**, el relleno se vacía y vuelve a su nivel en `anim_ms`
+       (450 ms) mientras el rayo destella; un toque durante la animación no la
+       reinicia. No hay más animación: ni pulso cargando ni con batería baja.
+     - **Datos**: la entrada de `/sys/class/power_supply` cuyo `type` es `Battery`
+       (en Asahi, `macsmc-battery`; los `Mains` y `USB` se ignoran), con su
+       `capacity` y su `status`. Que esté enchufada se deduce del `status` de la
+       batería, no del `online` de AC/USB. Con este icono en la barra se vuelve a
+       leer cada 30 s (además de al enchufar o desenchufar y cada minuto); solo se
+       redibuja si algo cambió, así que en reposo son 0 fps.
+
+     ```toml
+     [[layers.items]]
+     type = "button"
+     id = "battery_button"
+     icon = "builtin:battery"
+     width = 80
+     battery_colors = ["#00ffb7", "#ffd60a", "#ff9500", "#ff2d2d"]   # por defecto
+     full_color = "#00ffff"
+     action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "battery", "toggle"] }
+     ```
 
    Otro nombre `builtin:...` es un error de configuración. Con todos funcionan
    `shape`, `size`, `radius`, `pressed_background` y `pressed_scale` como con
@@ -1123,6 +1158,7 @@ el código (`src/widgets.rs`).
 |---|---|---|
 | Carpetas (`builtin:folder`, `builtin:folder_classic`) | `anim_ms` | 300 ms |
 | Ola de `builtin:grid_wave` | `anim_ms` | 450 ms |
+| Vaciado y llenado de `builtin:battery` | `anim_ms` | 450 ms |
 | Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF y `gif_picker` | `play` | `"on_tap"` |
@@ -1490,7 +1526,8 @@ TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 (estados del reproductor y su panel), `dump_player_children` (hijos con estilo
 propio y el fundido de iconos), `dump_capture` (plegado, desplegado con un
 modo atenuado y grabando), `dump_grid_wave` (reposo, cinco fotogramas de la ola y el
-final; también ampliados 4x), `dump_frame_shapes`,
+final; también ampliados 4x), `dump_battery_icon` (0, 10, 25, 50, 80 y 100 %,
+cargando, llena enchufada, límite al 80 %, mitad de la animación y sin batería, a 4x), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de

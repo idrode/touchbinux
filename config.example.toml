@@ -197,6 +197,21 @@ format = "%H:%M"
 # icon = "/etc/touchbinux/icons/play_pause.svg"
 # action = { type = "key", key = "KEY_PLAYPAUSE" }
 
+# Screenshots and screen recording with your own scripts (run as run_as, in the
+# Wayland session, without a shell). Tapped, it unfolds into: region, window and
+# full screenshot (`<screenshot> region|window|full`), record region and record full
+# (`<record> region|full`; it must start wf-recorder detached, e.g. `setsid -f`).
+# While wf-recorder runs (the session user's) it turns red with a blinking dot and a
+# timer; tap it to stop (SIGINT). Modes whose tools are missing (grim, slurp,
+# wl-copy, jq, hyprctl, wf-recorder) are greyed out and logged.
+# [[layers.items]]
+# type = "capture"
+# width = 110                      # room for the timer while recording
+# screenshot = "/home/your-user/.config/hypr/scripts/screenshot.sh"
+# record = "/home/your-user/.config/hypr/scripts/toggle-record.sh"
+# color = "#00ffb7"                # the icons
+# record_color = "#d92b2b"         # background while recording
+
 # Built-in icons drawn by code: "builtin:folder" (thin outline) and
 # "builtin:folder_classic" (filled); both open when their button is tapped.
 

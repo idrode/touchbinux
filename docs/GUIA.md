@@ -859,6 +859,91 @@ action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
 Por el socket de touchbinux, cada salto se avisa como
 `{"type":"seek","id":"player","value":61.24}`.
 
+#### `capture`
+
+Capturas de pantalla y grabación, con **tus propios scripts**. Plegado muestra un
+visor (esquinas y objetivo, dibujado por código); al tocarlo se despliega, como un
+`expandable`, en hasta cinco modos, de izquierda a derecha:
+
+| Hijo (`id`) | Icono | Ejecuta |
+|---|---|---|
+| `<id>.shot_region` | esquinas con una cruz | `<screenshot> region` |
+| `<id>.shot_window` | ventana | `<screenshot> window` |
+| `<id>.shot_full` | pantalla | `<screenshot> full` |
+| `<id>.record_region` | esquinas con punto rojo | `<record> region` |
+| `<id>.record_full` | pantalla con punto rojo | `<record> full` |
+
+Solo aparecen los modos del script configurado (sin `record`, solo las tres
+capturas). Elegir uno pliega el panel y ejecuta el script **como el usuario de
+sesión, con el entorno de la sesión Wayland** (`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+`HYPRLAND_INSTANCE_SIGNATURE`; ver abajo), sin shell. Los modos de región esperan a
+que dibujes la región con `slurp` (hasta 60 s; los demás, 15 s). Como la barra no es
+una ventana de Wayland, tocarla no quita el foco: "ventana" es la que tenías activa.
+
+Los scripts se usan **tal cual**; touchbinux solo les pasa el argumento. Están
+pensados para estos:
+
+- **`screenshot`** `[region|window|full]`: `grim` (+ `slurp` para la región,
+  `hyprctl` + `jq` para la ventana), guarda en `~/Pictures/Screenshots` y copia al
+  portapapeles con `wl-copy`.
+- **`record`** `[region|full]`: si ya hay un `wf-recorder`, lo para; si no, arranca
+  `wf-recorder` **separado** (`setsid -f`) y termina.
+
+**Grabando.** El elemento se pone **rojo** (`record_color`) con un **punto que
+parpadea** y un **cronómetro** (`m:ss`); **tocarlo para la grabación** (no se
+despliega). Para saber si se graba, touchbinux busca un proceso `wf-recorder`
+**del usuario de sesión** (en `/proc`, nunca los de otros usuarios) cuando hay
+motivo: al arrancar, al terminar el script de grabar (y unas veces más en los 2,5 s
+siguientes, lo que tarda en aparecer) y al tocar el elemento. Encontrado, sigue a
+**ese** proceso (pid y hora de inicio, para no confundirlo con otro que reutilice el
+pid) una vez por segundo hasta que termina. El cronómetro cuenta desde que empezó
+`wf-recorder`, aunque lo arrancase otra cosa. Parar es mandarle `SIGINT` (lo mismo
+que hace el script: `wf-recorder` cierra el archivo y sale); mientras termina se ve
+`…`.
+
+- Una grabación **empezada fuera de la barra** (p. ej. un atajo de Hyprland con el
+  mismo script) no se ve hasta que tocas el elemento: entonces la encuentra, se
+  pliega y se pone rojo; otro toque la para. No se vigila `/proc` en reposo.
+- **Coste:** plegado y sin grabar, ninguno (0 fps, ninguna espera programada).
+  Grabando, dos fotogramas por segundo y una comprobación por segundo.
+
+**Si falta algo** (el script, o `grim`, `slurp`, `wl-copy`, `jq`, `hyprctl`,
+`wf-recorder` en el `PATH` del usuario: `~/.local/bin`, `/usr/local/bin`, `/usr/bin`,
+`/bin`), los modos que lo necesitan se ven **atenuados**, no hacen nada al tocarlos
+y el log dice por qué, una vez (`capture: capture.record_full disabled: missing
+wf-recorder in PATH`); el resto funciona. Se comprueba al arrancar y en cada recarga.
+Sin Hyprland conectado (sin sesión Wayland) los scripts no se lanzan (`capture:
+Hyprland not connected`).
+
+| Campo | Por defecto | Qué hace |
+|---|---|---|
+| `id` | `"capture"` | |
+| `screenshot` | — | ruta **absoluta** del script de capturas |
+| `record` | — | ruta **absoluta** del script de grabar (al menos uno de los dos) |
+| `icon` | visor integrado | otro icono (ruta, tema o `builtin:*`) |
+| `color` | `"#e8e8e8"` | color del visor y de los iconos de los modos |
+| `record_color` | `"#d92b2b"` | fondo mientras graba (y el punto de los iconos de grabar) |
+| `text_color` | blanco | punto y cronómetro mientras graba |
+| `label` | — | texto junto al icono, plegado |
+| `expand_width`, `collapse_after_ms`, `anim_ms` | como en `expandable` | |
+| `shape`, `radius`, `background`, `size`, `pressed_background` | | como en `expandable` |
+
+No lleva `children` ni `action`: los hijos son los modos. Ancho por defecto 80 px; con
+100-120 el cronómetro se lee mejor (si no cabe, se dibuja más pequeño).
+
+```toml
+[[layers.items]]
+type = "capture"
+width = 110
+screenshot = "/home/ana/.config/hypr/scripts/screenshot.sh"
+record = "/home/ana/.config/hypr/scripts/toggle-record.sh"
+color = "#00ffb7"
+```
+
+Por el socket, cada modo elegido se avisa con su `id`
+(`{"type":"tap","id":"capture.shot_region"}`), y tocar el elemento con
+`{"type":"tap","id":"capture"}`.
+
 #### `spacer`
 
 Espacio vacío. Solo `width` o `stretch` (por defecto `stretch = 1`).
@@ -961,8 +1046,9 @@ el código (`src/widgets.rs`).
 | Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF y `gif_picker` | `play` | `"on_tap"` |
-| Desplegar `gif_picker` y `player` | `anim_ms` | 200 ms |
+| Desplegar `gif_picker`, `player` y `capture` | `anim_ms` | 200 ms |
 | Barras del `player` | — | ~30 fps solo reproduciendo |
+| `capture` grabando (punto y cronómetro) | — | 2 fps solo grabando |
 
 Mientras algo se anima o se arrastra, ~30 fps; después, 0 fps.
 
@@ -1175,6 +1261,12 @@ proceso que escucha corre como ese usuario; si no, no se usa. Sin usuario de ses
 no se conecta. Solo se le piden propiedades y, al soltar la barra de posición, un
 `seek`.
 
+**Grabaciones** (`capture`). El daemon lee `/proc` para encontrar un `wf-recorder`
+cuyo dueño sea el usuario de sesión (nunca otro) y, al tocar para parar, vuelve a
+comprobar dueño, nombre y hora de inicio del proceso justo antes de mandarle
+`SIGINT`. Es la única señal que manda a un proceso que no lanzó él. Los scripts de
+captura corren como cualquier acción `command`.
+
 **El servicio** aplica `ProtectSystem=full`, `ProtectKernelTunables`,
 `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups` y
 `RestrictSUIDSGID`, y `StateDirectory=touchbinux` para el estado (`/var` sigue
@@ -1259,10 +1351,11 @@ una suspensión real.
 | `layout.rs` | reparto de anchos (`width`/`stretch`) |
 | `widgets.rs` | reloj, batería, iconos de volumen/brillo y las carpetas |
 | `expander.rs` | sliders desplegables de volumen y brillo; el plegado (`Fold`) |
-| `expandable.rs` | elementos `expandable` y `gif_picker`: fila desplegable de hijos |
+| `expandable.rs` | elementos `expandable`, `gif_picker`, `player` y `capture`: fila desplegable de hijos |
 | `gifpick.rs` | `gif_picker`: hilo que lee carpetas y GIF como el usuario de sesión |
 | `mpv.rs` | cliente del socket IPC de mpv: estado por `observe_property`, seek |
 | `player.rs` | `player`: icono (barras simuladas, trait `Levels`), barra de posición |
+| `capture.rs` | `capture`: modos e iconos, seguimiento de `wf-recorder`, indicador de grabación |
 | `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |
@@ -1313,7 +1406,8 @@ TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 
 `dump_expandable` (elementos `expandable` y carpetas), `dump_gif_picker` (con
 `TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_player`
-(estados del reproductor y su panel), `dump_frame_shapes`,
+(estados del reproductor y su panel), `dump_capture` (plegado, desplegado con un
+modo atenuado y grabando), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de

@@ -803,7 +803,8 @@ mod tests {
             charging: (0..7).map(|_| img()).collect(),
         };
         let idx = |percent, charging| {
-            let p = icons.pick(BatteryStatus { percent, charging });
+            let state = crate::battery::ChargeState::Unknown;
+            let p = icons.pick(BatteryStatus { percent, charging, state });
             let list = if charging {
                 &icons.charging
             } else {

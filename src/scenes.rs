@@ -3536,8 +3536,8 @@ mod tests {
         s.handle_touch(Phase::Cancel, (cx, cy), MS(2050), &font, &mut out);
     }
 
-    /// Not a check: builtin:battery at 0, 10, 25, 50, 80 and 100 %, charging, full on
-    /// the charger, held at 80 % and mid-animation, plus no battery, as PNGs in
+    /// Not a check: builtin:battery at 0, 10, 25, 50, 80 and 100 %, the same charging,
+    /// full on the charger, held at 80 % and mid-animation, plus no battery, as PNGs in
     /// $TOUCHBINUX_FRAMES (`b-*.png`, the button 4x larger).
     /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_battery_icon -- --ignored`
     #[test]
@@ -3571,8 +3571,12 @@ mod tests {
             (50, Discharging, "50"),
             (80, Discharging, "80"),
             (100, Discharging, "100"),
-            (20, Charging, "charging-20"),
+            (0, Charging, "charging-00"),
+            (10, Charging, "charging-10"),
+            (25, Charging, "charging-25"),
+            (50, Charging, "charging-50"),
             (65, Charging, "charging-65"),
+            (80, Charging, "charging-80"),
             (100, Full, "full-plugged"),
             (80, NotCharging, "limit-80"),
         ] {

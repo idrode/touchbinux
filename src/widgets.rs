@@ -844,37 +844,44 @@ pub struct BatteryStyle<'a> {
     pub resting: bool,
 }
 
-/// Where the parts of a battery go in `icon` (a square), in whole pixels.
+/// Where the parts of a battery go in `icon` (a square), in whole pixels: a 24x24
+/// grid scaled to the icon, with a body about 19x12 and a 2.5-thick outline.
 #[derive(Clone, Copy, Debug)]
 pub struct BatteryGeometry {
     /// The body (outline's outer edge).
     pub body: Rect,
+    /// A short, thick pill right of the body, a small gap away.
     pub terminal: Rect,
+    /// The outline's width, also the bolt's.
     pub line: f32,
     pub radius: f32,
     /// The empty gap between the outline and the fill.
     pub gap: f32,
+    /// The clear ring around the bolt that cuts the outline and the fill.
+    pub halo: f32,
 }
 
 impl BatteryGeometry {
     pub fn new(icon: Rect) -> BatteryGeometry {
-        let s = icon.w.min(icon.h).floor();
+        let u = icon.w.min(icon.h).floor() / 24.0;
         let (cx, cy) = icon.center();
-        let line = (s * 0.055).round().max(2.0);
-        let (bw, bh) = ((s * 0.74).round(), (s * 0.44).round());
-        let tw = (s * 0.07).round().max(2.0);
-        let mut th = (bh * 0.4).round();
+        let line = (2.5 * u).round().max(2.0);
+        let (bw, bh) = ((19.0 * u).round(), (12.0 * u).round());
+        let tw = (2.5 * u).round().max(2.0);
+        let mut th = (5.0 * u).round();
         if (bh - th) as i32 % 2 != 0 {
             th += 1.0; // centred on whole pixels
         }
-        let total = bw + 1.0 + tw;
+        let tgap = u.round().max(1.0);
+        let total = bw + tgap + tw;
         let (x0, y0) = ((cx - total / 2.0).round(), (cy - bh / 2.0).round());
         BatteryGeometry {
             body: Rect::new(x0, y0, bw, bh),
-            terminal: Rect::new(x0 + bw + 1.0, y0 + (bh - th) / 2.0, tw, th),
+            terminal: Rect::new(x0 + bw + tgap, y0 + (bh - th) / 2.0, tw, th),
             line,
-            radius: (bh * 0.28).round(),
+            radius: (4.0 * u).round(),
             gap: (line * 0.6).round().max(1.0),
+            halo: u.max(1.5),
         }
     }
 
@@ -884,43 +891,94 @@ impl BatteryGeometry {
         let b = self.body;
         Rect::new(b.x + pad, b.y + pad, b.w - 2.0 * pad, b.h - 2.0 * pad)
     }
+
+    /// The bolt's centre line at `grow` times its size: a zigzag from top right to
+    /// bottom left, a third of the body wide, poking out above and below it.
+    pub fn bolt(&self, grow: f32) -> Vec<(f32, f32)> {
+        const ZIGZAG: [(f32, f32); 4] = [(1.0, 0.0), (0.05, 0.58), (0.95, 0.42), (0.0, 1.0)];
+        let (cx, cy) = self.body.center();
+        let (w, h) = (self.body.w / 3.0 * grow, self.body.h * 1.5 * grow);
+        ZIGZAG
+            .iter()
+            .map(|&(px, py)| (cx + (px - 0.5) * w, cy + (py - 0.5) * h))
+            .collect()
+    }
 }
 
 /// `builtin:battery` in `icon` as `look`.
 pub fn draw_battery_icon(canvas: &mut Canvas, icon: Rect, look: BatteryLook, style: &BatteryStyle) {
     let g = BatteryGeometry::new(icon);
-    let b = g.body;
-    let (level, color, bolt, gap) = match look {
-        BatteryLook::Missing => (0.0, DIM, false, g.gap),
-        BatteryLook::Level { percent, bolt } => {
-            (percent as f32 / 100.0, battery_color(style.colors, percent), bolt, g.gap)
+    let (color, bolt) = match look {
+        BatteryLook::Missing => (DIM, false),
+        BatteryLook::Level { percent, bolt } => (battery_color(style.colors, percent), bolt),
+        BatteryLook::Full { bolt } => (style.full, bolt),
+    };
+    if !bolt {
+        draw_battery_body(canvas, &g, look, style);
+        if look == BatteryLook::Missing {
+            draw_question(canvas, g.inner(0.0), DIM);
         }
-        BatteryLook::Full { bolt } => (1.0, style.full, bolt, 0.0),
+        return;
+    }
+    // The body on a layer of its own, whole pixels away, so the bolt's halo can clear
+    // it (to whatever is behind) before it is laid on the canvas.
+    let (ox, oy) = (g.body.x - 1.0, g.body.y - 1.0);
+    let w = (g.terminal.x + g.terminal.w - ox + 1.0) as u32;
+    let h = (g.body.h + 2.0) as u32;
+    let local = BatteryGeometry::new(Rect::new(icon.x - ox, icon.y - oy, icon.w, icon.h));
+    let (Ok(mut layer), Ok(mut cut)) = (Canvas::new(w, h), Canvas::new(w, h)) else {
+        return;
+    };
+    let grow = 1.0 + 0.15 * style.flash;
+    draw_battery_body(&mut layer, &local, look, style);
+    cut.stroke_polyline(&local.bolt(grow), false, g.line + 2.0 * g.halo, Rgba::WHITE);
+    let kept: Vec<u8> = layer
+        .data()
+        .chunks_exact(4)
+        .zip(cut.data().chunks_exact(4))
+        .flat_map(|(p, m)| {
+            let keep = 255 - m[3] as u16;
+            p.iter().map(move |&v| ((v as u16 * keep + 127) / 255) as u8)
+        })
+        .collect();
+    if let Ok(img) = Image::from_premultiplied(w, h, kept) {
+        canvas.draw_image(&img, ox as i32, oy as i32);
+    }
+    // The level's colour; black on a full (solid) battery. Flashing, it whitens.
+    let ink = if matches!(look, BatteryLook::Full { .. }) {
+        Rgba::BLACK
+    } else {
+        color
+    };
+    let ink = ink.lerp(Rgba::WHITE, 0.6 * style.flash);
+    canvas.stroke_polyline(&g.bolt(grow), false, g.line, ink);
+}
+
+/// The outline, terminal and fill of a battery (no bolt, no "?").
+fn draw_battery_body(canvas: &mut Canvas, g: &BatteryGeometry, look: BatteryLook, style: &BatteryStyle) {
+    let b = g.body;
+    let (level, color, gap) = match look {
+        BatteryLook::Missing => (0.0, DIM, g.gap),
+        BatteryLook::Level { percent, .. } => {
+            (percent as f32 / 100.0, battery_color(style.colors, percent), g.gap)
+        }
+        BatteryLook::Full { .. } => (1.0, style.full, 0.0),
     };
     let t = g.terminal;
-    canvas.fill_rounded_rect(t.x, t.y, t.w, t.h, (t.w / 2.0).min(2.0), color);
+    canvas.fill_rounded_rect(t.x, t.y, t.w, t.h, t.w / 2.0, color);
     if matches!(look, BatteryLook::Full { .. }) && style.resting {
         // No gap at all: one solid body.
         canvas.fill_rounded_rect(b.x, b.y, b.w, b.h, g.radius, color);
-    } else {
-        let half = g.line / 2.0;
-        let outline = rounded_rect_points(b.x + half, b.y + half, b.w - g.line, b.h - g.line, g.radius - half);
-        canvas.stroke_polyline(&outline, true, g.line, color);
-        let inner = g.inner(gap);
-        let w = (inner.w * level * style.fill).round();
-        if w >= 1.0 {
-            let r = (g.radius - g.line - gap).max(1.0).min(w / 2.0);
-            canvas.fill_rounded_rect(inner.x, inner.y, w, inner.h, r, color);
-        }
+        return;
     }
-    if look == BatteryLook::Missing {
-        draw_question(canvas, b, DIM);
-    }
-    if bolt {
-        // Black on the fill; white where the fill is low (it would sit on the gap).
-        let covered = matches!(look, BatteryLook::Full { .. }) || level * style.fill >= 0.5;
-        let ink = if covered { Rgba::BLACK } else { Rgba::WHITE };
-        draw_bolt(canvas, b, ink, style.flash);
+    let half = g.line / 2.0;
+    let outline = rounded_rect_points(b.x + half, b.y + half, b.w - g.line, b.h - g.line, g.radius - half);
+    canvas.stroke_polyline(&outline, true, g.line, color);
+    let inner = g.inner(gap);
+    let w = (inner.w * level * style.fill).round();
+    if w >= 1.0 {
+        let r = (g.radius - g.line - gap).max(1.0).min(w / 2.0);
+        canvas.fill_rounded_rect(inner.x, inner.y, w, inner.h, r, color);
     }
 }
 
@@ -946,36 +1004,11 @@ fn rounded_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)
         .collect()
 }
 
-/// A lightning bolt centred on `body`, in `ink`; `flash` (0..1) grows it a little
-/// and haloes it in white.
-fn draw_bolt(canvas: &mut Canvas, body: Rect, ink: Rgba, flash: f32) {
-    const BOLT: [(f32, f32); 6] = [
-        (0.62, 0.0),
-        (0.08, 0.58),
-        (0.46, 0.58),
-        (0.38, 1.0),
-        (0.92, 0.42),
-        (0.54, 0.42),
-    ];
-    let (cx, cy) = body.center();
-    let h = body.h * 0.8 * (1.0 + 0.25 * flash);
-    let w = h * 0.55;
-    let pts: Vec<_> = BOLT
-        .iter()
-        .map(|&(px, py)| (cx + (px - 0.5) * w, cy + (py - 0.5) * h))
-        .collect();
-    if flash > 0.0 {
-        let halo = Rgba::WHITE.with_alpha((flash * 0xa0 as f32).round() as u8);
-        canvas.stroke_polyline(&pts, true, (h * 0.12).max(2.0), halo);
-    }
-    canvas.fill_polygon(&pts, ink);
-}
-
-/// A small "?" drawn by code, centred on `body`.
-fn draw_question(canvas: &mut Canvas, body: Rect, color: Rgba) {
+/// A small "?" drawn by code, as tall as `inner` and centred on it.
+fn draw_question(canvas: &mut Canvas, inner: Rect, color: Rgba) {
     use std::f32::consts::PI;
-    let (cx, cy) = body.center();
-    let s = body.h * 0.62;
+    let (cx, cy) = inner.center();
+    let s = inner.h;
     let line = (s * 0.14).max(1.5);
     let r = s * 0.22;
     let top = cy - s / 2.0 + r;
@@ -1025,8 +1058,12 @@ mod tests {
     const SLOT: Rect = Rect { x: 10.0, y: 4.0, w: 44.0, h: 44.0 };
 
     fn draw(look: BatteryLook, fill: f32) -> Canvas {
+        draw_on(Rgba::BLACK, look, fill)
+    }
+
+    fn draw_on(behind: Rgba, look: BatteryLook, fill: f32) -> Canvas {
         let mut c = Canvas::new(64, 52).unwrap();
-        c.clear(Rgba::BLACK);
+        c.clear(behind);
         let style = BatteryStyle {
             colors: &BATTERY_COLORS,
             full: BATTERY_FULL,
@@ -1107,16 +1144,72 @@ mod tests {
     }
 
     #[test]
-    fn battery_bolt_contrasts_and_missing_is_grey() {
+    fn battery_bolt_cuts_the_outline_only_while_charging() {
+        const BEHIND: Rgba = Rgba(0x20, 0x30, 0x40, 0xff);
+        let g = BatteryGeometry::new(SLOT);
+        let b = g.body;
+        // The middle of the outline's top and bottom edges, between the corners.
+        let rows = [b.y + (g.line / 2.0).floor(), b.y + b.h - 1.0 - (g.line / 2.0).floor()];
+        let xs = (b.x + g.radius) as u32..(b.x + b.w - g.radius) as u32;
+        let clear = |c: &Canvas, y: f32| -> Vec<u32> {
+            xs.clone().filter(|&x| px(c, x as f32, y) == rgba(BEHIND)).collect()
+        };
+        // Where the bolt's centre line crosses a row, interpolated on its segments.
+        let bolt = g.bolt(1.0);
+        let crossing = |y: f32| {
+            bolt.windows(2)
+                .find(|s| (s[0].1 - y) * (s[1].1 - y) <= 0.0)
+                .map(|s| s[0].0 + (y - s[0].1) / (s[1].1 - s[0].1) * (s[1].0 - s[0].0))
+                .unwrap()
+        };
+        let reach = g.line / 2.0 + g.halo + 2.0; // halo, plus the slant within a pixel
+        for look in [
+            BatteryLook::Level { percent: 65, bolt: true },
+            BatteryLook::Level { percent: 20, bolt: true },
+            BatteryLook::Full { bolt: true },
+        ] {
+            let c = draw_on(BEHIND, look, 1.0);
+            for y in rows {
+                let cut = clear(&c, y);
+                assert!(!cut.is_empty(), "{look:?}: no cut at row {y}");
+                let at = crossing(y + 0.5);
+                for x in cut {
+                    assert!((x as f32 + 0.5 - at).abs() <= reach, "{look:?}: ({x},{y}) far from the bolt at {at}");
+                }
+            }
+        }
+        // Not charging: a closed outline in the level's colour, nothing cleared.
+        for (look, color) in [
+            (BatteryLook::Level { percent: 65, bolt: false }, BATTERY_COLORS[0]),
+            (BatteryLook::Level { percent: 80, bolt: false }, BATTERY_COLORS[0]),
+            (BatteryLook::Level { percent: 20, bolt: false }, BATTERY_COLORS[2]),
+            (BatteryLook::Full { bolt: false }, BATTERY_FULL),
+        ] {
+            let c = draw_on(BEHIND, look, 1.0);
+            for y in rows {
+                assert!(clear(&c, y).is_empty(), "{look:?}: cut at row {y}");
+                for x in xs.clone() {
+                    assert_eq!(px(&c, x as f32, y), rgba(color), "{look:?} ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn battery_bolt_has_the_level_colour_and_missing_is_grey() {
         let g = BatteryGeometry::new(SLOT);
         let (cx, cy) = g.body.center();
-        // Over a fill: black; over a low one: white; on a full charging battery: black.
-        let c = draw(BatteryLook::Level { percent: 80, bolt: true }, 1.0);
-        assert_eq!(px(&c, cx, cy), [0, 0, 0, 0xff]);
+        // The bolt's middle stroke goes through the body's centre.
+        let c = draw(BatteryLook::Level { percent: 65, bolt: true }, 1.0);
+        assert_eq!(px(&c, cx, cy), rgba(BATTERY_COLORS[0]));
         let c = draw(BatteryLook::Level { percent: 20, bolt: true }, 1.0);
-        assert_eq!(px(&c, cx, cy), [0xff, 0xff, 0xff, 0xff]);
-        let c = draw(BatteryLook::Full { bolt: true }, 1.0);
+        assert_eq!(px(&c, cx, cy), rgba(BATTERY_COLORS[2]));
+        let c = draw(BatteryLook::Level { percent: 5, bolt: true }, 1.0);
+        assert_eq!(px(&c, cx, cy), rgba(BATTERY_COLORS[3]));
+        // Full and charging: black on the cyan.
+        let c = draw_on(Rgba::WHITE, BatteryLook::Full { bolt: true }, 1.0);
         assert_eq!(px(&c, cx, cy), [0, 0, 0, 0xff]);
+        assert_eq!(px(&c, g.body.x + 2.0, cy), rgba(BATTERY_FULL));
         // No battery: a grey outline and "?", nothing else.
         let c = draw(BatteryLook::Missing, 1.0);
         assert_eq!(px(&c, g.body.x + 1.0, cy), rgba(DIM));

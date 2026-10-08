@@ -542,21 +542,32 @@ action = { type = "key", key = "KEY_PLAYPAUSE" }
      o icono de un `expandable` se dibuja quieta (3x3); como icono de un `expandable`
      también hace la ola al tocarlo.
    - **`builtin:battery`** (solo en `button`): la batería del sistema dibujada por
-     código, centrada en el botón. Un cuerpo horizontal redondeado con contorno y
-     borne a la derecha, y dentro un relleno proporcional a la carga. Relleno y
-     contorno van del color del nivel (`battery_colors`: verde desde 60 %, amarillo
-     30-59, naranja 15-29, rojo por debajo). Solo cambia el aspecto: la `action` del
-     botón es la tuya.
-     - **Cargando** (`status` = `Charging`): un rayo encima, negro sobre el relleno
-       y blanco si el relleno queda por debajo de la mitad.
+     código, centrada en el botón y en píxeles enteros. Sobre una rejilla de 24x24
+     escalada al icono: un cuerpo apaisado (unos 19x12) de trazo grueso (2,5) y
+     esquinas muy redondeadas (radio 4), con el borne a la derecha como una píldora
+     corta y gruesa separada por un hueco pequeño; dentro, separado del contorno, un
+     relleno redondeado proporcional a la carga. Relleno, contorno y borne van del
+     color del nivel (`battery_colors`: verde desde 60 %, amarillo 30-59, naranja
+     15-29, rojo por debajo). Solo cambia el aspecto: la `action` del botón es la
+     tuya.
+     - **Cargando** (`status` = `Charging`): un rayo en zigzag de trazo grueso y
+       redondeado, en diagonal, de un tercio del ancho del cuerpo, que sobresale
+       por arriba y por abajo. Va en el color del nivel y lo rodea un halo
+       transparente (1,5 px en la barra) que corta el contorno y el relleno: el
+       contorno queda interrumpido arriba y abajo por donde pasa el rayo, y debajo
+       se ve el fondo del botón.
      - **Llena** (100 % o `status` = `Full`): todo el cuerpo relleno de
-       `full_color`, sin hueco; con el cargador puesto, el rayo en negro.
-     - **`Not charging`** (enchufada pero retenida, p. ej. por un límite al 80 %):
-       como descargando, sin rayo y sin pasar a llena.
+       `full_color`, contorno incluido, sin hueco; con el cargador puesto, el rayo
+       en negro sobre el relleno, con el mismo halo.
+     - **Sin cargar** (`Discharging`, `Not charging`, llena sin cargador): sin
+       rayo y con el contorno cerrado, sin cortes. `Not charging` (enchufada pero
+       retenida, p. ej. por un límite al 80 %) se ve como descargando, sin pasar a
+       llena.
      - **Sin batería**: contorno gris vacío con un `?`. No es un error.
      - **Al tocarlo**, el relleno se vacía y vuelve a su nivel en `anim_ms`
-       (450 ms) mientras el rayo destella; un toque durante la animación no la
-       reinicia. No hay más animación: ni pulso cargando ni con batería baja.
+       (450 ms) mientras el rayo destella (crece un poco y se aclara, con el halo
+       siguiéndolo); un toque durante la animación no la reinicia. No hay más
+       animación: ni pulso cargando ni con batería baja.
      - **Datos**: la entrada de `/sys/class/power_supply` cuyo `type` es `Battery`
        (en Asahi, `macsmc-battery`; los `Mains` y `USB` se ignoran), con su
        `capacity` y su `status`. Que esté enchufada se deduce del `status` de la
@@ -1527,7 +1538,7 @@ TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 propio y el fundido de iconos), `dump_capture` (plegado, desplegado con un
 modo atenuado y grabando), `dump_grid_wave` (reposo, cinco fotogramas de la ola y el
 final; también ampliados 4x), `dump_battery_icon` (0, 10, 25, 50, 80 y 100 %,
-cargando, llena enchufada, límite al 80 %, mitad de la animación y sin batería, a 4x), `dump_frame_shapes`,
+lo mismo cargando, llena enchufada, límite al 80 %, mitad de la animación y sin batería, a 4x), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de

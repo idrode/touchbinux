@@ -834,8 +834,9 @@ Solo **lee el estado** de mpv por su socket IPC (`--input-ipc-server`, por defec
 `/tmp/mpv-socket`): `pause`, `idle-active`, `media-title` y `duration` con
 `observe_property` (mpv avisa de cada cambio, sin sondeo), y `time-pos` **solo
 mientras el panel está desplegado y hay algo cargado** (es lo que más mensajes
-genera; en pausa no cambia, así que tampoco cuesta). **No lanza mpv** ni lo controla:
-las acciones de los hijos son las tuyas (p. ej. un script con `mpvctl`). Si mpv no
+genera; en pausa no cambia, así que tampoco cuesta). **No lanza mpv**. Lo controla
+solo a través de los hijos: con `role` (ver abajo) le manda el comando directamente,
+y con `action` ejecuta la tuya (p. ej. un script con `mpvctl`). Si mpv no
 está, espera a que aparezca su socket (inotify, sin sondear); si se cierra, lo nota
 al instante y vuelve a esperar. Convive con otros clientes del socket (Quickshell).
 
@@ -883,6 +884,59 @@ action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
 
 Por el socket de touchbinux, cada salto se avisa como
 `{"type":"seek","id":"player","value":61.24}`.
+
+**Hijos del `player`: `role`, iconos por estado y estilo propio.** Además de los
+campos de un hijo de `expandable`, los del `player` admiten:
+
+| Campo | Qué hace |
+|---|---|
+| `role` | `"prev"`, `"playpause"`, `"next"` o `"stop"`: el hijo manda a mpv, por su socket y sin lanzar ningún proceso, `playlist-prev`, `cycle pause`, `playlist-next` o `stop`. Con `role` la `action` es opcional; **si hay `action`, gana ella**. Otro valor es un error de configuración |
+| `icon_playing` | solo con `role = "playpause"`: el icono **mientras suena** (normalmente el de pausa) |
+| `icon_paused` | solo con `role = "playpause"`: el icono **en pausa, parado o sin mpv** (normalmente el de play) |
+| `shape`, `radius`, `background`, `pressed_background`, `pressed_scale`, `text_color` | la caja del hijo, como en los elementos de una capa |
+| `size` | solo con `shape = "circle"`: diámetro en px. Por defecto, la altura del hijo (la de la fila menos 8 px); como máximo, la altura de la fila (52 px con `margin` 4). Más grande es un error al cargar |
+
+- **Iconos por estado.** Si falta uno de los dos, en ese estado se usa `icon`. El
+  hijo necesita `icon`, `label` o ambos, o bien los dos iconos de estado. El estado
+  es el que ya lee el `player` de mpv. Al cambiar con el panel desplegado, el icono
+  pasa del uno al otro con un **fundido de 150 ms** (solo esos fotogramas). Plegado,
+  cambia sin animación y sin gastar fotogramas.
+- **Estilo.** Un hijo **sin** campos de estilo se dibuja como siempre: sin fondo,
+  con el resaltado y las esquinas del `player`. Con alguno, tiene caja propia:
+  `shape` (por defecto `"rounded"`, radio 8), `background` (por defecto ninguno),
+  `pressed_background` y `text_color` (por defecto los del `player`) y
+  `pressed_scale` (por defecto 1). Un círculo va centrado en su hueco. La zona
+  táctil sigue siendo el hueco entero, no solo el círculo.
+- Estos campos solo se admiten en hijos del `player`; en un `expandable` son un
+  error.
+
+```toml
+[[layers.items.children]]
+role = "prev"
+icon = "/etc/touchbinux/icons/fast_rewind.svg"
+
+[[layers.items.children]]
+role = "playpause"
+icon_playing = "/etc/touchbinux/icons/player_pause.svg"
+icon_paused  = "/etc/touchbinux/icons/player_play.svg"
+shape = "circle"
+size = 44
+background = "#00ffb7"
+pressed_background = "#00c98f"
+pressed_scale = 0.92
+
+[[layers.items.children]]
+role = "stop"
+icon = "/etc/touchbinux/icons/player_stop.svg"
+shape = "circle"
+size = 44
+background = "#ff0000"
+pressed_background = "#b30000"
+pressed_scale = 0.92
+```
+
+`dump_player_children` (en los tests) guarda vistas previas de estos hijos: en
+pausa, pulsado, en mitad del fundido y reproduciendo.
 
 #### `capture`
 
@@ -1284,8 +1338,9 @@ la barra se guarda en `/var/lib/touchbinux/state.toml` (de root, `0644`), nunca 
 archivos. Antes de conectar se comprueba que es un socket (no un enlace) del usuario
 de sesión, y después, con las credenciales del otro extremo (`SO_PEERCRED`), que el
 proceso que escucha corre como ese usuario; si no, no se usa. Sin usuario de sesión
-no se conecta. Solo se le piden propiedades y, al soltar la barra de posición, un
-`seek`.
+no se conecta. Solo se le piden propiedades y se le mandan el `seek` de la barra de
+posición y los comandos de los `role` de los hijos (`playlist-prev`, `cycle pause`,
+`playlist-next`, `stop`).
 
 **Grabaciones** (`capture`). El daemon lee `/proc` para encontrar un `wf-recorder`
 cuyo dueño sea el usuario de sesión (nunca otro) y, al tocar para parar, vuelve a
@@ -1432,7 +1487,8 @@ TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 
 `dump_expandable` (elementos `expandable` y carpetas), `dump_gif_picker` (con
 `TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_player`
-(estados del reproductor y su panel), `dump_capture` (plegado, desplegado con un
+(estados del reproductor y su panel), `dump_player_children` (hijos con estilo
+propio y el fundido de iconos), `dump_capture` (plegado, desplegado con un
 modo atenuado y grabando), `dump_grid_wave` (reposo, cinco fotogramas de la ola y el
 final; también ampliados 4x), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).

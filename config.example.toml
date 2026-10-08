@@ -196,6 +196,30 @@ format = "%H:%M"
 # [[layers.items.children]]
 # icon = "/etc/touchbinux/icons/play_pause.svg"
 # action = { type = "key", key = "KEY_PLAYPAUSE" }
+#
+# A player's child can have a `role` instead of an action: "prev", "playpause",
+# "next" or "stop", sent to mpv over its socket (no process). An explicit `action`
+# wins. role = "playpause" may show icon_playing while mpv plays and icon_paused
+# otherwise (150 ms cross-fade; `icon` stands in for a missing one). Its box takes
+# shape, radius, size (circles, at most the row's height), background,
+# pressed_background, pressed_scale and text_color, as a layer's items do.
+# [[layers.items.children]]
+# role = "playpause"
+# icon_playing = "/etc/touchbinux/icons/player_pause.svg"
+# icon_paused = "/etc/touchbinux/icons/player_play.svg"
+# shape = "circle"
+# size = 44
+# background = "#00ffb7"
+# pressed_background = "#00c98f"
+# pressed_scale = 0.92
+#
+# [[layers.items.children]]
+# role = "stop"
+# icon = "/etc/touchbinux/icons/player_stop.svg"
+# shape = "circle"
+# size = 44
+# background = "#ff0000"
+# pressed_background = "#b30000"
 
 # Screenshots and screen recording with your own scripts (run as run_as, in the
 # Wayland session, without a shell). Tapped, it unfolds into: region, window and

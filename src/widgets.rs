@@ -5,7 +5,7 @@
 
 use crate::{
     anim::{Animated, ease_in_out, ease_out, ease_out_inverse},
-    battery::BatteryStatus,
+    battery::{BatteryStatus, ChargeState},
     canvas::{Canvas, Font, Image, Rect, Rgba, Svg},
     scenes::icon_side,
 };
@@ -707,9 +707,473 @@ pub fn draw_grid_still(canvas: &mut Canvas, icon: Rect, color: Rgba, _open: f32)
     draw_grid(canvas, icon, color, DEFAULT_GRID as usize, |_, _| 0.0);
 }
 
+// --- Battery icon -------------------------------------------------------------------
+
+/// `builtin:battery`'s tap animation; config `anim_ms`.
+pub const BATTERY_ANIM: Duration = Duration::from_millis(450);
+/// Default `battery_colors`: from 60 %, 30-59, 15-29, under 15.
+pub const BATTERY_COLORS: [Rgba; 4] = [
+    Rgba(0x00, 0xff, 0xb7, 0xff),
+    Rgba(0xff, 0xd6, 0x0a, 0xff),
+    Rgba(0xff, 0x95, 0x00, 0xff),
+    Rgba(0xff, 0x2d, 0x2d, 0xff),
+];
+/// Default `full_color`.
+pub const BATTERY_FULL: Rgba = Rgba(0x00, 0xff, 0xff, 0xff);
+/// Where `battery_colors` change, in %: each threshold starts the next colour up.
+const BATTERY_STEPS: [u8; 3] = [60, 30, 15];
+
+/// What the battery icon shows, from the battery's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryLook {
+    /// No battery found (or unreadable): an empty outline with a "?".
+    Missing,
+    /// Filled to `percent`, with the bolt while charging. "Not charging" (a charge
+    /// limit) looks like discharging: no bolt, not full.
+    Level { percent: u8, bolt: bool },
+    /// Full (100 %, or the kernel says Full): all filled, the bolt if plugged in.
+    Full { bolt: bool },
+}
+
+impl BatteryLook {
+    pub fn of(status: Option<BatteryStatus>) -> BatteryLook {
+        match status {
+            None => BatteryLook::Missing,
+            Some(s) if s.percent >= 100 || s.state == ChargeState::Full => BatteryLook::Full {
+                bolt: s.state.plugged(),
+            },
+            Some(s) => BatteryLook::Level {
+                percent: s.percent,
+                bolt: s.state == ChargeState::Charging,
+            },
+        }
+    }
+}
+
+/// The colour for `percent` from `colors` (high, medium, low, critical).
+pub fn battery_color(colors: &[Rgba; 4], percent: u8) -> Rgba {
+    let step = BATTERY_STEPS.iter().take_while(|&&s| percent < s).count();
+    colors[step]
+}
+
+/// A battery drawn by code (`builtin:battery`): outline, fill to the level in the
+/// level's colour, a bolt while charging. Tapped, the fill empties and refills to
+/// its level while the bolt flashes. Follows `Live::battery`; still otherwise.
+pub struct BatteryIcon {
+    pub colors: [Rgba; 4],
+    pub full: Rgba,
+    anim: Duration,
+    tapped: Option<Duration>,
+    look: BatteryLook,
+}
+
+impl BatteryIcon {
+    pub fn new(colors: [Rgba; 4], full: Rgba, anim: Duration) -> BatteryIcon {
+        BatteryIcon {
+            colors,
+            full,
+            anim,
+            tapped: None,
+            look: BatteryLook::Missing,
+        }
+    }
+
+    pub fn look(&self) -> BatteryLook {
+        self.look
+    }
+
+    pub fn animating(&self, t: Duration) -> bool {
+        self.tapped.is_some_and(|at| t < at + self.anim)
+    }
+
+    /// How far through the animation (0..1), if it runs.
+    fn phase(&self, t: Duration) -> Option<f32> {
+        let at = self.tapped.filter(|_| self.animating(t))?;
+        Some(t.saturating_sub(at).as_secs_f32() / self.anim.as_secs_f32())
+    }
+
+    /// Share of its level the fill shows: 1 at rest, 0 half-way through the tap.
+    pub fn fill(&self, t: Duration) -> f32 {
+        self.phase(t)
+            .map_or(1.0, |e| 1.0 - ease_in_out(1.0 - (2.0 * e - 1.0).abs()))
+    }
+
+    /// The bolt's flash, 0 at rest, 1 at its brightest (as the fill comes back).
+    fn flash(&self, t: Duration) -> f32 {
+        self.phase(t).map_or(0.0, |e| (e * std::f32::consts::PI).sin().powi(2))
+    }
+}
+
+impl Animated for BatteryIcon {
+    fn draw(&self, canvas: &mut Canvas, rect: Rect, t: Duration) {
+        let style = BatteryStyle {
+            colors: &self.colors,
+            full: self.full,
+            fill: self.fill(t),
+            flash: self.flash(t),
+            resting: !self.animating(t),
+        };
+        draw_battery_icon(canvas, rect, self.look, &style);
+    }
+
+    fn next_change(&self, t: Duration) -> Option<Duration> {
+        self.animating(t).then_some(t)
+    }
+
+    /// Starts the animation; a tap while it runs lets it finish.
+    fn on_tap(&mut self, t: Duration) -> bool {
+        if self.animating(t) || self.anim.is_zero() {
+            return false;
+        }
+        self.tapped = Some(t);
+        true
+    }
+
+    fn advance(&mut self, _t: Duration, live: &Live) -> bool {
+        let look = BatteryLook::of(live.battery);
+        let changed = look != self.look;
+        self.look = look;
+        changed
+    }
+}
+
+/// How `draw_battery_icon` paints: colours, how much of the level shows and the
+/// bolt's flash (both from the tap animation).
+pub struct BatteryStyle<'a> {
+    pub colors: &'a [Rgba; 4],
+    pub full: Rgba,
+    pub fill: f32,
+    pub flash: f32,
+    /// Not animating: a full battery is one solid shape.
+    pub resting: bool,
+}
+
+/// Where the parts of a battery go in `icon` (a square), in whole pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct BatteryGeometry {
+    /// The body (outline's outer edge).
+    pub body: Rect,
+    pub terminal: Rect,
+    pub line: f32,
+    pub radius: f32,
+    /// The empty gap between the outline and the fill.
+    pub gap: f32,
+}
+
+impl BatteryGeometry {
+    pub fn new(icon: Rect) -> BatteryGeometry {
+        let s = icon.w.min(icon.h).floor();
+        let (cx, cy) = icon.center();
+        let line = (s * 0.055).round().max(2.0);
+        let (bw, bh) = ((s * 0.74).round(), (s * 0.44).round());
+        let tw = (s * 0.07).round().max(2.0);
+        let mut th = (bh * 0.4).round();
+        if (bh - th) as i32 % 2 != 0 {
+            th += 1.0; // centred on whole pixels
+        }
+        let total = bw + 1.0 + tw;
+        let (x0, y0) = ((cx - total / 2.0).round(), (cy - bh / 2.0).round());
+        BatteryGeometry {
+            body: Rect::new(x0, y0, bw, bh),
+            terminal: Rect::new(x0 + bw + 1.0, y0 + (bh - th) / 2.0, tw, th),
+            line,
+            radius: (bh * 0.28).round(),
+            gap: (line * 0.6).round().max(1.0),
+        }
+    }
+
+    /// The fill's box when full, `gap` px inside the outline.
+    pub fn inner(&self, gap: f32) -> Rect {
+        let pad = self.line + gap;
+        let b = self.body;
+        Rect::new(b.x + pad, b.y + pad, b.w - 2.0 * pad, b.h - 2.0 * pad)
+    }
+}
+
+/// `builtin:battery` in `icon` as `look`.
+pub fn draw_battery_icon(canvas: &mut Canvas, icon: Rect, look: BatteryLook, style: &BatteryStyle) {
+    let g = BatteryGeometry::new(icon);
+    let b = g.body;
+    let (level, color, bolt, gap) = match look {
+        BatteryLook::Missing => (0.0, DIM, false, g.gap),
+        BatteryLook::Level { percent, bolt } => {
+            (percent as f32 / 100.0, battery_color(style.colors, percent), bolt, g.gap)
+        }
+        BatteryLook::Full { bolt } => (1.0, style.full, bolt, 0.0),
+    };
+    let t = g.terminal;
+    canvas.fill_rounded_rect(t.x, t.y, t.w, t.h, (t.w / 2.0).min(2.0), color);
+    if matches!(look, BatteryLook::Full { .. }) && style.resting {
+        // No gap at all: one solid body.
+        canvas.fill_rounded_rect(b.x, b.y, b.w, b.h, g.radius, color);
+    } else {
+        let half = g.line / 2.0;
+        let outline = rounded_rect_points(b.x + half, b.y + half, b.w - g.line, b.h - g.line, g.radius - half);
+        canvas.stroke_polyline(&outline, true, g.line, color);
+        let inner = g.inner(gap);
+        let w = (inner.w * level * style.fill).round();
+        if w >= 1.0 {
+            let r = (g.radius - g.line - gap).max(1.0).min(w / 2.0);
+            canvas.fill_rounded_rect(inner.x, inner.y, w, inner.h, r, color);
+        }
+    }
+    if look == BatteryLook::Missing {
+        draw_question(canvas, b, DIM);
+    }
+    if bolt {
+        // Black on the fill; white where the fill is low (it would sit on the gap).
+        let covered = matches!(look, BatteryLook::Full { .. }) || level * style.fill >= 0.5;
+        let ink = if covered { Rgba::BLACK } else { Rgba::WHITE };
+        draw_bolt(canvas, b, ink, style.flash);
+    }
+}
+
+/// A closed polyline around a rounded rectangle (corners as short arcs).
+fn rounded_rect_points(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
+    use std::f32::consts::FRAC_PI_2;
+    let r = r.clamp(0.0, w.min(h) / 2.0);
+    let corners = [
+        (x + w - r, y + r, -FRAC_PI_2),
+        (x + w - r, y + h - r, 0.0),
+        (x + r, y + h - r, FRAC_PI_2),
+        (x + r, y + r, 2.0 * FRAC_PI_2),
+    ];
+    const STEPS: usize = 6;
+    corners
+        .iter()
+        .flat_map(|&(cx, cy, a0)| {
+            (0..=STEPS).map(move |i| {
+                let a = a0 + FRAC_PI_2 * i as f32 / STEPS as f32;
+                (cx + r * a.cos(), cy + r * a.sin())
+            })
+        })
+        .collect()
+}
+
+/// A lightning bolt centred on `body`, in `ink`; `flash` (0..1) grows it a little
+/// and haloes it in white.
+fn draw_bolt(canvas: &mut Canvas, body: Rect, ink: Rgba, flash: f32) {
+    const BOLT: [(f32, f32); 6] = [
+        (0.62, 0.0),
+        (0.08, 0.58),
+        (0.46, 0.58),
+        (0.38, 1.0),
+        (0.92, 0.42),
+        (0.54, 0.42),
+    ];
+    let (cx, cy) = body.center();
+    let h = body.h * 0.8 * (1.0 + 0.25 * flash);
+    let w = h * 0.55;
+    let pts: Vec<_> = BOLT
+        .iter()
+        .map(|&(px, py)| (cx + (px - 0.5) * w, cy + (py - 0.5) * h))
+        .collect();
+    if flash > 0.0 {
+        let halo = Rgba::WHITE.with_alpha((flash * 0xa0 as f32).round() as u8);
+        canvas.stroke_polyline(&pts, true, (h * 0.12).max(2.0), halo);
+    }
+    canvas.fill_polygon(&pts, ink);
+}
+
+/// A small "?" drawn by code, centred on `body`.
+fn draw_question(canvas: &mut Canvas, body: Rect, color: Rgba) {
+    use std::f32::consts::PI;
+    let (cx, cy) = body.center();
+    let s = body.h * 0.62;
+    let line = (s * 0.14).max(1.5);
+    let r = s * 0.22;
+    let top = cy - s / 2.0 + r;
+    canvas.stroke_arc(cx, top, r, PI, 1.25 * PI, line, color);
+    let bend = (cx + r * (0.25 * PI).cos(), top + r * (0.25 * PI).sin());
+    canvas.stroke_line(bend.0, bend.1, cx, cy + s * 0.12, line, color);
+    canvas.fill_circle(cx, cy + s * 0.38, line * 0.75, color);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status(percent: u8, state: ChargeState) -> Option<BatteryStatus> {
+        let charging = matches!(state, ChargeState::Charging | ChargeState::Full);
+        Some(BatteryStatus { percent, charging, state })
+    }
+
+    #[test]
+    fn battery_palette_thresholds() {
+        let c = &BATTERY_COLORS;
+        let pick = |p| battery_color(c, p);
+        for (p, want) in [(100, 0), (60, 0), (59, 1), (30, 1), (29, 2), (15, 2), (14, 3), (0, 3)] {
+            assert_eq!(pick(p), c[want], "{p} %");
+        }
+        assert_eq!(c[0], Rgba(0x00, 0xff, 0xb7, 0xff));
+        assert_eq!(c[3], Rgba(0xff, 0x2d, 0x2d, 0xff));
+    }
+
+    #[test]
+    fn battery_look_follows_the_state() {
+        use BatteryLook::{Full, Level, Missing};
+        use ChargeState::{Charging, Discharging, NotCharging, Unknown};
+        assert_eq!(BatteryLook::of(None), Missing);
+        assert_eq!(BatteryLook::of(status(42, Charging)), Level { percent: 42, bolt: true });
+        assert_eq!(BatteryLook::of(status(42, Discharging)), Level { percent: 42, bolt: false });
+        // A charge limit: plugged in, held at 80 %; neither the bolt nor full.
+        assert_eq!(BatteryLook::of(status(80, NotCharging)), Level { percent: 80, bolt: false });
+        assert_eq!(BatteryLook::of(status(80, Unknown)), Level { percent: 80, bolt: false });
+        // Full: at 100 % or when the kernel says so; the bolt while plugged in.
+        assert_eq!(BatteryLook::of(status(100, Discharging)), Full { bolt: false });
+        assert_eq!(BatteryLook::of(status(100, Charging)), Full { bolt: true });
+        assert_eq!(BatteryLook::of(status(97, ChargeState::Full)), Full { bolt: true });
+        assert_eq!(BatteryLook::of(status(100, NotCharging)), Full { bolt: true });
+    }
+
+    const SLOT: Rect = Rect { x: 10.0, y: 4.0, w: 44.0, h: 44.0 };
+
+    fn draw(look: BatteryLook, fill: f32) -> Canvas {
+        let mut c = Canvas::new(64, 52).unwrap();
+        c.clear(Rgba::BLACK);
+        let style = BatteryStyle {
+            colors: &BATTERY_COLORS,
+            full: BATTERY_FULL,
+            fill,
+            flash: 0.0,
+            resting: fill == 1.0,
+        };
+        draw_battery_icon(&mut c, SLOT, look, &style);
+        c
+    }
+
+    fn px(c: &Canvas, x: f32, y: f32) -> [u8; 4] {
+        let i = ((y as u32 * c.width() + x as u32) * 4) as usize;
+        c.data()[i..i + 4].try_into().unwrap()
+    }
+
+    fn rgba(c: Rgba) -> [u8; 4] {
+        [c.0, c.1, c.2, c.3]
+    }
+
+    /// Pixels of `color` along the middle row of the fill's box.
+    fn filled(c: &Canvas, color: Rgba) -> usize {
+        let inner = BatteryGeometry::new(SLOT).inner(BatteryGeometry::new(SLOT).gap);
+        let y = inner.y + inner.h / 2.0;
+        (inner.x as u32..(inner.x + inner.w) as u32)
+            .filter(|&x| px(c, x as f32, y) == rgba(color))
+            .count()
+    }
+
+    #[test]
+    fn battery_fill_is_proportional() {
+        let g = BatteryGeometry::new(SLOT);
+        let w = g.inner(g.gap).w;
+        for p in [0u8, 10, 25, 50, 80] {
+            let c = draw(BatteryLook::Level { percent: p, bolt: false }, 1.0);
+            let n = filled(&c, battery_color(&BATTERY_COLORS, p)) as f32;
+            let want = (w * p as f32 / 100.0).round();
+            assert!((n - want).abs() <= 1.0, "{p} %: {n} px, want {want}");
+        }
+        // The gap between outline and fill is empty (black) at 80 %.
+        let c = draw(BatteryLook::Level { percent: 80, bolt: false }, 1.0);
+        let (_, cy) = g.body.center();
+        assert_eq!(px(&c, g.body.x + g.line, cy), [0, 0, 0, 0xff]);
+        assert_eq!(px(&c, g.body.x + 1.0, cy), rgba(BATTERY_COLORS[0]), "outline");
+        // Full: one solid shape, no gap.
+        let c = draw(BatteryLook::Full { bolt: false }, 1.0);
+        for x in (g.body.x as u32 + 1)..(g.body.x + g.body.w) as u32 - 1 {
+            assert_eq!(px(&c, x as f32, cy), rgba(BATTERY_FULL), "x {x}");
+        }
+    }
+
+    #[test]
+    fn battery_is_centred_and_symmetric() {
+        let c = draw(BatteryLook::Level { percent: 50, bolt: false }, 1.0);
+        let lit = |x: u32, y: u32| px(&c, x as f32, y as f32)[..3].iter().any(|&v| v > 0);
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..52 {
+            for x in 0..64 {
+                if lit(x, y) {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+            }
+        }
+        let (cx, cy) = SLOT.center();
+        assert!(((x0 + x1 + 1) as f32 / 2.0 - cx).abs() <= 0.5, "x {x0}..{x1}");
+        assert!(((y0 + y1 + 1) as f32 / 2.0 - cy).abs() <= 0.5, "y {y0}..{y1}");
+        // Top and bottom mirror each other (the bolt is the only asymmetric part):
+        // the same pixels lit, and colours within the antialiasing's rounding.
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let m = y0 + y1 - y;
+                assert_eq!(lit(x, y), lit(x, m), "({x},{y}) vs ({x},{m})");
+                let (a, b) = (px(&c, x as f32, y as f32), px(&c, x as f32, m as f32));
+                let d = a.iter().zip(b).map(|(a, b)| a.abs_diff(b)).max().unwrap();
+                assert!(d <= 24, "({x},{y}) {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn battery_bolt_contrasts_and_missing_is_grey() {
+        let g = BatteryGeometry::new(SLOT);
+        let (cx, cy) = g.body.center();
+        // Over a fill: black; over a low one: white; on a full charging battery: black.
+        let c = draw(BatteryLook::Level { percent: 80, bolt: true }, 1.0);
+        assert_eq!(px(&c, cx, cy), [0, 0, 0, 0xff]);
+        let c = draw(BatteryLook::Level { percent: 20, bolt: true }, 1.0);
+        assert_eq!(px(&c, cx, cy), [0xff, 0xff, 0xff, 0xff]);
+        let c = draw(BatteryLook::Full { bolt: true }, 1.0);
+        assert_eq!(px(&c, cx, cy), [0, 0, 0, 0xff]);
+        // No battery: a grey outline and "?", nothing else.
+        let c = draw(BatteryLook::Missing, 1.0);
+        assert_eq!(px(&c, g.body.x + 1.0, cy), rgba(DIM));
+        let colours: std::collections::HashSet<_> = (0..52u32)
+            .flat_map(|y| (0..64u32).map(move |x| (x, y)))
+            .map(|(x, y)| px(&c, x as f32, y as f32))
+            .filter(|p| p[..3].iter().any(|&v| v > 0))
+            .map(|p| p[0] == p[1] && p[1] == p[2])
+            .collect();
+        assert_eq!(colours, [true].into(), "only greys");
+    }
+
+    #[test]
+    fn battery_tap_empties_and_refills_once() {
+        let ms = Duration::from_millis;
+        let mut b = BatteryIcon::new(BATTERY_COLORS, BATTERY_FULL, ms(450));
+        let live = |s| Live {
+            volume: 0,
+            muted: false,
+            brightness: None,
+            battery: s,
+            now: chrono::Local::now(),
+            player: Default::default(),
+            recording: None,
+        };
+        // Follows the battery: a change asks for a redraw, the same state doesn't.
+        assert!(!b.advance(ms(0), &live(None)), "starts as missing");
+        assert!(b.advance(ms(0), &live(status(55, ChargeState::Charging))));
+        assert!(!b.advance(ms(10), &live(status(55, ChargeState::Charging))));
+        assert_eq!(b.next_change(ms(10)), None, "0 fps at rest");
+        assert_eq!(b.fill(ms(10)), 1.0);
+        assert!(b.on_tap(ms(1000)));
+        assert!(!b.on_tap(ms(1100)), "no restart mid-way");
+        assert_eq!(b.fill(ms(1000)), 1.0);
+        assert!(b.fill(ms(1100)) < 1.0 && b.fill(ms(1100)) > 0.0);
+        assert!(b.fill(ms(1225)) < 0.01, "empty half-way");
+        assert!(b.flash(ms(1225)) > 0.99);
+        assert!(b.fill(ms(1420)) > 0.9);
+        assert_eq!(b.next_change(ms(1300)), Some(ms(1300)));
+        assert_eq!(b.next_change(ms(1450)), None);
+        assert_eq!((b.fill(ms(1450)), b.flash(ms(1450))), (1.0, 0.0));
+        // The end is the picture at rest.
+        let draw_at = |t| {
+            let mut c = Canvas::new(64, 52).unwrap();
+            c.clear(Rgba::BLACK);
+            b.draw(&mut c, SLOT, t);
+            c
+        };
+        assert!(draw_at(ms(1450)).data() == draw_at(ms(0)).data());
+        assert!(draw_at(ms(1225)).data() != draw_at(ms(0)).data());
+        assert!(b.on_tap(ms(2000)), "a new tap after it ends");
+        assert!(!BatteryIcon::new(BATTERY_COLORS, BATTERY_FULL, Duration::ZERO).on_tap(ms(0)));
+    }
 
     #[test]
     fn grid_wave_runs_diagonally_and_ends_at_rest() {
@@ -803,7 +1267,7 @@ mod tests {
             charging: (0..7).map(|_| img()).collect(),
         };
         let idx = |percent, charging| {
-            let state = crate::battery::ChargeState::Unknown;
+            let state = ChargeState::Unknown;
             let p = icons.pick(BatteryStatus { percent, charging, state });
             let list = if charging {
                 &icons.charging

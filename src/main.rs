@@ -840,6 +840,13 @@ impl App {
             return;
         }
         let Some(action) = self.config.action(id).cloned() else {
+            // A player's child with a role (and no action): straight to mpv.
+            if let Some(role) = self.config.child_role(id) {
+                let sent = self.mpv.as_mut().is_some_and(|m| m.command(role.mpv_command()));
+                if !sent {
+                    eprintln!("player: mpv not connected, ignoring {id} ({role:?})");
+                }
+            }
             return;
         };
         match &action {

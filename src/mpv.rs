@@ -362,6 +362,17 @@ impl Mpv {
         self.state.position = Some(secs);
     }
 
+    /// Sends a command (a player child's `role`, e.g. `["cycle", "pause"]`). Returns
+    /// false, sending nothing, if mpv isn't connected.
+    pub fn command(&mut self, args: &[&str]) -> bool {
+        if self.stream.is_none() {
+            return false;
+        }
+        eprintln!("mpv: {}", args.join(" "));
+        self.send(&json!({ "command": args }));
+        true
+    }
+
     fn send(&mut self, cmd: &Value) {
         let Some(stream) = &self.stream else {
             return;
@@ -475,6 +486,24 @@ mod tests {
         assert_eq!(sent[2], json!({"command": ["unobserve_property", 5]}));
         assert_eq!(mpv.state.position, Some(61.24));
 
+        // A player child's role goes straight to mpv, one command per line.
+        use crate::config::Role;
+        for role in [Role::Prev, Role::Playpause, Role::Next, Role::Stop] {
+            assert!(mpv.command(role.mpv_command()));
+        }
+        let sent: Vec<Value> = (0..4)
+            .map(|_| serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap())
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                json!({"command": ["playlist-prev"]}),
+                json!({"command": ["cycle", "pause"]}),
+                json!({"command": ["playlist-next"]}),
+                json!({"command": ["stop"]}),
+            ]
+        );
+
         // Pause, a stream without duration, garbage and an over-long line.
         push(&mut tx, OBS_PAUSE, json!(true));
         push(&mut tx, OBS_DURATION, Value::Null);
@@ -492,6 +521,7 @@ mod tests {
         assert!(read(&mut mpv));
         assert_eq!(mpv.state, MpvState::default());
         assert!(mpv.stream_fd().is_none());
+        assert!(!mpv.command(&["stop"]), "nothing to send it to");
         drop(listener);
         fs::remove_file(&path).unwrap();
         let _listener = UnixListener::bind(&path).unwrap();

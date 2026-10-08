@@ -280,12 +280,91 @@ pub struct ChildConfig {
     /// Paints the icon in this one colour.
     #[serde(default)]
     pub color: Option<Color>,
-    /// Required.
+    /// Required, except on a player's child with a `role` (then it overrides it).
     #[serde(default)]
     pub action: Option<Action>,
+    /// player: what the child does, through mpv's socket (without `action`).
+    #[serde(default)]
+    pub role: Option<Role>,
+    /// player, role = "playpause": shown while mpv plays (a pause icon)...
+    #[serde(default)]
+    pub icon_playing: Option<String>,
+    /// ...and otherwise (a play icon). A missing one falls back to `icon`.
+    #[serde(default)]
+    pub icon_paused: Option<String>,
+    /// player: the child's own box, as on a layer's items (`size`: a circle's
+    /// diameter, at most the row's height).
+    #[serde(default)]
+    pub shape: Option<Shape>,
+    #[serde(default)]
+    pub radius: Option<Radius>,
+    #[serde(default, rename = "size")]
+    pub diameter: Option<f32>,
+    #[serde(default)]
+    pub background: Option<Background>,
+    #[serde(default)]
+    pub pressed_background: Option<Color>,
+    #[serde(default)]
+    pub pressed_scale: Option<f32>,
+    #[serde(default)]
+    pub text_color: Option<Color>,
+}
+
+/// What a player's child does natively, as an mpv command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Prev,
+    Playpause,
+    Next,
+    Stop,
+}
+
+impl Role {
+    /// The mpv IPC command it sends.
+    pub fn mpv_command(self) -> &'static [&'static str] {
+        match self {
+            Role::Prev => &["playlist-prev"],
+            Role::Playpause => &["cycle", "pause"],
+            Role::Next => &["playlist-next"],
+            Role::Stop => &["stop"],
+        }
+    }
 }
 
 impl ChildConfig {
+    /// Whether it has a box of its own (any of the style fields).
+    fn styled(&self) -> bool {
+        self.shape.is_some()
+            || self.radius.is_some()
+            || self.diameter.is_some()
+            || self.background.is_some()
+            || self.pressed_background.is_some()
+            || self.pressed_scale.is_some()
+            || self.text_color.is_some()
+    }
+
+    /// Its own box, if it has one: its fields, else the defaults of a layer's items
+    /// except the background (none) and what it takes from its parent (`parent`'s
+    /// pressed highlight and text colour).
+    pub fn frame(&self, parent: &Frame) -> Option<Frame> {
+        if !self.styled() {
+            return None;
+        }
+        let d = Frame::default();
+        Some(Frame {
+            shape: self.shape.unwrap_or(d.shape),
+            radius: self.radius.unwrap_or(d.radius),
+            background: match self.background {
+                Some(Background::Color(c)) => Some(c),
+                _ => None,
+            },
+            pressed: self.pressed_background.map(|c| c.0).or(parent.pressed),
+            pressed_scale: self.pressed_scale.unwrap_or(d.pressed_scale),
+            text: self.text_color.map(|c| c.0).or(parent.text),
+        })
+    }
+
     /// Its id, `n` being its position (0-based) among `parent`'s children.
     pub fn id(&self, parent: &str, n: usize) -> String {
         self.id.clone().unwrap_or_else(|| format!("{parent}.{}", n + 1))
@@ -686,17 +765,56 @@ impl ItemConfig {
         }
         for (id, child) in self.child_ids() {
             let what = format!("{what}: child {id:?}");
-            let Some(action) = &child.action else {
-                bail!("{what}: a child needs an `action`");
-            };
-            validate_action(&what, action)?;
-            if child.icon.as_deref().is_none_or(str::is_empty)
-                && child.label.as_deref().is_none_or(str::is_empty)
-            {
-                bail!("{what}: a child needs an `icon`, a `label` or both");
+            if self.kind != ItemKind::Player {
+                let player_only = [
+                    ("role", child.role.is_some()),
+                    ("icon_playing", child.icon_playing.is_some()),
+                    ("icon_paused", child.icon_paused.is_some()),
+                    ("shape", child.shape.is_some()),
+                    ("radius", child.radius.is_some()),
+                    ("size", child.diameter.is_some()),
+                    ("background", child.background.is_some()),
+                    ("pressed_background", child.pressed_background.is_some()),
+                    ("pressed_scale", child.pressed_scale.is_some()),
+                    ("text_color", child.text_color.is_some()),
+                ];
+                if let Some((field, _)) = player_only.iter().find(|(_, set)| *set) {
+                    bail!("{what}: `{field}` is only for a player's children");
+                }
             }
-            if let Some(icon) = child.icon.as_deref() {
-                validate_icon(&what, icon)?;
+            match (&child.action, child.role) {
+                (Some(action), _) => validate_action(&what, action)?,
+                (None, Some(_)) => {}
+                (None, None) if self.kind == ItemKind::Player => {
+                    bail!("{what}: a child needs an `action` or a `role`")
+                }
+                (None, None) => bail!("{what}: a child needs an `action`"),
+            }
+            let states = child.icon_playing.is_some() || child.icon_paused.is_some();
+            if states && child.role != Some(Role::Playpause) {
+                bail!("{what}: `icon_playing`/`icon_paused` only apply to role = \"playpause\"");
+            }
+            let set = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
+            let both_states = set(&child.icon_playing) && set(&child.icon_paused);
+            if !set(&child.icon) && !set(&child.label) && !both_states {
+                bail!(
+                    "{what}: a child needs an `icon`, a `label` or both \
+                     (or `icon_playing` and `icon_paused`)"
+                );
+            }
+            for icon in [&child.icon, &child.icon_playing, &child.icon_paused] {
+                if let Some(icon) = icon.as_deref() {
+                    validate_icon(&what, icon)?;
+                }
+            }
+            if child.diameter.is_some() && child.shape != Some(Shape::Circle) {
+                bail!("{what}: `size` only applies to shape = \"circle\"");
+            }
+            if child.diameter.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
+                bail!("{what}: size must be a diameter in px, in (0, {MAX_PX}]");
+            }
+            if child.pressed_scale.is_some_and(|k| !PRESSED_SCALE.contains(&k)) {
+                bail!("{what}: pressed_scale must be in {PRESSED_SCALE:?}");
             }
         }
         Ok(())
@@ -982,6 +1100,14 @@ impl Config {
             .iter()
             .flat_map(|l| &l.items)
             .find(|i| i.kind == ItemKind::Player)
+    }
+
+    /// The `role` of the player's child `id`, if it has one.
+    pub fn child_role(&self, id: &str) -> Option<Role> {
+        self.player()?
+            .child_ids()
+            .find(|(child, _)| child == id)
+            .and_then(|(_, c)| c.role)
     }
 
     /// The action configured for a tap on `id`, from `[[buttons]]` or any layer.
@@ -1857,6 +1983,113 @@ mod tests {
         let clash = item("screenshot='/s'\n[[layers.items]]\ntype='button'\nid='capture.shot_full'\nlabel='x'\naction={type='socket'}");
         assert!(parse(&clash).is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nrecord='/r'").is_err());
+    }
+
+    #[test]
+    fn player_children_roles_and_styles() {
+        let c = parse(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "player"
+            pressed_background = "#123456"
+            text_color = "#ffcc00"
+            [[layers.items.children]]
+            id = "pp"
+            role = "playpause"
+            icon_playing = "/etc/touchbinux/icons/player_pause.svg"
+            icon_paused = "/etc/touchbinux/icons/player_play.svg"
+            shape = "circle"
+            size = 44
+            background = "#00ffb7"
+            pressed_background = "#00c98f"
+            pressed_scale = 0.92
+            [[layers.items.children]]
+            id = "stop"
+            role = "stop"
+            icon = "/etc/touchbinux/icons/player_stop.svg"
+            background = "transparent"
+            [[layers.items.children]]
+            id = "next"
+            role = "next"
+            label = "Next"
+            action = { type = "key", key = "KEY_NEXTSONG" }
+            [[layers.items.children]]
+            id = "plain"
+            label = "x"
+            action = { type = "socket" }
+            "##,
+        )
+        .unwrap();
+        // Roles: native, unless an action is given (it wins).
+        assert_eq!(c.child_role("pp"), Some(Role::Playpause));
+        assert_eq!(c.child_role("stop"), Some(Role::Stop));
+        assert!(c.action("pp").is_none());
+        assert!(matches!(c.action("next"), Some(Action::Key { .. })));
+        assert_eq!(c.child_role("plain"), None);
+        assert_eq!(c.child_role("nope"), None);
+        assert_eq!(Role::Playpause.mpv_command(), ["cycle", "pause"]);
+        assert_eq!(Role::Prev.mpv_command(), ["playlist-prev"]);
+
+        // Boxes: their own fields, the parent's highlight and text colour otherwise.
+        let p = c.player().unwrap();
+        let parent = c.layers[0].frame_for(p);
+        let kids = p.children();
+        let pp = kids[0].frame(&parent).unwrap();
+        assert_eq!(pp.shape, Shape::Circle);
+        assert_eq!(pp.background, Some(Rgba(0x00, 0xff, 0xb7, 0xff)));
+        assert_eq!(pp.pressed, Some(Rgba(0x00, 0xc9, 0x8f, 0xff)));
+        assert_eq!(pp.pressed_scale, 0.92);
+        assert_eq!(pp.text, Some(Rgba(0xff, 0xcc, 0x00, 0xff)));
+        assert_eq!(kids[0].diameter, Some(44.0));
+        let stop = kids[1].frame(&parent).unwrap();
+        assert_eq!((stop.shape, stop.background), (Shape::Rounded, None));
+        assert_eq!(stop.pressed, Some(Rgba(0x12, 0x34, 0x56, 0xff)));
+        assert!(kids[3].frame(&parent).is_none(), "no style: drawn as before");
+
+        let child = |body: &str| {
+            format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='player'\n[[layers.items.children]]\n{body}")
+        };
+        assert!(parse(&child("role='prev'\nlabel='<'")).is_ok());
+        assert!(parse(&child("role='playpause'\nicon_playing='/a.svg'\nicon_paused='/b.svg'")).is_ok());
+        assert!(parse(&child("role='playpause'\nicon_playing='/a.svg'\nicon='/c.svg'")).is_ok());
+        for body in [
+            "role='rewind'\nlabel='x'",
+            "role='Prev'\nlabel='x'",
+            "role=1\nlabel='x'",
+            "label='x'",
+            "role='prev'",
+            "role='playpause'\nicon_playing='/a.svg'",
+            "role='stop'\nicon_paused='/a.svg'\nlabel='x'",
+            "label='x'\naction={type='socket'}\nicon_playing='/a.svg'",
+            "role='prev'\nlabel='x'\nsize=40",
+            "role='prev'\nlabel='x'\nshape='rounded'\nsize=40",
+            "role='prev'\nlabel='x'\nshape='circle'\nsize=0",
+            "role='prev'\nlabel='x'\npressed_scale=2",
+            "role='prev'\nlabel='x'\nshape='square'",
+            "role='prev'\nlabel='x'\nbackground='red'",
+            "role='prev'\nlabel='x'\nicon_playing='builtin:rocket'",
+            "role='prev'\nlabel='x'\nwidth=40",
+        ] {
+            assert!(parse(&child(body)).is_err(), "accepted: {body}");
+        }
+        let err = format!("{:#}", parse(&child("label='x'")).unwrap_err());
+        assert!(err.contains("needs an `action` or a `role`"), "{err}");
+        let err = format!("{:#}", parse(&child("role='rewind'\nlabel='x'")).unwrap_err());
+        assert!(err.contains("rewind"), "{err}");
+        // Only a player's children take them.
+        let expandable = |body: &str| {
+            format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\nicon='/i.svg'\n\
+                 [[layers.items.children]]\nlabel='x'\naction={{type='socket'}}\n{body}"
+            )
+        };
+        assert!(parse(&expandable("")).is_ok());
+        for body in ["role='stop'", "shape='circle'", "background='#ffffff'", "pressed_scale=0.9"] {
+            let err = format!("{:#}", parse(&expandable(body)).unwrap_err());
+            assert!(err.contains("only for a player's children"), "{body}: {err}");
+        }
     }
 
     #[test]

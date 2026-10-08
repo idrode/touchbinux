@@ -10,7 +10,7 @@ use crate::{
         BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE, ItemConfig, ItemKind,
         LayerConfig,
     },
-    expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, Still},
+    expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     frame::Frame,
     gif::{Gif, GifPlayer, Play},
@@ -796,12 +796,11 @@ impl Scene {
         };
         let children = entries
             .into_iter()
-            .map(|(name, img)| Child {
-                active: chosen == Some(name.as_str()),
-                id: name,
-                glyph: Some(Glyph::Image(img)),
-                label: String::new(),
-                enabled: true,
+            .map(|(name, img)| {
+                let active = chosen == Some(name.as_str());
+                let mut c = Child::new(name, Some(Glyph::Image(img)), String::new());
+                c.active = active;
+                c
             })
             .collect::<Vec<_>>();
         m.enabled = !children.is_empty();
@@ -1422,7 +1421,7 @@ pub fn bar(
                 scene.add_button(rect, font, spec);
             }
             ItemKind::Expandable => {
-                let children = children(item, icons, font, size);
+                let children = children(item, &frame, rect.h, icons, font, size)?;
                 let face: Box<dyn Animated> = match folder_style(item.icon.as_deref()) {
                     Some(style) => Box::new(folder(item.color.map(|c| c.0), style, None)),
                     None if item.icon.as_deref() == Some(BUILTIN_GRID_WAVE) => {
@@ -1440,7 +1439,7 @@ pub fn bar(
                     .push(Expandable::new(id, rect, spec, children, font));
             }
             ItemKind::Player => {
-                let children = children(item, icons, font, size);
+                let children = children(item, &frame, rect.h, icons, font, size)?;
                 let face = Box::new(PlayerFace::new(item.color.map(|c| c.0)));
                 let mut spec = menu_spec(item, area, frame, face, false);
                 spec.seek = Some(SeekBar::new(
@@ -1464,13 +1463,7 @@ pub fn bar(
                             let fade = |c| expandable::fade(c, alpha);
                             mode.draw(canvas, icon, fade(color), fade(rec));
                         };
-                        Child {
-                            id,
-                            glyph: Some(Glyph::Custom(Rc::new(draw))),
-                            label: String::new(),
-                            active: false,
-                            enabled: true,
-                        }
+                        Child::new(id, Some(Glyph::Custom(Rc::new(draw))), String::new())
                     })
                     .collect();
                 let face: Box<dyn Animated> = match item.icon.as_deref() {
@@ -1605,20 +1598,42 @@ fn menu_spec(
     }
 }
 
-/// An expandable's (or player's) children from the config.
-fn children(item: &ItemConfig, icons: &mut IconResolver, font: &Font, size: f32) -> Vec<Child> {
-    item.child_ids()
-        .map(|(id, c)| Child {
-            id,
-            glyph: c
-                .icon
-                .as_deref()
-                .map(|name| static_glyph(name, c.color.map(|c| c.0), icons, font, size)),
-            label: c.label.clone().unwrap_or_default(),
-            active: false,
-            enabled: true,
-        })
-        .collect()
+/// An expandable's (or player's) children from the config. A player's child may
+/// have a box of its own (`frame`: the parent's for what it doesn't set) and icons
+/// that follow mpv; a circle's `size` is checked against the row's height (`row_h`).
+fn children(
+    item: &ItemConfig,
+    frame: &Frame,
+    row_h: f32,
+    icons: &mut IconResolver,
+    font: &Font,
+    size: f32,
+) -> Result<Vec<Child>> {
+    let mut out = Vec::new();
+    for (id, c) in item.child_ids() {
+        if let Some(d) = c.diameter
+            && d > row_h + 0.01
+        {
+            bail!(
+                "{} {:?}: child {id:?}: size {d} px is larger than the row, which is {row_h} px high",
+                item.kind.name(),
+                item.id().unwrap_or("")
+            );
+        }
+        let color = c.color.map(|c| c.0);
+        let mut glyph = |name: &Option<String>| {
+            name.as_deref()
+                .map(|n| static_glyph(n, color, icons, font, size))
+        };
+        let mut child = Child::new(id, glyph(&c.icon), c.label.clone().unwrap_or_default());
+        if c.icon_playing.is_some() || c.icon_paused.is_some() {
+            child.states = Some(StateGlyphs::new(glyph(&c.icon_playing), glyph(&c.icon_paused)));
+        }
+        child.frame = c.frame(frame);
+        child.size = c.diameter;
+        out.push(child);
+    }
+    Ok(out)
 }
 
 /// The largest a GIF can be in an item's `rect` (2 px clear of the edges), as for
@@ -3308,5 +3323,124 @@ mod tests {
             shot(&s, 1000 + ms, &format!("{}-{ms}ms", i + 1));
         }
         shot(&s, 1450, "6-end");
+    }
+
+    const STYLED_PLAYER: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "player"
+        background = "#202020"
+        [[layers.items.children]]
+        id = "pp"
+        role = "playpause"
+        icon_playing = "builtin:grid_wave"
+        icon_paused = "builtin:folder"
+        shape = "circle"
+        size = 44
+        background = "#00ffb7"
+        pressed_background = "#00c98f"
+        pressed_scale = 0.92
+        [[layers.items.children]]
+        id = "stop"
+        role = "stop"
+        label = "Stop"
+        shape = "circle"
+        size = 44
+        background = "#ff0000"
+        pressed_background = "#b30000"
+        [[layers.items.children]]
+        id = "plain"
+        label = "x"
+        action = { type = "socket" }
+    "##;
+
+    #[test]
+    fn player_children_have_their_own_boxes_and_state_icons() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, STYLED_PLAYER);
+        let mut live = live();
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(0), &font);
+        s.advance(MS(1000), &live);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(1000), &font, &live).unwrap();
+        let (px, py) = child_mid(&s, 0);
+        let (sx, sy) = child_mid(&s, 1);
+        // Circles of `size` 44 in their colours (above the icon, inside the circle),
+        // the row's background outside them.
+        assert_eq!(pixel(&c, px, py - 19.0), [0x00, 0xff, 0xb7, 0xff]);
+        assert_eq!(pixel(&c, sx, sy - 19.0), [0xff, 0x00, 0x00, 0xff]);
+        assert_eq!(pixel(&c, px, py - 23.0), [0x20, 0x20, 0x20, 0xff]);
+        assert_eq!(pixel(&c, px - 21.0, py - 19.0), [0x20, 0x20, 0x20, 0xff], "round");
+
+        // Pressed: its pressed_background, drawn 0.92 as big.
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (px, py), MS(1100), &font, &mut out);
+        s.draw(&mut c, MS(1100), &font, &live).unwrap();
+        assert_eq!(pixel(&c, px, py - 18.0), [0x00, 0xc9, 0x8f, 0xff]);
+        assert_eq!(pixel(&c, px, py - 21.5), [0x20, 0x20, 0x20, 0xff], "shrunk");
+        s.handle_touch(Phase::Up, (px, py), MS(1150), &font, &mut out);
+        assert_eq!(out, vec![UiEvent::Tap("pp".into())]);
+
+        // mpv starts playing while it is on screen: the icon cross-fades, ~150 ms.
+        tap(&mut s, mid(r), MS(2000), &font);
+        s.advance(MS(2500), &live);
+        live.player = mpv(false, Some(200.0), 10.0);
+        assert!(s.advance(MS(3000), &live));
+        let fading = |s: &Scene, t| s.menus[0].children[0].states.as_ref().unwrap().fading(t);
+        assert!(fading(&s, MS(3100)));
+        assert!(!fading(&s, MS(3150)));
+        // Folded, a change switches it at once: nothing to animate.
+        s.menus[0].fold.collapse(MS(4000));
+        s.advance(MS(5000), &live);
+        live.player = mpv(true, Some(200.0), 10.0);
+        assert!(s.advance(MS(5100), &live));
+        assert!(!fading(&s, MS(5100)));
+    }
+
+    #[test]
+    fn a_player_childs_circle_fits_the_row() {
+        let Some(font) = font() else { return };
+        let cfg: Config = toml::from_str(&STYLED_PLAYER.replacen("size = 44", "size = 60", 1)).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let err = bar(W, H, &font, &layer, &mut icons).err().unwrap();
+        assert!(format!("{err:#}").contains("larger than the row"), "{err:#}");
+        // Up to the row's height is fine.
+        let row = (H - 2 * MARGIN as u32) as f32;
+        let ok = STYLED_PLAYER.replacen("size = 44", &format!("size = {row}"), 1);
+        assert!(bar(W, H, &font, &toml::from_str::<Config>(&ok).unwrap().default_layer().unwrap(), &mut icons).is_ok());
+    }
+
+    /// Not a check: the styled player of `STYLED_PLAYER` unfolded, paused, pressed,
+    /// playing and mid cross-fade, as PNGs in $TOUCHBINUX_FRAMES (`k-*.png`).
+    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_player_children -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_player_children() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = menu_scene(&font, STYLED_PLAYER);
+        let mut live = live();
+        live.player = mpv(true, Some(200.0), 61.0);
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, live: &Live, t: u64, name: &str| {
+            s.advance(MS(t), live);
+            s.draw(&mut canvas, MS(t), &font, live).unwrap();
+            canvas.save_png(Path::new(&format!("{dir}/k-{name}.png"))).unwrap();
+        };
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(0), &font);
+        shot(&mut s, &live, 1000, "a-paused");
+        let at = child_mid(&s, 0);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, at, MS(1100), &font, &mut out);
+        shot(&mut s, &live, 1100, "b-pressed");
+        s.handle_touch(Phase::Cancel, at, MS(1200), &font, &mut out);
+        live.player = mpv(false, Some(200.0), 61.0);
+        shot(&mut s, &live, 1300, "c-fade-start");
+        shot(&mut s, &live, 1375, "d-fade-mid");
+        shot(&mut s, &live, 1500, "e-playing");
     }
 }

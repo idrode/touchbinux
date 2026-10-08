@@ -7,7 +7,7 @@
 //! idle it schedules no frames, unless its icon is animating.
 
 use crate::{
-    anim::Animated,
+    anim::{Animated, ease_in_out},
     capture::{RecLook, Recording},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
     expander::{Fold, expanded_rect, lerp_rect},
@@ -91,10 +91,117 @@ pub struct Child {
     pub active: bool,
     /// Off (e.g. a capture mode whose tools are missing): drawn faded, taps ignored.
     pub enabled: bool,
+    /// Its own box (a player's child with style fields); `None`: drawn straight on
+    /// the row, with the parent's highlights.
+    pub frame: Option<Frame>,
+    /// A circle `frame`'s diameter (default: the child's height; at most the row's).
+    pub size: Option<f32>,
+    /// Icons that follow mpv (role = "playpause"); `glyph` stands in for a missing one.
+    pub states: Option<StateGlyphs>,
 }
 
 /// How faded a disabled child is drawn.
 const DISABLED_ALPHA: f32 = 0.3;
+/// Cross-fade between a child's playing and paused icons.
+const STATE_FADE: Duration = Duration::from_millis(150);
+
+/// A child's icons while mpv plays and otherwise, cross-faded when that changes.
+pub struct StateGlyphs {
+    pub playing: Option<Glyph>,
+    pub paused: Option<Glyph>,
+    /// Which one it shows...
+    shows_playing: bool,
+    /// ...fading in since then; `None`: no fade (it changed while folded).
+    since: Option<Duration>,
+}
+
+impl StateGlyphs {
+    pub fn new(playing: Option<Glyph>, paused: Option<Glyph>) -> StateGlyphs {
+        StateGlyphs {
+            playing,
+            paused,
+            shows_playing: false,
+            since: None,
+        }
+    }
+
+    /// The icon for a state, or `base` if that one isn't configured.
+    pub fn pick<'a>(&'a self, playing: bool, base: Option<&'a Glyph>) -> Option<&'a Glyph> {
+        let own = if playing { &self.playing } else { &self.paused };
+        own.as_ref().or(base)
+    }
+
+    /// 0 when the change starts, 1 when the new icon shows alone.
+    fn progress(&self, t: Duration) -> f32 {
+        self.since.map_or(1.0, |at| {
+            (t.saturating_sub(at).as_secs_f32() / STATE_FADE.as_secs_f32()).min(1.0)
+        })
+    }
+
+    /// Follows mpv; `animate`: fade (the row is on screen) or switch at once.
+    /// Returns whether it changed.
+    pub fn follow(&mut self, playing: bool, t: Duration, animate: bool) -> bool {
+        if playing == self.shows_playing {
+            return false;
+        }
+        self.shows_playing = playing;
+        self.since = animate.then_some(t);
+        true
+    }
+
+    pub fn fading(&self, t: Duration) -> bool {
+        self.progress(t) < 1.0
+    }
+}
+
+impl Child {
+    /// A plain child: an icon and/or a label, enabled, without a box of its own.
+    pub fn new(id: String, glyph: Option<Glyph>, label: String) -> Child {
+        Child {
+            id,
+            glyph,
+            label,
+            active: false,
+            enabled: true,
+            frame: None,
+            size: None,
+            states: None,
+        }
+    }
+
+    /// The icon shown at `t`, and the one it is fading from with how far the fade
+    /// has gone (0..1).
+    pub fn glyphs(&self, t: Duration) -> (Option<&Glyph>, Option<(&Glyph, f32)>) {
+        let base = self.glyph.as_ref();
+        let Some(s) = &self.states else {
+            return (base, None);
+        };
+        let k = s.progress(t);
+        let before = (k < 1.0).then(|| s.pick(!s.shows_playing, base)).flatten();
+        (s.pick(s.shows_playing, base), before.map(|g| (g, k)))
+    }
+
+    /// Widest of its icons when icons are `side` px.
+    fn icon_w(&self, side: f32) -> f32 {
+        let w = |g: Option<&Glyph>| g.map_or(0.0, |g| g.width(side));
+        match &self.states {
+            Some(s) => w(s.pick(true, self.glyph.as_ref())).max(w(s.pick(false, self.glyph.as_ref()))),
+            None => w(self.glyph.as_ref()),
+        }
+    }
+
+    /// Where its box goes in `slot`: the slot, or a circle centred in it.
+    fn boxed(&self, slot: Rect, row_h: f32) -> Rect {
+        match self.frame {
+            Some(f) if f.shape == Shape::Circle => {
+                let d = self.size.unwrap_or(slot.h).min(row_h);
+                let (cx, cy) = slot.center();
+                Rect::new((cx - d / 2.0).round(), (cy - d / 2.0).round(), d, d)
+            }
+            _ => slot,
+        }
+    }
+}
 
 /// Which part of the unfolded row a point is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +377,10 @@ impl Expandable {
             let o = old.children.iter().find(|o| o.id == c.id);
             c.active = o.is_some_and(|o| o.active);
             c.enabled = o.is_none_or(|o| o.enabled);
+            if let (Some(s), Some(os)) = (&mut c.states, o.and_then(|o| o.states.as_ref())) {
+                s.shows_playing = os.shows_playing;
+                s.since = os.since;
+            }
         }
     }
 
@@ -317,14 +428,25 @@ impl Expandable {
             self.enabled = self.recording.is_none();
             rec = true;
         }
+        let playing = live.player.playing();
+        let on_screen = self.fold.progress(t) > 0.0;
+        let mut states = false;
+        for s in self.children.iter_mut().filter_map(|c| c.states.as_mut()) {
+            states |= s.follow(playing, t, on_screen);
+        }
         let face = self.face.advance(t, live);
-        self.fold.advance(t) | face | rec
+        self.fold.advance(t) | face | rec | states
     }
 
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
         let seek = self.seek.as_ref().and_then(|s| s.next_change(t));
         let rec = self.recording.map(|r| r.next_change(t));
-        [self.fold.next_change(t), self.face.next_change(t), seek, rec]
+        let fading = self
+            .children
+            .iter()
+            .filter_map(|c| c.states.as_ref())
+            .any(|s| s.fading(t));
+        [self.fold.next_change(t), self.face.next_change(t), seek, rec, fading.then_some(t)]
             .into_iter()
             .flatten()
             .min()
@@ -435,17 +557,43 @@ impl Expandable {
         );
         for (j, child) in self.children.iter().enumerate() {
             let slot = self.child_rect(r, j);
-            let corner = self.frame.corner(slot);
-            if child.active {
-                let c = fade(self.active_color, unfolded);
-                canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
-            }
-            if pressed == Some(j) && child.enabled {
-                let c = self.frame.pressed.unwrap_or(DEFAULT_PRESSED);
-                canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
-            }
+            let pressed = pressed == Some(j) && child.enabled;
             let alpha = if child.enabled { unfolded } else { unfolded * DISABLED_ALPHA };
-            draw_child(canvas, slot, side, font, child, fade(text, alpha), alpha);
+            let Some(f) = child.frame else {
+                let corner = self.frame.corner(slot);
+                if child.active {
+                    let c = fade(self.active_color, unfolded);
+                    canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
+                }
+                if pressed {
+                    let c = self.frame.pressed.unwrap_or(DEFAULT_PRESSED);
+                    canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
+                }
+                draw_child(canvas, slot, side, font, child, fade(text, alpha), alpha, t);
+                continue;
+            };
+            // Its own box, as a layer's item: background (the pressed one replaces
+            // it), content, then the default veil and the pressed scale.
+            let b = child.boxed(slot, r.h);
+            let corner = f.corner(b);
+            let mut fill = |c: Rgba| canvas.fill_rounded_rect(b.x, b.y, b.w, b.h, corner, fade(c, alpha));
+            if let (true, Some(bg)) = (f.has_background(), f.background) {
+                fill(bg);
+            }
+            if child.active {
+                fill(self.active_color);
+            }
+            if let (true, Some(c)) = (pressed, f.pressed) {
+                fill(c);
+            }
+            let text = fade(f.text.unwrap_or(text), alpha);
+            draw_child(canvas, slot, side, font, child, text, alpha, t);
+            if pressed && f.pressed.is_none() {
+                f.draw_pressed_veil(canvas, b);
+            }
+            if pressed && f.pressed_scale != 1.0 {
+                canvas.scale_region(b, f.pressed_scale, self.row_colour());
+            }
         }
         if let Some(s) = &self.seek {
             s.draw(canvas, self.seek_rect(r), font, &live.player, unfolded);
@@ -453,7 +601,20 @@ impl Expandable {
     }
 }
 
+impl Expandable {
+    /// The unfolded row's colour where nothing is drawn on it (its background over
+    /// the black bar): what a scaled-down child leaves behind.
+    fn row_colour(&self) -> Rgba {
+        match self.frame.background.filter(|_| self.frame.has_background()) {
+            Some(c) => Rgba::BLACK.lerp(c.with_alpha(0xff), c.3 as f32 / 255.0),
+            None => Rgba::BLACK,
+        }
+    }
+}
+
 /// Icon and label centred as a group in `slot`; the label is cut with "…" if needed.
+/// A child whose icon follows mpv cross-fades from the old icon to the new one.
+#[allow(clippy::too_many_arguments)]
 fn draw_child(
     canvas: &mut Canvas,
     slot: Rect,
@@ -462,9 +623,10 @@ fn draw_child(
     child: &Child,
     text: Rgba,
     alpha: f32,
+    t: Duration,
 ) {
     let px = label_px(slot.h);
-    let icon_w = child.glyph.as_ref().map_or(0.0, |g| g.width(side));
+    let icon_w = child.icon_w(side);
     let icon_gap = if icon_w > 0.0 { ICON_LABEL_GAP } else { 0.0 };
     let room = (slot.w - 2.0 * PADDING - icon_w - icon_gap).max(0.0);
     let mut label = ellipsize(font, &child.label, px, room);
@@ -482,9 +644,14 @@ fn draw_child(
     let lw = font.measure(&label, px);
     let x = (slot.x + (slot.w - (icon_w + gap + lw)) / 2.0).round();
     let (_, cy) = slot.center();
-    if let Some(g) = &child.glyph {
-        let icon = Rect::new(x, (cy - side / 2.0).round(), icon_w, side);
-        g.draw(canvas, icon, alpha);
+    let icon = Rect::new(x, (cy - side / 2.0).round(), icon_w, side);
+    let (now, before) = child.glyphs(t);
+    let k = before.map_or(1.0, |(_, k)| ease_in_out(k));
+    if let Some((g, _)) = before {
+        g.draw(canvas, icon, alpha * (1.0 - k));
+    }
+    if let Some(g) = now {
+        g.draw(canvas, icon, alpha * k);
     }
     let baseline = font.centered_baseline(cy, px);
     canvas.draw_text(font, &label, x + icon_w + gap, baseline, px, text);
@@ -508,14 +675,16 @@ fn widest_child(row_h: f32, children: &[Child], font: &Font) -> f32 {
     children
         .iter()
         .map(|c| {
-            let icon = c.glyph.as_ref().map_or(0.0, |g| g.width(side));
+            let icon = c.icon_w(side);
             let label = font.measure(&c.label, label_px(slot_h));
             let gap = if icon > 0.0 && label > 0.0 {
                 ICON_LABEL_GAP
             } else {
                 0.0
             };
-            icon + gap + label + 2.0 * PADDING
+            // A circle as wide as it is, with a little room on either side.
+            let circle = c.boxed(Rect::new(0.0, 0.0, 0.0, slot_h), row_h).w + 2.0 * CHILD_GAP;
+            (icon + gap + label + 2.0 * PADDING).max(circle)
         })
         .fold(MIN_CHILD_W, f32::max)
 }
@@ -552,15 +721,53 @@ mod tests {
             rec: None,
         };
         let children = (0..n)
-            .map(|j| Child {
-                id: j.to_string(),
-                glyph: None,
-                label: "ab".into(),
-                active: false,
-                enabled: true,
-            })
+            .map(|j| Child::new(j.to_string(), None, "ab".into()))
             .collect();
         Expandable::new("m", rect, spec, children, &font)
+    }
+
+    /// A glyph told apart by its colour.
+    fn tinted(c: Rgba) -> Glyph {
+        Glyph::Drawn(|_, _, _, _| {}, c)
+    }
+
+    fn colour(g: Option<&Glyph>) -> Option<Rgba> {
+        match g {
+            Some(Glyph::Drawn(_, c)) => Some(*c),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn state_icons_follow_mpv_and_cross_fade() {
+        let (pause, play, base) = (Rgba(1, 0, 0, 255), Rgba(2, 0, 0, 255), Rgba(3, 0, 0, 255));
+        let ms = Duration::from_millis;
+        let mut c = Child::new("pp".into(), Some(tinted(base)), String::new());
+        c.states = Some(StateGlyphs::new(Some(tinted(pause)), Some(tinted(play))));
+        // Not playing: the paused icon (play), alone.
+        let (now, before) = c.glyphs(ms(0));
+        assert_eq!((colour(now), before.is_some()), (Some(play), false));
+        // Starts playing with the row on screen: 150 ms from one to the other.
+        let s = c.states.as_mut().unwrap();
+        assert!(s.follow(true, ms(1000), true));
+        assert!(!s.follow(true, ms(1010), true), "no change, no restart");
+        let (now, before) = c.glyphs(ms(1075));
+        let (old, k) = before.unwrap();
+        assert_eq!((colour(now), colour(Some(old))), (Some(pause), Some(play)));
+        assert!((k - 0.5).abs() < 0.01, "{k}");
+        assert!(c.states.as_ref().unwrap().fading(ms(1149)));
+        assert!(!c.states.as_ref().unwrap().fading(ms(1150)));
+        assert!(c.glyphs(ms(1150)).1.is_none());
+        // Folded: it switches at once, no frames.
+        let s = c.states.as_mut().unwrap();
+        assert!(s.follow(false, ms(2000), false));
+        assert!(!s.fading(ms(2000)));
+        assert_eq!(colour(c.glyphs(ms(2000)).0), Some(play));
+        // A missing state icon falls back to `icon`.
+        let s = StateGlyphs::new(None, Some(tinted(play)));
+        assert_eq!(colour(s.pick(true, Some(&tinted(base)))), Some(base));
+        assert_eq!(colour(s.pick(false, Some(&tinted(base)))), Some(play));
+        assert!(s.pick(true, None).is_none());
     }
 
     #[test]

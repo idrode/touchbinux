@@ -490,10 +490,11 @@ un error.
 |---|---|---|
 | `id` | **obligatorio** | |
 | `action` | **obligatorio** | ver [Acciones](#acciones) |
-| `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o un icono integrado (`"builtin:folder"`, `"builtin:folder_classic"`) |
+| `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o un icono integrado (`"builtin:folder"`, `"builtin:folder_classic"`, `"builtin:grid_wave"`) |
 | `label` | — | texto junto al icono. Sin él, el icono va solo y centrado |
 | `color` | — | pinta el icono de un solo color (`"#rrggbb"` o `"#rrggbbaa"`) |
-| `anim_ms` | `300` | solo con las carpetas integradas: duración de la apertura (0-2000) |
+| `anim_ms` | `300` / `450` | solo con los iconos integrados: duración de la apertura de las carpetas (300) o de la ola de `grid_wave` (450); 0-2000 |
+| `grid` | `3` | solo con `builtin:grid_wave`: cuadrados por lado (2-4) |
 
 Necesita `icon`, `label` o ambos.
 
@@ -528,8 +529,32 @@ action = { type = "key", key = "KEY_PLAYPAUSE" }
    - **`builtin:folder_classic`**: la carpeta rellena de antes, con una hoja que
      asoma al abrirse; misma animación.
 
-   `color` cambia su color (por defecto `#f2b73f`). Otro nombre `builtin:...` es un
-   error de configuración. Como hijo de un `expandable` se dibujan cerradas.
+   `color` cambia su color (por defecto `#f2b73f`). Como hijo de un `expandable` se
+   dibujan cerradas.
+   - **`builtin:grid_wave`**: una cuadrícula de 3x3 cuadrados redondeados (`grid` =
+     2-4 por lado), centrada en el botón. Al tocarlo, una **ola diagonal** la recorre
+     de la esquina superior izquierda a la inferior derecha: cada cuadrado se encoge
+     (hasta ~0,55) y se hunde un poco, y vuelve, con un retraso según su fila +
+     columna. La ola dura `anim_ms` (450 ms por defecto); un toque durante la ola no
+     la reinicia. En reposo, 0 fps. `color` por defecto blanco (`#ffffff`). Como hijo
+     o icono de un `expandable` se dibuja quieta (3x3); como icono de un `expandable`
+     también hace la ola al tocarlo.
+
+   Otro nombre `builtin:...` es un error de configuración. Con todos funcionan
+   `shape`, `size`, `radius`, `pressed_background` y `pressed_scale` como con
+   cualquier icono.
+
+   ```toml
+   [[layers.items]]
+   type = "button"
+   id = "wallpaper"
+   icon = "builtin:grid_wave"
+   color = "#ffffff"
+   grid = 3
+   anim_ms = 450
+   width = 80
+   action = { type = "key", key = "KEY_F14" }
+   ```
 
 Si no se encuentra, se dibuja un **`?`** y el log dice `icons: icon "..." not found`.
 La barra es negra: usa iconos claros o `color`.
@@ -1043,6 +1068,7 @@ el código (`src/widgets.rs`).
 | Qué | Opción | Por defecto |
 |---|---|---|
 | Carpetas (`builtin:folder`, `builtin:folder_classic`) | `anim_ms` | 300 ms |
+| Ola de `builtin:grid_wave` | `anim_ms` | 450 ms |
 | Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF y `gif_picker` | `play` | `"on_tap"` |
@@ -1407,7 +1433,8 @@ TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 `dump_expandable` (elementos `expandable` y carpetas), `dump_gif_picker` (con
 `TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_player`
 (estados del reproductor y su panel), `dump_capture` (plegado, desplegado con un
-modo atenuado y grabando), `dump_frame_shapes`,
+modo atenuado y grabando), `dump_grid_wave` (reposo, cinco fotogramas de la ola y el
+final; también ampliados 4x), `dump_frame_shapes`,
 `dump_pressed` y `dump_frames` (sliders).
 
 Escenas (primer argumento): `bar` (la del servicio), `pattern` (patrón de prueba de

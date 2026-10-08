@@ -214,6 +214,17 @@ format = "%H:%M"
 
 # Built-in icons drawn by code: "builtin:folder" (thin outline) and
 # "builtin:folder_classic" (filled); both open when their button is tapped.
+# "builtin:grid_wave": a grid of rounded squares; a diagonal wave runs through it
+# when tapped (0 fps otherwise).
+# [[layers.items]]
+# type = "button"
+# id = "wallpaper"
+# icon = "builtin:grid_wave"
+# color = "#ffffff"                # default
+# grid = 3                         # squares per side, 2-4
+# anim_ms = 450                    # the wave, default
+# width = 80
+# action = { type = "key", key = "KEY_F14" }
 
 # More examples, commented out (see "Recetas" in docs/GUIA.md):
 #

@@ -8,6 +8,7 @@
 
 use crate::{
     anim::Animated,
+    capture::{RecLook, Recording},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
     expander::{Fold, expanded_rect, lerp_rect},
     frame::{DEFAULT_PRESSED, Frame, Shape},
@@ -38,7 +39,12 @@ pub enum Glyph {
     Mask(Rc<AlphaMask>, Rgba),
     /// Drawn by code at this openness (e.g. a closed `builtin:folder`).
     Drawn(fn(&mut Canvas, Rect, Rgba, f32), Rgba),
+    /// Drawn by code in its own colours, at this opacity (the capture modes).
+    Custom(DrawFn),
 }
+
+/// Draws an icon in a square at an opacity.
+pub type DrawFn = Rc<dyn Fn(&mut Canvas, Rect, f32)>;
 
 impl Glyph {
     /// How wide it is drawn when icons are `side` px.
@@ -64,6 +70,7 @@ impl Glyph {
                 canvas.draw_mask(mask, x, y, fade(*color, alpha));
             }
             Glyph::Drawn(draw, color) => draw(canvas, icon, fade(*color, alpha), 0.0),
+            Glyph::Custom(draw) => draw(canvas, icon, alpha),
         }
     }
 }
@@ -82,7 +89,12 @@ pub struct Child {
     pub label: String,
     /// Set by the daemon (e.g. "recording", "playing"); drawn on `active_color`.
     pub active: bool,
+    /// Off (e.g. a capture mode whose tools are missing): drawn faded, taps ignored.
+    pub enabled: bool,
 }
+
+/// How faded a disabled child is drawn.
+const DISABLED_ALPHA: f32 = 0.3;
 
 /// Which part of the unfolded row a point is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +135,10 @@ pub struct Expandable {
     /// With a seek bar, children are this wide (the widest one's natural width)
     /// and the bar takes the rest; otherwise they share the row equally.
     child_w: Option<f32>,
+    /// A capture item: how it looks while recording.
+    rec_look: Option<RecLook>,
+    /// The recording it shows (capture items only), as of the last `advance`.
+    recording: Option<Recording>,
 }
 
 /// What `Expandable::new` needs besides its id, rect and children.
@@ -136,6 +152,8 @@ pub struct Spec {
     pub fold: Fold,
     pub picks: bool,
     pub seek: Option<SeekBar>,
+    /// A capture item: shows `Live::recording` this way.
+    pub rec: Option<RecLook>,
 }
 
 impl Expandable {
@@ -157,6 +175,8 @@ impl Expandable {
             picks: spec.picks,
             seek: spec.seek,
             child_w: None,
+            rec_look: spec.rec,
+            recording: None,
         };
         e.place(font);
         e
@@ -239,12 +259,28 @@ impl Expandable {
     /// it is unfolded, and which children are active.
     pub fn inherit(&mut self, old: &Expandable) {
         self.fold.inherit(&old.fold);
+        if self.rec_look.is_some() {
+            self.recording = old.recording;
+            self.enabled = old.enabled;
+        }
         if let (Some(s), Some(o)) = (&mut self.seek, &old.seek) {
             s.inherit(o);
         }
         for c in &mut self.children {
-            c.active = old.children.iter().any(|o| o.id == c.id && o.active);
+            let o = old.children.iter().find(|o| o.id == c.id);
+            c.active = o.is_some_and(|o| o.active);
+            c.enabled = o.is_none_or(|o| o.enabled);
         }
+    }
+
+    /// Enables or disables the child `id`; returns whether that changed anything.
+    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> bool {
+        let mut changed = false;
+        for c in self.children.iter_mut().filter(|c| c.id == id && c.enabled != enabled) {
+            c.enabled = enabled;
+            changed = true;
+        }
+        changed
     }
 
     /// Marks the child `id` active or not; returns whether that changed anything.
@@ -270,13 +306,25 @@ impl Expandable {
         if let Some(s) = &mut self.seek {
             s.advance(t, &live.player);
         }
+        let mut rec = false;
+        if self.rec_look.is_some() && self.recording != live.recording {
+            // A recording that starts (e.g. found when the item was tapped) folds
+            // it: the folded item is what shows it and what stops it.
+            if self.recording.is_none() {
+                self.fold.collapse(t);
+            }
+            self.recording = live.recording;
+            self.enabled = self.recording.is_none();
+            rec = true;
+        }
         let face = self.face.advance(t, live);
-        self.fold.advance(t) | face
+        self.fold.advance(t) | face | rec
     }
 
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
         let seek = self.seek.as_ref().and_then(|s| s.next_change(t));
-        [self.fold.next_change(t), self.face.next_change(t), seek]
+        let rec = self.recording.map(|r| r.next_change(t));
+        [self.fold.next_change(t), self.face.next_change(t), seek, rec]
             .into_iter()
             .flatten()
             .min()
@@ -327,6 +375,10 @@ impl Expandable {
         let k = self.fold.progress(t);
         let r = self.current_rect(t);
         self.frame.draw_background(canvas, r);
+        if let (Some(look), Some(rec)) = (self.rec_look, self.recording) {
+            rec.draw(canvas, r, self.frame.corner(r), t, font, look);
+            return;
+        }
 
         // Folded: icon and label centred as a group. Unfolded: the icon alone at the
         // left, as a header. The icon slides between the two; the label fades out in
@@ -388,19 +440,12 @@ impl Expandable {
                 let c = fade(self.active_color, unfolded);
                 canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
             }
-            if pressed == Some(j) {
+            if pressed == Some(j) && child.enabled {
                 let c = self.frame.pressed.unwrap_or(DEFAULT_PRESSED);
                 canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
             }
-            draw_child(
-                canvas,
-                slot,
-                side,
-                font,
-                child,
-                fade(text, unfolded),
-                unfolded,
-            );
+            let alpha = if child.enabled { unfolded } else { unfolded * DISABLED_ALPHA };
+            draw_child(canvas, slot, side, font, child, fade(text, alpha), alpha);
         }
         if let Some(s) = &self.seek {
             s.draw(canvas, self.seek_rect(r), font, &live.player, unfolded);
@@ -504,6 +549,7 @@ mod tests {
             fold: Fold::new(Duration::ZERO, Duration::from_secs(3)),
             picks: false,
             seek: seek.then(|| SeekBar::new(None, None, true, None)),
+            rec: None,
         };
         let children = (0..n)
             .map(|j| Child {
@@ -511,6 +557,7 @@ mod tests {
                 glyph: None,
                 label: "ab".into(),
                 active: false,
+                enabled: true,
             })
             .collect();
         Expandable::new("m", rect, spec, children, &font)

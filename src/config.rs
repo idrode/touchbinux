@@ -2,6 +2,7 @@
 
 use crate::{
     canvas::Rgba,
+    capture::CaptureMode,
     frame::{Background, Frame, Radius, Shape},
     gif::{Decoded, Play},
     hyprctl::HyprAction,
@@ -116,6 +117,7 @@ pub enum ItemKind {
     Expandable,
     GifPicker,
     Player,
+    Capture,
     Spacer,
 }
 
@@ -132,6 +134,7 @@ impl ItemKind {
             ItemKind::Expandable => "expandable",
             ItemKind::GifPicker => "gif_picker",
             ItemKind::Player => "player",
+            ItemKind::Capture => "capture",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -237,6 +240,17 @@ pub struct ItemConfig {
     /// player: current and total time at the seek bar's ends (default true).
     #[serde(default)]
     pub show_time: Option<bool>,
+    /// capture: absolute path of the screenshot script, run with `region`,
+    /// `window` or `full`.
+    #[serde(default)]
+    pub screenshot: Option<String>,
+    /// capture: absolute path of the record script, run with `region` or `full`;
+    /// it starts wf-recorder detached (or stops it, if one runs).
+    #[serde(default)]
+    pub record: Option<String>,
+    /// capture: the item's background while recording.
+    #[serde(default)]
+    pub record_color: Option<Color>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
@@ -322,7 +336,7 @@ impl ItemConfig {
                 ItemKind::Gif => 60.0,
                 ItemKind::Text => 200.0,
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
-                ItemKind::GifPicker | ItemKind::Player => 80.0,
+                ItemKind::GifPicker | ItemKind::Player | ItemKind::Capture => 80.0,
             }),
         }
     }
@@ -348,6 +362,29 @@ impl ItemConfig {
         self.children.as_deref().unwrap_or_default()
     }
 
+    /// A capture's children, in order: those whose script is configured, with
+    /// their ids (`<id>.<mode key>`).
+    pub fn capture_children(&self) -> Vec<(String, CaptureMode)> {
+        if self.kind != ItemKind::Capture {
+            return Vec::new();
+        }
+        let parent = self.id().unwrap_or("");
+        CaptureMode::ALL
+            .into_iter()
+            .filter(|m| self.capture_script(*m).is_some())
+            .map(|m| (format!("{parent}.{}", m.key()), m))
+            .collect()
+    }
+
+    /// The script a capture mode runs.
+    pub fn capture_script(&self, mode: CaptureMode) -> Option<&str> {
+        if mode.records() {
+            self.record.as_deref()
+        } else {
+            self.screenshot.as_deref()
+        }
+    }
+
     /// An expandable's children with their ids.
     pub fn child_ids(&self) -> impl Iterator<Item = (String, &ChildConfig)> {
         let parent = self.id().unwrap_or("");
@@ -370,7 +407,7 @@ impl ItemConfig {
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
-            ItemKind::Expandable | ItemKind::GifPicker | ItemKind::Player => &[
+            ItemKind::Expandable | ItemKind::GifPicker | ItemKind::Player | ItemKind::Capture => &[
                 "shape",
                 "radius",
                 "background",
@@ -448,6 +485,19 @@ impl ItemConfig {
                 "seek_height",
                 "show_time",
             ],
+            ItemKind::Capture => &[
+                "id",
+                "icon",
+                "label",
+                "color",
+                "anim_ms",
+                "expand_width",
+                "collapse_after_ms",
+                "text_color",
+                "screenshot",
+                "record",
+                "record_color",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -479,6 +529,9 @@ impl ItemConfig {
             ("seek_color", self.seek_color.is_some()),
             ("seek_height", self.seek_height.is_some()),
             ("show_time", self.show_time.is_some()),
+            ("screenshot", self.screenshot.is_some()),
+            ("record", self.record.is_some()),
+            ("record_color", self.record_color.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -526,6 +579,16 @@ impl ItemConfig {
             }
             if self.seek_height.is_some_and(|h| !SEEK_HEIGHT.contains(&h)) {
                 bail!("{what}: seek_height must be in {SEEK_HEIGHT:?} px");
+            }
+        }
+        if self.kind == ItemKind::Capture {
+            if self.screenshot.is_none() && self.record.is_none() {
+                bail!("{what}: a capture needs `screenshot`, `record` or both (script paths)");
+            }
+            for (field, path) in [("screenshot", &self.screenshot), ("record", &self.record)] {
+                if path.as_deref().is_some_and(|p| !Path::new(p).is_absolute()) {
+                    bail!("{what}: {field} must be an absolute path");
+                }
             }
         }
         if self.kind == ItemKind::Gif
@@ -853,7 +916,8 @@ impl Config {
             }
             for item in &layer.items {
                 let ids = item.id().map(str::to_string).into_iter();
-                for id in ids.chain(item.child_ids().map(|(id, _)| id)) {
+                let captures = item.capture_children().into_iter().map(|(id, _)| id);
+                for id in ids.chain(item.child_ids().map(|(id, _)| id)).chain(captures) {
                     check_id(&id).with_context(|| format!("layer {:?}", layer.id))?;
                 }
             }
@@ -958,6 +1022,9 @@ impl Config {
                 seek_color: None,
                 seek_height: None,
                 show_time: None,
+                screenshot: None,
+                record: None,
+                record_color: None,
                 shape: None,
                 radius: None,
                 background: None,
@@ -1686,6 +1753,73 @@ mod tests {
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif'\npath='/a.gif'\nthumb_size=40").is_err());
         let err = format!("{:#}", parse(&item("")).unwrap_err());
         assert!(err.contains("a gif_picker needs `dir`"), "{err}");
+    }
+
+    #[test]
+    fn captures() {
+        let c = parse(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "capture"
+            screenshot = "/home/u/.config/hypr/scripts/screenshot.sh"
+            record = "/home/u/.config/hypr/scripts/toggle-record.sh"
+            record_color = "#ff0000"
+            color = "#00ffb7"
+            text_color = "#ffffff"
+            pressed_background = "#00000000"
+            [[layers.items]]
+            type = "capture"
+            id = "shots"
+            screenshot = "/usr/local/bin/shot"
+            "##,
+        )
+        .unwrap();
+        let items = &c.layers[0].items;
+        let ids = |i: &ItemConfig| -> Vec<String> {
+            i.capture_children().into_iter().map(|(id, _)| id).collect()
+        };
+        assert_eq!(
+            ids(&items[0]),
+            [
+                "capture.shot_region",
+                "capture.shot_window",
+                "capture.shot_full",
+                "capture.record_region",
+                "capture.record_full",
+            ]
+        );
+        // Only the configured script's modes.
+        assert_eq!(ids(&items[1]), ["shots.shot_region", "shots.shot_window", "shots.shot_full"]);
+        assert_eq!(
+            items[0].capture_script(CaptureMode::RecordFull),
+            Some("/home/u/.config/hypr/scripts/toggle-record.sh")
+        );
+        assert_eq!(items[1].capture_script(CaptureMode::RecordFull), None);
+        // Its children have no configured action: the daemon runs the scripts.
+        assert!(c.action("capture.shot_full").is_none());
+
+        let item = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='capture'\n{body}");
+        for body in [
+            "",
+            "screenshot='shot.sh'",
+            "record='~/rec.sh'",
+            "screenshot='/s'\nrecord_color='red'",
+            "screenshot='/s'\naction={type='socket'}",
+            "screenshot='/s'\nchildren=[]",
+            "screenshot='/s'\nsocket='/x'",
+            "screenshot='/s'\npressed_scale=0.9",
+            "screenshot='/s'\nrecorder='/r'",
+        ] {
+            assert!(parse(&item(body)).is_err(), "accepted: {body}");
+        }
+        let err = format!("{:#}", parse(&item("")).unwrap_err());
+        assert!(err.contains("a capture needs `screenshot`, `record` or both"), "{err}");
+        // Its children's ids are taken like any other.
+        let clash = item("screenshot='/s'\n[[layers.items]]\ntype='button'\nid='capture.shot_full'\nlabel='x'\naction={type='socket'}");
+        assert!(parse(&clash).is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nrecord='/r'").is_err());
     }
 
     #[test]

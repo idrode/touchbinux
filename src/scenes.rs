@@ -4,6 +4,7 @@
 
 use crate::{
     anim::Animated,
+    capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, ItemConfig, ItemKind, LayerConfig},
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, Still},
@@ -18,7 +19,7 @@ use crate::{
     touch::Phase,
     widgets::{
         BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, FolderStyle,
-        Level, Live, Widget, draw_folder, draw_folder_lines,
+        ICON, Level, Live, TEXT, Widget, draw_folder, draw_folder_lines,
     },
 };
 use anyhow::{Result, bail};
@@ -665,6 +666,8 @@ impl Scene {
                             match part {
                                 // The icon at the left folds it back.
                                 Part::Header => m.fold.collapse(t),
+                                // Its tools are missing: the daemon logged why.
+                                Part::Child(j) if !m.children[j].enabled => {}
                                 Part::Child(j) => {
                                     let child = m.children[j].id.clone();
                                     out.push(if m.picks {
@@ -794,6 +797,7 @@ impl Scene {
                 id: name,
                 glyph: Some(Glyph::Image(img)),
                 label: String::new(),
+                enabled: true,
             })
             .collect::<Vec<_>>();
         m.enabled = !children.is_empty();
@@ -829,6 +833,16 @@ impl Scene {
         let mut changed = false;
         for m in &mut self.menus {
             changed |= m.set_active(child, active);
+        }
+        changed
+    }
+
+    /// Enables or disables an expandable's child (by id), e.g. a capture mode whose
+    /// tools are missing. Returns whether anything changed.
+    pub fn set_child_enabled(&mut self, child: &str, enabled: bool) -> bool {
+        let mut changed = false;
+        for m in &mut self.menus {
+            changed |= m.set_enabled(child, enabled);
         }
         changed
     }
@@ -1432,6 +1446,42 @@ pub fn bar(
                     .menus
                     .push(Expandable::new(id, rect, spec, children, font));
             }
+            ItemKind::Capture => {
+                let color = item.color.map_or(ICON, |c| c.0);
+                let rec = item.record_color.map_or(capture::DEFAULT_RECORD_COLOR, |c| c.0);
+                let children = item
+                    .capture_children()
+                    .into_iter()
+                    .map(|(id, mode)| {
+                        let draw = move |canvas: &mut Canvas, icon, alpha| {
+                            let fade = |c| expandable::fade(c, alpha);
+                            mode.draw(canvas, icon, fade(color), fade(rec));
+                        };
+                        Child {
+                            id,
+                            glyph: Some(Glyph::Custom(Rc::new(draw))),
+                            label: String::new(),
+                            active: false,
+                            enabled: true,
+                        }
+                    })
+                    .collect();
+                let face: Box<dyn Animated> = match item.icon.as_deref() {
+                    Some(name) => {
+                        let color = item.color.map(|c| c.0);
+                        Box::new(Still(static_glyph(name, color, icons, font, size)))
+                    }
+                    None => Box::new(Still(Glyph::Drawn(capture::draw_viewfinder, color))),
+                };
+                let mut spec = menu_spec(item, area, frame, face, false);
+                spec.rec = Some(RecLook {
+                    color: rec,
+                    text: frame.text.unwrap_or(TEXT),
+                });
+                scene
+                    .menus
+                    .push(Expandable::new(id, rect, spec, children, font));
+            }
             ItemKind::GifPicker => {
                 // Filled in by the daemon once its folder has been read: until then
                 // (and while it has no GIFs) a grey picture that doesn't unfold.
@@ -1538,6 +1588,7 @@ fn menu_spec(
         ),
         picks,
         seek: None,
+        rec: None,
     }
 }
 
@@ -1552,6 +1603,7 @@ fn children(item: &ItemConfig, icons: &mut IconResolver, font: &Font, size: f32)
                 .map(|name| static_glyph(name, c.color.map(|c| c.0), icons, font, size)),
             label: c.label.clone().unwrap_or_default(),
             active: false,
+            enabled: true,
         })
         .collect()
 }
@@ -1673,6 +1725,7 @@ mod tests {
             battery: None,
             now: chrono::Local::now(),
             player: Default::default(),
+            recording: None,
         }
     }
 
@@ -2969,5 +3022,126 @@ mod tests {
             &mut out,
         );
         shot(&mut s, &live, MS(3500), "7-brightness-open");
+    }
+
+    const CAPTURE: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "capture"
+        width = 100
+        screenshot = "/s"
+        record = "/r"
+    "##;
+
+    fn recording(since: f64) -> Option<capture::Recording> {
+        Some(capture::Recording { since, stopping: false })
+    }
+
+    #[test]
+    fn capture_unfolds_into_its_modes_and_runs_them() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, CAPTURE);
+        let live = live();
+        s.advance(MS(0), &live);
+        assert_eq!(s.next_change(MS(0)), None, "idle: no frames");
+        assert_eq!(s.menus[0].children.len(), 5);
+        let r = s.menus[0].rect;
+        let (_, ev) = tap(&mut s, mid(r), MS(100), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("capture".into())]);
+        assert!(s.menus[0].fold.is_open());
+        s.advance(MS(600), &live);
+        let at = child_mid(&s, 3);
+        let (_, ev) = tap(&mut s, at, MS(700), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("capture.record_region".into())]);
+        assert!(!s.menus[0].fold.is_open(), "a mode folds it");
+
+        // A mode whose tools are missing: drawn faded, its taps do nothing.
+        assert!(s.set_child_enabled("capture.shot_window", false));
+        assert!(!s.set_child_enabled("capture.shot_window", false));
+        tap(&mut s, mid(r), MS(1000), &font);
+        s.advance(MS(1500), &live);
+        let at = child_mid(&s, 1);
+        let (_, ev) = tap(&mut s, at, MS(1600), &font);
+        assert!(ev.is_empty(), "{ev:?}");
+        assert!(s.menus[0].fold.is_open(), "still open");
+        let at = child_mid(&s, 2);
+        let (_, ev) = tap(&mut s, at, MS(1700), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("capture.shot_full".into())]);
+    }
+
+    #[test]
+    fn capture_shows_a_recording_and_a_tap_stops_it() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, CAPTURE);
+        let mut live = live();
+        let r = s.menus[0].rect;
+        let mut canvas = Canvas::new(W, H).unwrap();
+        // Found while unfolded (a recording started by a Hyprland bind, seen when the
+        // item was tapped): it folds, to show it.
+        tap(&mut s, mid(r), MS(0), &font);
+        s.advance(MS(500), &live);
+        assert!(s.menus[0].fold.is_open());
+        live.recording = recording(-65.0);
+        assert!(s.advance(MS(600), &live));
+        assert!(!s.menus[0].fold.is_open());
+        // Twice a second: the dot blinks, the timer counts.
+        s.advance(MS(2000), &live);
+        assert_eq!(s.next_change(MS(2000)), Some(MS(2500)));
+        assert_eq!(s.next_change(MS(2600)), Some(MS(3000)));
+        s.draw(&mut canvas, MS(2000), &font, &live).unwrap();
+        let (cx, cy) = mid(r);
+        let Rgba(r0, g0, b0, a0) = capture::DEFAULT_RECORD_COLOR;
+        let red = [r0, g0, b0, a0];
+        assert_eq!(pixel(&canvas, r.x + 3.0, cy), red, "the item turns red");
+        // A tap doesn't unfold it: it goes to the daemon, which stops the recording.
+        let (_, ev) = tap(&mut s, (cx, cy), MS(3000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("capture".into())]);
+        s.advance(MS(3500), &live);
+        assert!(!s.menus[0].fold.is_active(MS(3500)));
+        // Ended: back to the icon, no frames.
+        live.recording = None;
+        assert!(s.advance(MS(4000), &live));
+        assert_eq!(s.next_change(MS(4000)), None);
+        s.draw(&mut canvas, MS(4000), &font, &live).unwrap();
+        assert_ne!(pixel(&canvas, r.x + 3.0, cy), red);
+        let (_, ev) = tap(&mut s, (cx, cy), MS(4100), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("capture".into())]);
+        assert!(s.menus[0].fold.is_open(), "unfolds again");
+    }
+
+    /// Not a check: the capture item folded, unfolded (one mode disabled) and
+    /// recording, as PNGs in $TOUCHBINUX_FRAMES.
+    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_capture -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_capture() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = menu_scene(&font, CAPTURE);
+        let mut live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, live: &Live, t: u64, name: &str| {
+            s.advance(MS(t), live);
+            s.draw(&mut canvas, MS(t), &font, live).unwrap();
+            canvas
+                .save_png(Path::new(&format!("{dir}/c-{name}.png")))
+                .unwrap();
+        };
+        shot(&mut s, &live, 0, "a-folded");
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(100), &font);
+        shot(&mut s, &live, 800, "b-open");
+        s.set_child_enabled("capture.shot_window", false);
+        shot(&mut s, &live, 900, "c-open-window-off");
+        s.menus[0].fold.collapse(MS(1000));
+        live.recording = recording(-73.0);
+        shot(&mut s, &live, 2000, "d-recording-dot");
+        shot(&mut s, &live, 2600, "e-recording-blink");
     }
 }

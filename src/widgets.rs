@@ -34,6 +34,8 @@ pub struct Live {
     pub now: DateTime<Local>,
     /// mpv, for the player item.
     pub player: crate::mpv::MpvState,
+    /// The session user's screen recording, for capture items.
+    pub recording: Option<crate::capture::Recording>,
 }
 
 pub struct DrawCx<'a> {

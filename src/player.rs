@@ -431,6 +431,7 @@ mod tests {
             battery: None,
             now: chrono::Local::now(),
             player: p,
+            recording: None,
         }
     }
 

@@ -35,6 +35,10 @@ pub enum Purpose {
     VolumeGet,
     /// Long-running `pactl subscribe`.
     VolumeMonitor,
+    /// A capture item's screenshot script (logged on failure, like an action).
+    Screenshot,
+    /// A capture item's record script: when it ends, wf-recorder is looked for.
+    Record,
 }
 
 pub struct Finished {

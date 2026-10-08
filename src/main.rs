@@ -1,6 +1,7 @@
 mod anim;
 mod battery;
 mod canvas;
+mod capture;
 mod config;
 mod display;
 mod expandable;
@@ -30,6 +31,7 @@ use anim::{Pulse, Spinner};
 use anyhow::{Result, anyhow};
 use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
+use capture::CaptureMode;
 use config::{Action, Config, ItemConfig, ItemKind};
 use gifpick::{Loader, Reply, Request};
 use display::DrmBackend;
@@ -207,6 +209,13 @@ struct App {
     state: state::StateFile,
     /// mpv's state, while the config has a player.
     mpv: Option<mpv::Mpv>,
+    /// Scene time 0: the event loop's clock starts here.
+    epoch: Instant,
+    /// The session user's wf-recorder, for capture items.
+    recorder: capture::Recorder,
+    /// Why each capture child is disabled (missing script or tools), as last
+    /// logged; by child id.
+    capture_missing: BTreeMap<String, String>,
 }
 
 /// A gif_picker's folder as last read, and its GIF.
@@ -231,6 +240,7 @@ impl App {
             battery: self.battery_status,
             now: chrono::Local::now(),
             player: self.mpv.as_ref().map(|m| m.state.clone()).unwrap_or_default(),
+            recording: self.recorder.recording(),
         }
     }
 
@@ -261,7 +271,86 @@ impl App {
         scene.inherit_interaction(&self.scene);
         self.scene = scene;
         self.sync_pickers();
+        self.sync_capture();
         Ok(())
+    }
+
+    fn capture_items(&self) -> impl Iterator<Item = &ItemConfig> {
+        let items = self.config.layers.iter().flat_map(|l| &l.items);
+        items.filter(|i| i.kind == ItemKind::Capture)
+    }
+
+    /// The capture child `id`: its script and mode.
+    fn capture_child(&self, id: &str) -> Option<(String, CaptureMode)> {
+        self.capture_items().find_map(|item| {
+            let (_, mode) = item.capture_children().into_iter().find(|(c, _)| c == id)?;
+            Some((item.capture_script(mode)?.to_string(), mode))
+        })
+    }
+
+    /// Disables the capture children whose script or tools are missing (logging
+    /// why, once), and enables the rest. The other modes keep working.
+    fn sync_capture(&mut self) {
+        let Some(user) = self.runner.user().cloned() else {
+            return;
+        };
+        let children: Vec<_> = self
+            .capture_items()
+            .flat_map(|item| {
+                let script = |m| item.capture_script(m).unwrap_or_default().to_string();
+                item.capture_children().into_iter().map(move |(id, m)| (id, script(m), m))
+            })
+            .collect();
+        let mut missing = BTreeMap::new();
+        for (id, script, mode) in children {
+            let why = if !capture::executable(Path::new(&script)) {
+                Some(format!("{script} is not an executable file"))
+            } else {
+                let tools = capture::missing_tools(&user, mode.tools());
+                (!tools.is_empty()).then(|| format!("missing {} in PATH", tools.join(", ")))
+            };
+            self.scene.set_child_enabled(&id, why.is_none());
+            if let Some(why) = why {
+                if self.capture_missing.get(&id) != Some(&why) {
+                    eprintln!("capture: {id} disabled: {why}");
+                }
+                missing.insert(id, why);
+            }
+        }
+        self.capture_missing = missing;
+    }
+
+    /// A tap on a capture item (folded): stops the recording it shows; otherwise it
+    /// unfolds, and a recording started elsewhere (a Hyprland bind) is looked for.
+    fn on_capture_tap(&mut self) {
+        let now = Instant::now();
+        if self.recorder.recording().is_some() {
+            self.recorder.stop(now);
+        } else {
+            self.recorder.scan(now);
+        }
+    }
+
+    /// Runs a capture child's script, as the session user in the Wayland session.
+    fn run_capture(&mut self, id: &str, script: String, mode: CaptureMode) {
+        if !self.runner.has_hypr() {
+            eprintln!("capture: Hyprland not connected (no Wayland session), ignoring {id}");
+            return;
+        }
+        if let Some(why) = self.capture_missing.get(id) {
+            eprintln!("capture: {id} disabled: {why}");
+            return;
+        }
+        let purpose = if mode.records() {
+            Purpose::Record
+        } else {
+            Purpose::Screenshot
+        };
+        let argv = [script, mode.arg().to_string()];
+        eprintln!("capture: {}", argv.join(" "));
+        if let Err(e) = self.runner.spawn(&argv, Some(mode.timeout()), purpose, false) {
+            eprintln!("capture: {e:#}");
+        }
     }
 
     /// Connects to mpv if the config has a player (and only then), as the session
@@ -280,6 +369,15 @@ impl App {
             eprintln!("player: no session user (run_as); not connecting to mpv as root");
         }
         self.mpv = want.map(|(path, owner)| mpv::Mpv::new(&path, owner));
+    }
+
+    /// Follows the session user's recordings while the config has a capture item.
+    fn sync_recorder(&mut self) {
+        let owner = self.runner.user().map(|u| u.uid);
+        let want = owner.filter(|_| self.capture_items().next().is_some());
+        self.recorder.set_owner(want);
+        // Already recording when the daemon (re)starts.
+        self.recorder.scan(Instant::now());
     }
 
     /// The config of gif_picker `id`.
@@ -671,6 +769,8 @@ impl App {
                 self.runner
                     .set_user(user::resolve(self.config.run_as.as_deref(), Some(&path)));
                 self.sync_mpv();
+                self.sync_recorder();
+                self.sync_capture();
             }
             Err(e) => eprintln!("config: {e:#}\nconfig: keeping the previous configuration"),
         }
@@ -722,6 +822,14 @@ impl App {
         // while it has nothing to show, in case GIFs appeared).
         if self.picker_config(id).is_some() {
             self.scan_picker(id);
+        }
+        if self.capture_items().any(|i| i.id() == Some(id)) {
+            self.on_capture_tap();
+            return;
+        }
+        if let Some((script, mode)) = self.capture_child(id) {
+            self.run_capture(id, script, mode);
+            return;
         }
         if let Some(ws) = id.strip_prefix("workspace:") {
             self.hyprctl(&HyprAction::Workspace(ws.into()));
@@ -924,6 +1032,7 @@ struct AppParts {
 fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> Result<App> {
     let mut runner = Runner::new(p.session);
     runner.set_hypr(hypr.session_env());
+    let epoch = Instant::now();
     let mut app = App {
         args: p.args,
         config_path: p.config_path,
@@ -950,11 +1059,16 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         pickers: BTreeMap::new(),
         state: state::StateFile::open(),
         mpv: None,
+        epoch,
+        recorder: capture::Recorder::new(epoch),
+        capture_missing: BTreeMap::new(),
     };
     app.sync_mpv();
+    app.sync_recorder();
     app.refresh_battery();
     app.scene = app.build_scene()?;
     app.sync_pickers();
+    app.sync_capture();
     Ok(app)
 }
 
@@ -1139,7 +1253,7 @@ fn run(
     let mut mpv_watch: Option<u64> = None;
     let mut mpv_stream: Option<u64> = None;
     let debug_touch = app.args.scene == "touch";
-    let start = Instant::now();
+    let start = app.epoch;
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
     let mut dirty = true;
     // When the next animation frame is due, if any.
@@ -1150,6 +1264,7 @@ fn run(
         // Housekeeping that may be due: command timeouts, throttled level changes.
         let now = Instant::now();
         app.runner.kill_expired(now);
+        dirty |= app.recorder.poll(now);
         app.vol.poll(now, &mut app.runner);
         if let Some(b) = &mut app.backlight {
             b.poll(now);
@@ -1225,6 +1340,7 @@ fn run(
             app.vol.next_deadline(now, &app.runner),
             app.backlight.as_ref().and_then(|b| b.next_deadline(now)),
             app.mpv.as_ref().and_then(mpv::Mpv::next_deadline),
+            app.recorder.next_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -1249,6 +1365,9 @@ fn run(
                                 for f in app.runner.reap() {
                                     if f.purpose == Purpose::Hyprctl {
                                         App::on_hyprctl_finished(&f);
+                                    }
+                                    if f.purpose == Purpose::Record && f.ok {
+                                        app.recorder.probe(Instant::now());
                                     }
                                     if let Some((v, muted)) =
                                         app.vol.on_finished(&f, Instant::now())

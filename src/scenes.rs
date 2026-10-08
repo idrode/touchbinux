@@ -6,7 +6,10 @@ use crate::{
     anim::Animated,
     capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
-    config::{BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, ItemConfig, ItemKind, LayerConfig},
+    config::{
+        BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE, ItemConfig, ItemKind,
+        LayerConfig,
+    },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     frame::Frame,
@@ -19,7 +22,8 @@ use crate::{
     touch::Phase,
     widgets::{
         BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, FolderStyle,
-        ICON, Level, Live, TEXT, Widget, draw_folder, draw_folder_lines,
+        DEFAULT_GRID, GRID_WAVE_ANIM, GRID_WHITE, GridWave, ICON, Level, Live, TEXT, Widget,
+        draw_folder, draw_folder_lines, draw_grid_still,
     },
 };
 use anyhow::{Result, bail};
@@ -1421,6 +1425,9 @@ pub fn bar(
                 let children = children(item, icons, font, size);
                 let face: Box<dyn Animated> = match folder_style(item.icon.as_deref()) {
                     Some(style) => Box::new(folder(item.color.map(|c| c.0), style, None)),
+                    None if item.icon.as_deref() == Some(BUILTIN_GRID_WAVE) => {
+                        Box::new(grid_wave(item))
+                    }
                     None => {
                         let name = item.icon.as_deref().unwrap_or("");
                         let color = item.color.map(|c| c.0);
@@ -1549,6 +1556,12 @@ fn button_icon(item: &ItemConfig, icons: &mut IconResolver, size: f32) -> Icon {
             width: size,
         };
     }
+    if name == BUILTIN_GRID_WAVE {
+        return Icon::Animated {
+            item: Box::new(grid_wave(item)),
+            width: size,
+        };
+    }
     let found = icons.named(name);
     let Some(color) = color else {
         return found.into();
@@ -1635,6 +1648,15 @@ fn folder(color: Option<Rgba>, style: FolderStyle, anim: Option<Duration>) -> Fo
     }
 }
 
+/// `builtin:grid_wave` with `item`'s `color`, `grid` and `anim_ms`.
+fn grid_wave(item: &ItemConfig) -> GridWave {
+    GridWave::new(
+        item.color.map_or(GRID_WHITE, |c| c.0),
+        item.grid.unwrap_or(DEFAULT_GRID),
+        item.anim().unwrap_or(GRID_WAVE_ANIM),
+    )
+}
+
 /// An icon that doesn't animate (built-in folders are drawn closed), rasterised
 /// once at `size`, optionally painted in `color`. Not found or unreadable: a tile
 /// with "?".
@@ -1650,6 +1672,9 @@ fn static_glyph(
         Some(FolderStyle::Lines) => return Glyph::Drawn(draw_folder_lines, folder),
         Some(FolderStyle::Classic) => return Glyph::Drawn(draw_folder, folder),
         None => {}
+    }
+    if name == BUILTIN_GRID_WAVE {
+        return Glyph::Drawn(draw_grid_still, color.unwrap_or(GRID_WHITE));
     }
     let px = size as u32;
     let glyph = match (icons.named(name), color) {
@@ -3143,5 +3168,145 @@ mod tests {
         live.recording = recording(-73.0);
         shot(&mut s, &live, 2000, "d-recording-dot");
         shot(&mut s, &live, 2600, "e-recording-blink");
+    }
+
+    const GRID_WAVE: &str = r##"
+        [[layers]]
+        id = "m"
+        [[layers.items]]
+        type = "button"
+        id = "wall"
+        icon = "builtin:grid_wave"
+        background = "transparent"
+        width = 80
+        action = { type = "socket" }
+    "##;
+
+    /// Bounding box (x0, y0, x1, y1, inclusive) of the lit pixels inside `r`.
+    fn lit_box(c: &Canvas, r: Rect) -> (u32, u32, u32, u32) {
+        let mut b = (u32::MAX, u32::MAX, 0, 0);
+        for y in r.y as u32..(r.y + r.h) as u32 {
+            for x in r.x as u32..(r.x + r.w) as u32 {
+                if pixel(c, x as f32, y as f32)[..3].iter().any(|&v| v > 0) {
+                    b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+                }
+            }
+        }
+        b
+    }
+
+    /// How much white each of the `n`x`n` cells of `bx` (the grid at rest) holds.
+    fn cell_ink(c: &Canvas, (x0, y0, x1, y1): (u32, u32, u32, u32), n: u32) -> Vec<u32> {
+        let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
+        let mut ink = vec![0; (n * n) as usize];
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (col, row) = ((x - x0) * n / w, (y - y0) * n / h);
+                ink[(row * n + col) as usize] += pixel(c, x as f32, y as f32)[0] as u32;
+            }
+        }
+        ink
+    }
+
+    #[test]
+    fn grid_wave_is_centred_waves_and_comes_back() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, GRID_WAVE);
+        let live = live();
+        let r = s.buttons[0].rect;
+        let mut rest = Canvas::new(W, H).unwrap();
+        s.draw(&mut rest, MS(0), &font, &live).unwrap();
+        assert_eq!(s.next_change(MS(0)), None, "at rest: 0 fps");
+
+        // Centred in the button, and symmetric both ways.
+        let bx = lit_box(&rest, r);
+        let (cx, cy) = mid(r);
+        let gx = (bx.0 + bx.2 + 1) as f32 / 2.0;
+        let gy = (bx.1 + bx.3 + 1) as f32 / 2.0;
+        assert!((gx - cx).abs() <= 0.5 && (gy - cy).abs() <= 0.5, "{bx:?} in {r:?}");
+        for y in bx.1..=bx.3 {
+            for x in bx.0..=bx.2 {
+                let (mx, my) = (bx.0 + bx.2 - x, bx.1 + bx.3 - y);
+                let v = pixel(&rest, x as f32, y as f32)[0] as i32;
+                for (ox, oy) in [(mx, y), (x, my)] {
+                    let o = pixel(&rest, ox as f32, oy as f32)[0] as i32;
+                    assert!((v - o).abs() <= 2, "({x},{y}) {v} vs ({ox},{oy}) {o}");
+                }
+            }
+        }
+        let ink = cell_ink(&rest, bx, 3);
+        assert!(ink.iter().all(|&i| i.abs_diff(ink[0]) <= ink[0] / 50), "{ink:?}");
+
+        // Tapped: frames while the wave runs; mid-way the squares differ in size,
+        // the top-left one already back to (nearly) full while the far one dips.
+        let (_, ev) = tap(&mut s, (cx, cy), MS(1000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("wall".into())]);
+        assert_eq!(s.next_change(MS(1200)), Some(MS(1200)));
+        let mut frame = Canvas::new(W, H).unwrap();
+        s.draw(&mut frame, MS(1300), &font, &live).unwrap();
+        let ink = cell_ink(&frame, bx, 3);
+        let (lo, hi) = (*ink.iter().min().unwrap(), *ink.iter().max().unwrap());
+        assert!(hi as f32 > lo as f32 * 1.3, "{ink:?}");
+        assert!(ink[0] > ink[8], "the wave goes top-left to bottom-right: {ink:?}");
+
+        // Over (450 ms by default): exactly the picture at rest, and no more frames.
+        assert_eq!(s.next_change(MS(1450)), None);
+        s.draw(&mut frame, MS(1450), &font, &live).unwrap();
+        assert!(frame.data() == rest.data(), "the end is the rest");
+    }
+
+    #[test]
+    fn grid_wave_takes_grid_colour_and_anim_ms() {
+        let Some(font) = font() else { return };
+        let toml = GRID_WAVE.replace("width = 80", "width = 80\ngrid = 2\ncolor = \"#00ffb7\"\nanim_ms = 200");
+        let mut s = menu_scene(&font, &toml);
+        let live = live();
+        let r = s.buttons[0].rect;
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        let bx = lit_box(&c, r);
+        let (cx, cy) = (((bx.0 + bx.2) / 2) as f32, ((bx.1 + bx.3) / 2) as f32);
+        // 2x2: the middle of the grid is a gap.
+        assert_eq!(pixel(&c, cx, cy), [0, 0, 0, 0xff]);
+        let q = (bx.0 + (bx.2 - bx.0) / 4) as f32;
+        assert_eq!(pixel(&c, q, (bx.1 + (bx.3 - bx.1) / 4) as f32), [0x00, 0xff, 0xb7, 0xff]);
+        tap(&mut s, mid(r), MS(1000), &font);
+        assert!(s.next_change(MS(1150)).is_some());
+        assert_eq!(s.next_change(MS(1200)), None, "anim_ms = 200");
+    }
+
+    /// Not a check: builtin:grid_wave at rest and through its wave, as PNGs in
+    /// $TOUCHBINUX_FRAMES (`g-*.png`, the bar's left 300 px, also 4x larger).
+    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_grid_wave -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_grid_wave() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let toml = GRID_WAVE.replace("background = \"transparent\"", "");
+        let mut s = menu_scene(&font, &toml);
+        let live = live();
+        let r = s.buttons[0].rect;
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &Scene, t: u64, name: &str| {
+            s.draw(&mut canvas, MS(t), &font, &live).unwrap();
+            canvas.save_png(Path::new(&format!("{dir}/g-{name}.png"))).unwrap();
+            // A 4x crop of the item, to see the squares.
+            let (cw, ch) = (300u32, H);
+            let mut big = Canvas::new(cw * 4, ch * 4).unwrap();
+            for y in 0..ch * 4 {
+                for x in 0..cw * 4 {
+                    let [r, g, b, _] = pixel(&canvas, (x / 4) as f32, (y / 4) as f32);
+                    big.fill_rect(x as f32, y as f32, 1.0, 1.0, Rgba(r, g, b, 0xff));
+                }
+            }
+            big.save_png(Path::new(&format!("{dir}/g-{name}-4x.png"))).unwrap();
+        };
+        shot(&s, 0, "0-rest");
+        tap(&mut s, mid(r), MS(1000), &font);
+        for (i, ms) in [75u64, 150, 225, 300, 375].into_iter().enumerate() {
+            shot(&s, 1000 + ms, &format!("{}-{ms}ms", i + 1));
+        }
+        shot(&s, 1450, "6-end");
     }
 }

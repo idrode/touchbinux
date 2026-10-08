@@ -29,7 +29,11 @@ pub const ICON_DIR: &str = "/etc/touchbinux/icons";
 /// filled one. Both open when their button is tapped.
 pub const BUILTIN_FOLDER: &str = "builtin:folder";
 pub const BUILTIN_FOLDER_CLASSIC: &str = "builtin:folder_classic";
-pub const BUILTIN_ICONS: &[&str] = &[BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC];
+/// A grid of squares that a wave runs through when tapped (see `widgets::GridWave`).
+pub const BUILTIN_GRID_WAVE: &str = "builtin:grid_wave";
+pub const BUILTIN_ICONS: &[&str] = &[BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE];
+/// `grid` of a `builtin:grid_wave` button: squares per side.
+const GRID: std::ops::RangeInclusive<u8> = 2..=4;
 pub const DEFAULT_CLOCK_FORMAT: &str = "%H:%M";
 /// Layer built from `[[buttons]]` when there are no `[[layers]]`.
 const LEGACY_LAYER: &str = "buttons";
@@ -174,7 +178,8 @@ pub struct ItemConfig {
     /// Share of the free space, by weight (spacers default to 1).
     #[serde(default)]
     pub stretch: Option<f32>,
-    /// Animation length: a `builtin:folder*` opening (and closing), or a
+    /// Animation length: a `builtin:folder*` opening (and closing), the wave of a
+    /// `builtin:grid_wave`, or a
     /// volume/brightness slider or an expandable unfolding (and folding).
     #[serde(default)]
     pub anim_ms: Option<u64>,
@@ -240,6 +245,9 @@ pub struct ItemConfig {
     /// player: current and total time at the seek bar's ends (default true).
     #[serde(default)]
     pub show_time: Option<bool>,
+    /// button with `icon = "builtin:grid_wave"`: squares per side (default 3).
+    #[serde(default)]
+    pub grid: Option<u8>,
     /// capture: absolute path of the screenshot script, run with `region`,
     /// `window` or `full`.
     #[serde(default)]
@@ -432,6 +440,7 @@ impl ItemConfig {
                 "action",
                 "anim_ms",
                 "text_color",
+                "grid",
             ],
             ItemKind::Clock => &["id", "format", "action", "text_color"],
             ItemKind::Battery => &["id", "icon_dir", "action", "text_color"],
@@ -529,6 +538,7 @@ impl ItemConfig {
             ("seek_color", self.seek_color.is_some()),
             ("seek_height", self.seek_height.is_some()),
             ("show_time", self.show_time.is_some()),
+            ("grid", self.grid.is_some()),
             ("screenshot", self.screenshot.is_some()),
             ("record", self.record.is_some()),
             ("record_color", self.record_color.is_some()),
@@ -562,7 +572,15 @@ impl ItemConfig {
             if self.anim_ms.is_some()
                 && !self.icon.as_deref().is_some_and(|i| BUILTIN_ICONS.contains(&i))
             {
-                bail!("{what}: `anim_ms` only applies to the built-in folders {BUILTIN_ICONS:?}");
+                bail!("{what}: `anim_ms` only applies to the built-in icons {BUILTIN_ICONS:?}");
+            }
+            if let Some(n) = self.grid {
+                if self.icon.as_deref() != Some(BUILTIN_GRID_WAVE) {
+                    bail!("{what}: `grid` only applies to icon = \"{BUILTIN_GRID_WAVE}\"");
+                }
+                if !GRID.contains(&n) {
+                    bail!("{what}: grid must be {GRID:?} (squares per side)");
+                }
             }
         }
         if let Some(icon) = self.icon.as_deref() {
@@ -1022,6 +1040,7 @@ impl Config {
                 seek_color: None,
                 seek_height: None,
                 show_time: None,
+                grid: None,
                 screenshot: None,
                 record: None,
                 record_color: None,
@@ -1712,6 +1731,24 @@ mod tests {
         }
         let err = format!("{:#}", parse(&button("builtin:rocket", "")).unwrap_err());
         assert!(err.contains("builtin:folder_classic"), "lists the built-ins: {err}");
+        // `grid`: 2-4, and only on the grid.
+        for n in [2, 3, 4] {
+            assert!(parse(&button(BUILTIN_GRID_WAVE, &format!("grid={n}\ncolor='#ffffff'"))).is_ok());
+        }
+        for (icon, extra) in [
+            (BUILTIN_GRID_WAVE, "grid=1"),
+            (BUILTIN_GRID_WAVE, "grid=5"),
+            (BUILTIN_GRID_WAVE, "grid='3'"),
+            (BUILTIN_FOLDER, "grid=3"),
+            ("/etc/touchbinux/icons/arch.svg", "grid=3"),
+        ] {
+            assert!(parse(&button(icon, extra)).is_err(), "accepted: {icon} {extra}");
+        }
+        let err = format!("{:#}", parse(&button(BUILTIN_FOLDER, "grid=3")).unwrap_err());
+        assert!(err.contains("only applies to icon = \"builtin:grid_wave\""), "{err}");
+        let expandable = "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\n\
+            icon='builtin:grid_wave'\ngrid=3\n[[layers.items.children]]\nlabel='a'\naction={type='socket'}";
+        assert!(parse(expandable).is_err(), "grid is a button option");
     }
 
     #[test]

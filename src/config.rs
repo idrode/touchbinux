@@ -322,6 +322,10 @@ pub struct ItemConfig {
     /// capture: the item's background while recording.
     #[serde(default)]
     pub record_color: Option<Color>,
+    /// expandable, player, button with `drag_children`: whether tapping a child
+    /// folds it (default: true; false for a player).
+    #[serde(default)]
+    pub close_on_tap: Option<bool>,
     /// workspaces: most window icons in the active pill (then "+N").
     #[serde(default)]
     pub max_icons: Option<usize>,
@@ -642,6 +646,7 @@ impl ItemConfig {
                 "full_color",
                 "drag_children",
                 "drag_px",
+                "close_on_tap",
                 "expand_width",
                 "collapse_after_ms",
                 "active_color",
@@ -671,6 +676,7 @@ impl ItemConfig {
                 "children",
                 "active_color",
                 "text_color",
+                "close_on_tap",
             ],
             ItemKind::GifPicker => &[
                 "id",
@@ -697,6 +703,7 @@ impl ItemConfig {
                 "seek_color",
                 "seek_height",
                 "show_time",
+                "close_on_tap",
             ],
             ItemKind::Capture => &[
                 "id",
@@ -755,6 +762,7 @@ impl ItemConfig {
             ("children", self.children.is_some()),
             ("drag_children", self.drag_children.is_some()),
             ("drag_px", self.drag_px.is_some()),
+            ("close_on_tap", self.close_on_tap.is_some()),
             ("max_icons", self.max_icons.is_some()),
             ("icon_size", self.icon_size.is_some()),
             ("class_icons", self.class_icons.is_some()),
@@ -825,6 +833,7 @@ impl ItemConfig {
             } else {
                 for (field, set) in [
                     ("drag_px", self.drag_px.is_some()),
+                    ("close_on_tap", self.close_on_tap.is_some()),
                     ("expand_width", self.expand_width.is_some()),
                     ("collapse_after_ms", self.collapse_after_ms.is_some()),
                     ("active_color", self.active_color.is_some()),
@@ -1451,6 +1460,7 @@ impl Config {
                 children: None,
                 drag_children: None,
                 drag_px: None,
+                close_on_tap: None,
                 max_icons: None,
                 icon_size: None,
                 inactive_color: None,
@@ -2275,6 +2285,37 @@ mod tests {
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow='all'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nstrip='all'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ngap=3").is_err());
+    }
+
+    #[test]
+    fn close_on_tap_only_where_children_are_tapped() {
+        let layer = |item: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\n{item}");
+        let child = "children=[{label='c', action={type='socket'}}]";
+        let ok = [
+            format!("type='expandable'\nid='e'\nicon='x'\nclose_on_tap=false\n{child}"),
+            "type='player'\nclose_on_tap=true".into(),
+            "type='button'\nid='b'\nlabel='b'\naction={type='socket'}\nclose_on_tap=false\n\
+             drag_children=[{label='c', action={type='socket'}}]"
+                .into(),
+        ];
+        for item in &ok {
+            assert!(parse(&layer(item)).is_ok(), "refused: {item}");
+        }
+        let c = parse(&layer(&ok[0])).unwrap();
+        assert_eq!(c.layers[0].items[0].close_on_tap, Some(false));
+        let bad = [
+            "type='button'\nid='b'\nlabel='b'\naction={type='socket'}\nclose_on_tap=true",
+            "type='clock'\nclose_on_tap=true",
+            "type='gif_picker'\ndir='/x'\nclose_on_tap=false",
+            "type='capture'\nscreenshot='/x'\nclose_on_tap=false",
+            "type='workspaces'\nclose_on_tap=false",
+            "type='player'\nclose_on_tap='yes'",
+        ];
+        for item in bad {
+            assert!(parse(&layer(item)).is_err(), "accepted: {item}");
+        }
+        let err = format!("{:#}", parse(&layer(bad[0])).unwrap_err());
+        assert!(err.contains("`close_on_tap` only applies with `drag_children`"), "{err}");
     }
 
     #[test]

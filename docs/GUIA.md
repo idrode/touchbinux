@@ -499,7 +499,7 @@ un error.
 | `full_color` | `"#00ffff"` | solo con `builtin:battery`: color cuando está llena |
 | `drag_children` | — | hijos que se despliegan **arrastrando** el botón a la derecha, ver [abajo](#arrastrar-para-desplegar-drag_children) (1-12) |
 | `drag_px` | `24` | solo con `drag_children`: cuántos px a la derecha hay que arrastrar para que la fila se quede fuera (8-120) |
-| `expand_width`, `collapse_after_ms`, `active_color` | | solo con `drag_children`: como en [`expandable`](#expandable), para su fila |
+| `expand_width`, `collapse_after_ms`, `active_color`, `close_on_tap` | | solo con `drag_children`: como en [`expandable`](#expandable), para su fila (`close_on_tap` por defecto `true`) |
 
 Necesita `icon`, `label` o ambos.
 
@@ -834,9 +834,12 @@ Desplegado, su icono queda a la izquierda como cabecera y los hijos a la derecha
 a partes iguales. Se pliega:
 
 - al **elegir un hijo** (su acción se ejecuta y el toque se avisa por el socket con
-  el `id` del hijo);
+  el `id` del hijo), salvo con `close_on_tap = false`;
 - al **tocar fuera** (ese toque no hace nada más) o **su icono** de la izquierda;
-- tras **`collapse_after_ms`** sin tocarlo.
+- tras **`collapse_after_ms`** sin tocarlo. El plazo cuenta desde el **último
+  toque** en el panel (un hijo, la barra de posición del `player`, un hueco), no
+  desde que se desplegó; mientras un dedo está apoyado en él no se pliega nunca.
+  Reiniciar el plazo no dibuja nada; plegado, ningún toque lo arma.
 
 Si se pulsa un hijo y se desliza el dedo fuera de él, no se ejecuta nada. Mientras
 está desplegado, lo que queda debajo se oscurece y no responde. Solo hay un elemento
@@ -856,6 +859,7 @@ desplegado a la vez (slider o `expandable`).
 | `pressed_background` | velo blanco | | fondo del hijo mientras se pulsa |
 | `text_color` | blanco | | su texto y el de los hijos |
 | `action` | — | | se ejecuta además al tocarlo plegado |
+| `close_on_tap` | `true` | | tocar un hijo lo pliega; con `false` sigue abierto (y el plazo de `collapse_after_ms` vuelve a empezar) |
 
 Cada hijo (`[[layers.items.children]]`, en orden de izquierda a derecha):
 
@@ -1006,6 +1010,7 @@ arrastre.
 | `children` | ninguno | como en `expandable` (0-12); `[[layers.items.children]]` |
 | `expand_width` | hijos + 480 px | ancho desplegado: los hijos a su ancho natural, la barra ocupa el resto |
 | `collapse_after_ms`, `anim_ms`, `active_color`, `action` | como en `expandable` | |
+| `close_on_tap` | `false` | tocar un hijo (anterior, play/pausa...) **no** lo pliega: se puede pulsar varias veces seguidas. Cada toque y cada arrastre de la barra reinicia el plazo de `collapse_after_ms`; se pliega al vencer, al tocar fuera o al tocar su icono. Con `true`, se pliega al tocar un hijo, como un `expandable` |
 | `shape`, `radius`, `background`, `size`, `pressed_background` | | como en `expandable` |
 
 Solo puede haber **un** `player` (una conexión con mpv).

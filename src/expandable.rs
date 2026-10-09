@@ -239,6 +239,9 @@ pub struct Expandable {
     pub enabled: bool,
     /// Its children are choices (`UiEvent::Pick`) rather than actions.
     pub picks: bool,
+    /// Tapping a child folds it (config `close_on_tap`); otherwise it stays open
+    /// and the automatic fold counts from that tap.
+    pub close_on_tap: bool,
     /// The player's seek bar, after the children, to the end of the row.
     pub seek: Option<SeekBar>,
     /// With a seek bar, children are this wide (the widest one's natural width)
@@ -264,6 +267,7 @@ pub struct Spec {
     pub active_color: Rgba,
     pub fold: Fold,
     pub picks: bool,
+    pub close_on_tap: bool,
     pub seek: Option<SeekBar>,
     /// A capture item: shows `Live::recording` this way.
     pub rec: Option<RecLook>,
@@ -289,6 +293,7 @@ impl Expandable {
             fold: spec.fold,
             enabled: true,
             picks: spec.picks,
+            close_on_tap: spec.close_on_tap,
             seek: spec.seek,
             child_w: None,
             rec_look: spec.rec,
@@ -803,6 +808,7 @@ mod tests {
             active_color: DEFAULT_ACTIVE,
             fold: Fold::new(Duration::ZERO, Duration::from_secs(3)),
             picks: false,
+            close_on_tap: true,
             seek: seek.then(|| SeekBar::new(None, None, true, None)),
             rec: None,
             pulled: false,

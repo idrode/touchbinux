@@ -154,6 +154,7 @@ format = "%H:%M"
 # collapse_after_ms = 3000
 # anim_ms = 200
 # active_color = "#00ffb750"       # background of children marked active
+# close_on_tap = true              # false: tapping a child leaves it open
 # pressed_background = "#1793d1"   # a child's highlight while pressed
 #
 # [[layers.items.children]]
@@ -262,6 +263,8 @@ format = "%H:%M"
 # seek_color = "#00ffb7"
 # seek_height = 8
 # show_time = true                 # current and total time at the bar's ends
+# close_on_tap = false             # default: children don't fold it; every tap
+#                                  # (and seek) restarts collapse_after_ms
 #
 # [[layers.items.children]]
 # icon = "/etc/touchbinux/icons/play_pause.svg"

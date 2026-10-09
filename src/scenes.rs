@@ -936,7 +936,11 @@ impl Scene {
                                     } else {
                                         UiEvent::Tap(child)
                                     });
-                                    m.fold.collapse(t);
+                                    // Otherwise it stays open: `touch_up` above
+                                    // restarted the automatic fold's countdown.
+                                    if m.close_on_tap {
+                                        m.fold.collapse(t);
+                                    }
                                 }
                                 Part::Seek | Part::Gap => {}
                             }
@@ -1949,6 +1953,8 @@ fn menu_spec(
             item.collapse_after().unwrap_or(DEFAULT_COLLAPSE_AFTER),
         ),
         picks,
+        // A player stays open to be used again; the rest fold, as they always did.
+        close_on_tap: item.close_on_tap.unwrap_or(item.kind != ItemKind::Player),
         seek: None,
         rec: None,
         pulled: false,
@@ -2948,10 +2954,14 @@ mod tests {
         s.handle_touch(Phase::Up, (seek_r.x + 30.0, y), MS(2400), &font, &mut out);
         assert!(out.is_empty());
 
-        // Children still work as an expandable's (and fold it).
+        // Children run their action and leave it open; a tap outside folds it.
         let stop = child_mid(&s, 1);
         let (_, ev) = tap(&mut s, stop, MS(2500), &font);
         assert_eq!(ev, vec![UiEvent::Tap("stop".into())]);
+        assert!(s.player_open());
+        let o = s.menus[0].open_rect;
+        let (_, ev) = tap(&mut s, (o.x + o.w + 50.0, o.y + 10.0), MS(2600), &font);
+        assert!(ev.is_empty());
         assert!(!s.player_open());
 
         // Paused: once the bars have folded, no frames at all.
@@ -2959,6 +2969,108 @@ mod tests {
         s.advance(MS(3000), &live);
         s.advance(MS(4000), &live);
         assert_eq!(s.next_change(MS(4000)), None);
+    }
+
+    /// The player with `collapse_after_ms` = 5000 (and its own options).
+    fn player_scene(font: &Font, extra: &str) -> Scene {
+        let toml = PLAYER.replace(
+            "seek_color = \"#ff0000\"",
+            &format!("seek_color = \"#ff0000\"\n        collapse_after_ms = 5000\n        {extra}"),
+        );
+        menu_scene(font, &toml)
+    }
+
+    #[test]
+    fn player_children_keep_it_open_and_restart_the_fold() {
+        let Some(font) = font() else { return };
+        let mut s = player_scene(&font, "");
+        let live = live(); // nothing playing: no bars to animate
+        s.advance(MS(0), &live);
+        let r = s.menus[0].rect;
+        tap(&mut s, mid(r), MS(0), &font);
+        s.advance(MS(400), &live);
+        // Open and idle: one wake-up, for the fold 5 s after the tap; no frames.
+        assert_eq!(s.next_change(MS(400)), Some(MS(5000)));
+        // A child at 4.5 s: it runs, stays open, and the 5 s count from there.
+        let pp = child_mid(&s, 0);
+        let (_, ev) = tap(&mut s, pp, MS(4500), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("pp".into())]);
+        assert!(s.player_open());
+        assert_eq!(s.next_change(MS(4500)), Some(MS(9500)), "restarting draws nothing");
+        assert!(!s.advance(MS(9000), &live));
+        assert!(s.player_open(), "still open at 9 s");
+        assert!(s.advance(MS(9500), &live));
+        assert!(!s.player_open(), "folded at 9.5 s");
+        s.advance(MS(10_000), &live);
+        assert_eq!(s.next_change(MS(10_000)), None, "folded and idle: nothing");
+
+        // Folded, a touch elsewhere arms nothing.
+        let at = mid(s.buttons[0].rect);
+        tap(&mut s, at, MS(11_000), &font);
+        assert_eq!(s.next_change(MS(11_000)), None);
+
+        // Seeking restarts the count too (and a finger resting on it holds it).
+        let mut live = live;
+        live.player = mpv(true, Some(200.0), 50.0);
+        tap(&mut s, mid(r), MS(20_000), &font);
+        s.advance(MS(20_400), &live);
+        let (_, seek_r) = s.menus[0].seek_mut().unwrap();
+        let y = seek_r.y + seek_r.h / 2.0;
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (seek_r.x + 10.0, y), MS(24_000), &font, &mut out);
+        // Held well past the 5 s: never folds.
+        s.handle_touch(Phase::Move, (seek_r.x + 40.0, y), MS(27_000), &font, &mut out);
+        assert!(!s.advance(MS(31_000), &live));
+        assert!(s.player_open());
+        s.handle_touch(Phase::Up, (seek_r.x + 40.0, y), MS(31_000), &font, &mut out);
+        assert!(matches!(out[..], [UiEvent::Seek(..)]));
+        assert!(!s.advance(MS(35_900), &live));
+        assert!(s.player_open());
+        assert!(s.advance(MS(36_000), &live), "5 s after the seek");
+        assert!(!s.player_open());
+
+        // A finger resting on a child holds it open too.
+        tap(&mut s, mid(r), MS(40_000), &font);
+        s.advance(MS(40_400), &live);
+        let stop = child_mid(&s, 1);
+        s.handle_touch(Phase::Down, stop, MS(41_000), &font, &mut out);
+        assert!(!s.advance(MS(50_000), &live));
+        assert!(s.player_open());
+        out.clear();
+        s.handle_touch(Phase::Up, stop, MS(50_000), &font, &mut out);
+        assert_eq!(out, vec![UiEvent::Tap("stop".into())]);
+        assert!(s.player_open());
+        // Its own icon (the header) folds it, as before.
+        let header = (s.menus[0].open_rect.x + 15.0, r.y + r.h / 2.0);
+        tap(&mut s, header, MS(51_000), &font);
+        assert!(!s.player_open());
+    }
+
+    #[test]
+    fn close_on_tap_chooses_whether_a_child_folds_it() {
+        let Some(font) = font() else { return };
+        // A player that folds like an expandable.
+        let mut s = player_scene(&font, "close_on_tap = true");
+        let at = mid(s.menus[0].rect);
+        tap(&mut s, at, MS(0), &font);
+        s.advance(MS(400), &live());
+        let pp = child_mid(&s, 0);
+        let (_, ev) = tap(&mut s, pp, MS(500), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("pp".into())]);
+        assert!(!s.player_open());
+        // An expandable folds by default, and stays open with close_on_tap = false.
+        for (extra, open) in [("", false), ("close_on_tap = false", true)] {
+            let toml = MENU.replace("label = \"Cap\"", &format!("label = \"Cap\"\n        {extra}"));
+            assert!(toml.contains("label = \"Cap\""));
+            let mut s = menu_scene(&font, &toml);
+            let at = mid(s.menus[0].rect);
+            tap(&mut s, at, MS(0), &font);
+            s.advance(MS(400), &live());
+            let c = child_mid(&s, 0);
+            let (_, ev) = tap(&mut s, c, MS(500), &font);
+            assert_eq!(ev.len(), 1);
+            assert_eq!(s.menus[0].fold.is_open(), open, "{extra:?}");
+        }
     }
 
     #[test]
@@ -3750,8 +3862,9 @@ mod tests {
         s.handle_touch(Phase::Up, (px, py), MS(1150), &font, &mut out);
         assert_eq!(out, vec![UiEvent::Tap("pp".into())]);
 
-        // mpv starts playing while it is on screen: the icon cross-fades, ~150 ms.
-        tap(&mut s, mid(r), MS(2000), &font);
+        // mpv starts playing while it is on screen (still open after the tap on
+        // its child): the icon cross-fades, ~150 ms.
+        assert!(s.menus[0].fold.is_open());
         s.advance(MS(2500), &live);
         live.player = mpv(false, Some(200.0), 10.0);
         assert!(s.advance(MS(3000), &live));

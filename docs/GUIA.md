@@ -1172,28 +1172,36 @@ Por el socket, cada modo elegido se avisa con su `id`
 
 #### `workspaces`
 
-Los workspaces de Hyprland como **píldoras** con su número. La del workspace activo
-va en `active_color` y más ancha, con **un icono por ventana** de ese workspace (en
-orden de apertura); la ventana enfocada lleva un recuadro claro detrás. **Necesita
-Hyprland**: mientras el daemon no está conectado a él, el elemento no se dibuja ni
-ocupa sitio (los demás se reparten la fila como si no estuviera), sin error; al
-conectar aparece.
+Los workspaces de Hyprland como **cápsulas**, con el aspecto y el comportamiento de
+la isla de Quickshell (`Workspaces.qml` y `WorkspaceBirthCanvas.qml`). Sin números:
+un workspace inactivo es una **barra horizontal** blanca; el activo, **la misma
+cápsula girada 90°** (vertical) en menta. Al lado de una cápsula puede abrirse una
+**tira con los iconos** de sus ventanas, que empuja al resto. **Necesita Hyprland**:
+mientras el daemon no está conectado a él, el elemento no se dibuja ni ocupa sitio
+(los demás se reparten la fila como si no estuviera), sin error; al conectar
+aparece.
 
 | Campo | Por defecto | Rango | Qué hace |
 |---|---|---|---|
 | `id` | `"workspaces"` | | |
-| `width` | `400` | (0, 4000] px | lo **máximo** que ocupa: es su hueco en la capa. Las píldoras van alineadas a la izquierda dentro; lo que no cabe se recorta con "+N". No admite `stretch` |
-| `max_icons` | `6` | 1-20 | iconos como mucho en la píldora activa; las demás ventanas, como "+N" |
-| `active_color` | `"#1793d1"` | | fondo de la píldora activa |
-| `background` | el de la capa | | fondo de las demás (`"transparent"`: solo el número) |
-| `shape`, `radius` | píldora | | `radius = "full"` si ni el elemento ni la capa dicen otra cosa; `shape = "none"` quita los fondos. `"circle"` no vale (tampoco heredado de `item_shape`: ponle `shape = "rounded"`) |
-| `text_color` | blanco | | los números y los "+N" (los workspaces vacíos, gris) |
-| `icon_size` | alto de la fila − 20 | 8-64 px | lado de los iconos de ventana (nunca más que la fila) |
-| `anim_ms` | `220` | 0-2000 | duración de cada animación (ver abajo) |
+| `width` | `400` | (0, 4000] px | lo **máximo** que ocupa: su hueco en la capa. Las cápsulas van a la izquierda; lo que no cabe se recorta con "+N". No admite `stretch` |
+| `active_color` | `"#00ffb7"` | | la cápsula activa |
+| `inactive_color` | `"#ffffff"` | | las demás, y los "+N" |
+| `bar_long`, `bar_short` | `28`, `16` | 2-60 px | ejes de la cápsula (14:8 como en la isla). `bar_short` menor que `bar_long`; `bar_long` no más que la fila |
+| `gap` | `6` | 0-40 px | entre cápsulas |
+| `strip` | `"active"` | `"active"`, `"pressed"`, `"all"`, `"none"` | qué tiras se abren: la del activo siempre; la de la cápsula bajo el dedo, mientras se pulsa; todas; ninguna |
+| `strip_background` | `"#1a1d1c"` | | fondo de la tira (radio completo) |
+| `icon_size` | `30` | 8-64 px | lado de los iconos de ventana (no más que la fila) |
+| `icon_gap` | `10` | 0-40 px | entre iconos |
+| `strip_pad` | `10` | 0-40 px | relleno en los extremos de la tira |
+| `max_icons` | `6` | 1-20 | iconos como mucho en una tira; las demás ventanas, "+N" |
 | `class_icons` | — | | icono por clase de ventana, antes que el tema (ver abajo) |
 | `show` | `"existing"` | `"existing"`, `"all"` | `existing`: los que tiene Hyprland (los crea y destruye al usarlos, así que pueden ser 1, 2, 4, 5); `all`: del 1 al 10 aunque estén vacíos, y cualquier otro que exista |
 | `overview_action` | — | | una [acción](#acciones) para el **arrastre horizontal** (ver abajo) |
 | `drag_px` | `24` | 8-120 | solo con `overview_action`: recorrido del arrastre |
+
+Las opciones de las antiguas píldoras con número (`text_color`, `anim_ms`, `shape`,
+`radius`, `background`) ya no existen y son un error de configuración.
 
 **Datos.** Usa la conexión a Hyprland que el daemon ya tiene (socket de eventos y,
 al conectar o resincronizar, el de control); no abre otra ni sondea. Solo cuenta lo
@@ -1202,35 +1210,52 @@ dirección) y la enfocada. Lo demás (un cambio de **título**, por ejemplo) no 
 ningún redibujado. Los workspaces especiales (scratchpad, ids negativos) no se
 muestran.
 
+**Animaciones** (solo mientras ocurren, a 30 fps como mucho; en reposo, 0 fps):
+
+- **Cambio de activo**: anchura, altura y color de las dos cápsulas, 150 ms con
+  *ease out* cúbico; las demás se recolocan a la vez.
+- **Pulsación** (el *hover* de la isla): mientras el dedo está sobre una cápsula,
+  escala 1,15 (150 ms, *ease out* cúbico).
+- **Tira**: se abre o se cierra animando su anchura 190 ms (*ease out* cúbico), con
+  los iconos recortados por ella; empuja al resto de cápsulas.
+- **Nacimiento** de un workspace (380 ms): sale de su **vecina** (la cápsula más
+  cercana a su izquierda, o a su derecha si es el primero): la vecina se estira, se
+  estrangula, se parte en dos como una gota, y las dos se asientan con un pequeño
+  rebote (*OutBack*). Su hueco en la fila se abre poco a poco (`slotT`).
+- **Cierre** (360 ms): lo mismo al revés; si el foco pasa a la vecina, esta
+  **absorbe** el color y la forma activos mientras se lo traga.
+- Mientras dura un nacimiento o un cierre, ese dibujo sustituye a las dos cápsulas
+  implicadas; su primer fotograma es idéntico al reposo anterior y el último al de
+  después. Diferencia con la isla: durante la transición el hueco de las dos sigue
+  la forma que se dibuja (en la isla, una cápsula dibujada en horizontal en el hueco
+  de una vertical se salía de él y tocaba a la de al lado).
+- **Al arrancar o al reconectar** con Hyprland, la primera lista de workspaces no se
+  anima: solo nace o se cierra lo que aparece o desaparece después.
+
 **Iconos.** Por clase de ventana: primero `class_icons` (la clase en minúsculas; el
 valor, como el `icon` de un botón: nombre del tema o ruta absoluta), después el tema
 de iconos como en la escena `windows` (archivos `.desktop` por `StartupWMClass` y
 nombre, clase en minúsculas); si no hay nada, un **círculo de color con la
 inicial** (la última parte de `org.gnome.Nautilus`: «N»), siempre del mismo color
-para la misma clase. Los iconos PNG del tema se dibujan a su tamaño, centrados; los
-SVG, a `icon_size`.
+para la misma clase. Los PNG del tema se dibujan a su tamaño, centrados; los SVG, a
+`icon_size`. La ventana enfocada lleva un recuadro claro detrás.
 
-**Si no cabe** en `width`: primero se quitan iconos de la píldora activa (más "+N"),
-y después workspaces, empezando por el más lejano al activo, con un "+N" gris al
-final. La píldora activa siempre se ve.
+**Si no cabe** en `width` (con las tiras que `strip` abre en reposo; con
+`"pressed"`, sitio para la más ancha): primero se quitan iconos de las tiras (más
+"+N"), y después workspaces, empezando por el más lejano al activo, con un "+N" al
+final. El activo siempre se ve.
 
-**Animaciones** (solo mientras ocurren, a 30 fps como mucho; en reposo, 0 fps):
+**Toques.** La zona táctil de cada cápsula ocupa toda la altura de la fila y al
+menos **36 px** de ancho aunque lo dibujado sea menor; donde se solapan, gana la
+cápsula más cercana. Se mandan a Hyprland por su socket de control (`.socket.sock`),
+sin lanzar `hyprctl`, con la sintaxis de su proveedor (Lua o clásica) y comprobando
+los argumentos (el id solo cifras; la dirección, `0x` y hexadecimal):
 
-- al **cambiar de workspace**, las píldoras se recolocan y la nueva activa crece; sus
-  iconos **emergen** uno tras otro (cada uno 40 ms después del anterior, creciendo y
-  apareciendo en `anim_ms`);
-- al **abrir** una ventana su icono crece; al **cerrarla** se encoge y desaparece; el
-  resto se desliza a su sitio;
-- un evento que no cambia nada no reinicia nada, y al terminar se ve exactamente
-  como si se hubiera dibujado así desde el principio.
-
-**Toques.** Se mandan a Hyprland por su socket de control (`.socket.sock`), sin
-lanzar `hyprctl`, con la sintaxis de su proveedor (Lua o clásica) y comprobando los
-argumentos (el id solo cifras; la dirección, `0x` y hexadecimal):
-
-- **una píldora**: `dispatch workspace <id>`;
-- **un icono de ventana**: `dispatch focuswindow address:0x...`;
-- como en un botón, si el dedo sale de lo que tocó, no se manda nada.
+- **una cápsula**: `dispatch workspace <id>`;
+- **un icono de una tira**: `dispatch focuswindow address:0x...`;
+- como en un botón, si el dedo sale de lo que tocó, no se manda nada. Excepción
+  pensada para `strip = "pressed"`: se pulsa la cápsula, se abre su tira, y
+  soltando sobre uno de sus iconos se enfoca esa ventana.
 
 Por el socket de touchbinux se avisa con `{"type":"workspace","id":"workspaces","value":"4"}`
 y `{"type":"focuswindow","id":"workspaces","value":"0x..."}`.
@@ -1240,19 +1265,18 @@ de al menos `drag_px` sobre el elemento ejecuta esa acción al soltar (y avisa
 `{"type":"overview","id":"workspaces"}`), con la mecánica del
 [lanzador](#arrastrar-para-desplegar-drag_children): hasta 8 px es un toque; más,
 casi horizontal, es el arrastre (si se suelta antes de `drag_px`, nada); en
-cualquier otra dirección, el toque se cancela. Sin `overview_action` no hay gesto:
-arrastrar es solo salir de lo pulsado.
+cualquier otra dirección, el toque se cancela. Sin `overview_action` no hay gesto.
 
 ```toml
 [[layers.items]]
 type = "workspaces"
 width = 520
+active_color = "#00ffb7"
+inactive_color = "#ffffff"
+strip = "active"
 max_icons = 6
-active_color = "#1793d1"
 class_icons = { "kitty" = "utilities-terminal", "zen" = "zen-browser" }
-show = "existing"
 overview_action = { type = "key", key = "KEY_F15" }   # p. ej. un bind de Hyprland
-drag_px = 24
 ```
 
 #### `spacer`
@@ -1393,7 +1417,7 @@ el código (`src/widgets.rs`).
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF y `gif_picker` | `play` | `"on_tap"` |
 | Desplegar `gif_picker`, `player` y `capture` | `anim_ms` | 200 ms |
-| `workspaces`: iconos emergiendo, ventanas que aparecen o se van | `anim_ms` | 220 ms (+40 ms por icono) |
+| `workspaces`: cambio de activo / pulsación; tira; nacimiento; cierre | — | 150 ms; 190 ms; 380 ms; 360 ms |
 | Barras del `player` | — | ~30 fps solo reproduciendo |
 | `capture` grabando (punto y cronómetro) | — | 2 fps solo grabando |
 
@@ -1710,7 +1734,7 @@ una suspensión real.
 | `mpv.rs` | cliente del socket IPC de mpv: estado por `observe_property`, seek |
 | `player.rs` | `player`: icono (barras simuladas, trait `Levels`), barra de posición |
 | `capture.rs` | `capture`: modos e iconos, seguimiento de `wf-recorder`, indicador de grabación |
-| `workspaces.rs` | `workspaces`: lo que se ve del estado de Hyprland, píldoras, iconos y su animación |
+| `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, cápsulas, tiras de iconos; nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
 | `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |

@@ -63,8 +63,13 @@ const SEEK_HEIGHT: std::ops::RangeInclusive<f32> = 1.0..=40.0;
 /// workspaces: default `width` (the most it takes), `max_icons` and their ranges.
 pub const DEFAULT_WS_WIDTH: f32 = 400.0;
 pub const DEFAULT_MAX_ICONS: usize = 6;
+pub const DEFAULT_BAR_LONG: f32 = 28.0;
+pub const DEFAULT_BAR_SHORT: f32 = 16.0;
 const MAX_ICONS: std::ops::RangeInclusive<usize> = 1..=20;
 const WS_ICON_SIZE: std::ops::RangeInclusive<f32> = 8.0..=64.0;
+/// workspaces: a capsule's axes, and the gaps and padding, px.
+const WS_BAR: std::ops::RangeInclusive<f32> = 2.0..=60.0;
+const WS_SPACING: std::ops::RangeInclusive<f32> = 0.0..=40.0;
 /// `show = "all"`: workspaces 1 to this.
 pub const WS_ALL: i64 = 10;
 /// `drag_px` of a button with `drag_children`.
@@ -143,7 +148,20 @@ pub enum ItemKind {
     Spacer,
 }
 
-/// workspaces: which pills it shows.
+/// workspaces: which capsules show their strip of window icons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WsStrip {
+    /// The active workspace's, always.
+    #[default]
+    Active,
+    /// The one under the finger, while pressed.
+    Pressed,
+    All,
+    None,
+}
+
+/// workspaces: which capsules it shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WsShow {
@@ -314,6 +332,27 @@ pub struct ItemConfig {
     /// icon theme is asked; classes compared in lowercase.
     #[serde(default)]
     pub class_icons: Option<BTreeMap<String, String>>,
+    /// workspaces: inactive capsules' colour.
+    #[serde(default)]
+    pub inactive_color: Option<Color>,
+    /// workspaces: a capsule's long and short axes, px.
+    #[serde(default)]
+    pub bar_long: Option<f32>,
+    #[serde(default)]
+    pub bar_short: Option<f32>,
+    /// workspaces: between capsules, px.
+    #[serde(default)]
+    pub gap: Option<f32>,
+    /// workspaces: the strip of window icons: background, gap between icons,
+    /// padding at its ends, and which capsules show one.
+    #[serde(default)]
+    pub strip_background: Option<Color>,
+    #[serde(default)]
+    pub icon_gap: Option<f32>,
+    #[serde(default)]
+    pub strip_pad: Option<f32>,
+    #[serde(default)]
+    pub strip: Option<WsStrip>,
     /// workspaces: "existing" (default) or "all".
     #[serde(default)]
     pub show: Option<WsShow>,
@@ -568,8 +607,8 @@ impl ItemConfig {
         // spacers, shape/radius/background.
         let frame: &[&str] = match self.kind {
             ItemKind::Spacer => &[],
-            // Pills: no circle (a circle is made square), no pressed colour.
-            ItemKind::Workspaces => &["shape", "radius", "background"],
+            // Capsules: drawn as they are, no box of their own.
+            ItemKind::Workspaces => &[],
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
@@ -676,9 +715,15 @@ impl ItemConfig {
                 "id",
                 "max_icons",
                 "active_color",
-                "text_color",
+                "inactive_color",
+                "bar_long",
+                "bar_short",
+                "gap",
+                "strip_background",
                 "icon_size",
-                "anim_ms",
+                "icon_gap",
+                "strip_pad",
+                "strip",
                 "class_icons",
                 "show",
                 "overview_action",
@@ -713,6 +758,14 @@ impl ItemConfig {
             ("max_icons", self.max_icons.is_some()),
             ("icon_size", self.icon_size.is_some()),
             ("class_icons", self.class_icons.is_some()),
+            ("inactive_color", self.inactive_color.is_some()),
+            ("bar_long", self.bar_long.is_some()),
+            ("bar_short", self.bar_short.is_some()),
+            ("gap", self.gap.is_some()),
+            ("strip_background", self.strip_background.is_some()),
+            ("icon_gap", self.icon_gap.is_some()),
+            ("strip_pad", self.strip_pad.is_some()),
+            ("strip", self.strip.is_some()),
             ("show", self.show.is_some()),
             ("overview_action", self.overview_action.is_some()),
             ("active_color", self.active_color.is_some()),
@@ -906,8 +959,19 @@ impl ItemConfig {
         if self.stretch.is_some() {
             bail!("{what}: use `width` (the most it takes), not `stretch`");
         }
-        if self.shape == Some(Shape::Circle) {
-            bail!("{what}: shape = \"circle\" is not for workspaces (use radius = \"full\")");
+        for (field, v) in [("bar_long", self.bar_long), ("bar_short", self.bar_short)] {
+            if v.is_some_and(|v| !WS_BAR.contains(&v)) {
+                bail!("{what}: {field} must be in {WS_BAR:?} px");
+            }
+        }
+        let (long, short) = self.ws_bar();
+        if short >= long {
+            bail!("{what}: bar_short ({short}) must be less than bar_long ({long})");
+        }
+        for (field, v) in [("gap", self.gap), ("icon_gap", self.icon_gap), ("strip_pad", self.strip_pad)] {
+            if v.is_some_and(|v| !WS_SPACING.contains(&v)) {
+                bail!("{what}: {field} must be in {WS_SPACING:?} px");
+            }
         }
         if self.max_icons.is_some_and(|n| !MAX_ICONS.contains(&n)) {
             bail!("{what}: max_icons must be in {MAX_ICONS:?}");
@@ -935,6 +999,14 @@ impl ItemConfig {
             bail!("{what}: drag_px must be in {DRAG_PX:?} px");
         }
         Ok(())
+    }
+
+    /// workspaces: a capsule's (long, short) axes.
+    pub fn ws_bar(&self) -> (f32, f32) {
+        (
+            self.bar_long.unwrap_or(DEFAULT_BAR_LONG),
+            self.bar_short.unwrap_or(DEFAULT_BAR_SHORT),
+        )
     }
 
     /// workspaces: `class_icons` with lowercase classes.
@@ -1077,14 +1149,6 @@ impl LayerConfig {
                     item.id().unwrap_or("")
                 );
             }
-            if item.kind == ItemKind::Workspaces && self.is_circle(item) {
-                bail!(
-                    "layer {:?}: workspaces {:?}: pills can't be circles; give it \
-                     shape = \"rounded\" (and radius = \"full\") to override item_shape",
-                    self.id,
-                    item.id().unwrap_or("")
-                );
-            }
             if self.is_circle(item) && (item.width.is_some() || item.stretch.is_some())
             {
                 bail!(
@@ -1102,7 +1166,8 @@ impl LayerConfig {
     /// Whether `item` is drawn as a circle (and so sized as a square). Spacers have
     /// no box and are never circles.
     pub fn is_circle(&self, item: &ItemConfig) -> bool {
-        item.kind != ItemKind::Spacer && self.frame_for(item).shape == Shape::Circle
+        !matches!(item.kind, ItemKind::Spacer | ItemKind::Workspaces)
+            && self.frame_for(item).shape == Shape::Circle
     }
 
     /// A circle's diameter if configured (its own `size`, else the layer's
@@ -1388,6 +1453,14 @@ impl Config {
                 drag_px: None,
                 max_icons: None,
                 icon_size: None,
+                inactive_color: None,
+                bar_long: None,
+                bar_short: None,
+                gap: None,
+                strip_background: None,
+                icon_gap: None,
+                strip_pad: None,
+                strip: None,
                 class_icons: None,
                 show: None,
                 overview_action: None,
@@ -2103,12 +2176,16 @@ mod tests {
             type = "workspaces"
             width = 500
             max_icons = 4
-            active_color = "#1793d1"
-            text_color = "#ffffff"
-            radius = "full"
-            background = "#2a2a2c"
+            active_color = "#00ffb7"
+            inactive_color = "#ffffff"
+            bar_long = 30
+            bar_short = 18
+            gap = 8
+            strip_background = "#1a1d1c"
             icon_size = 30
-            anim_ms = 180
+            icon_gap = 10
+            strip_pad = 10
+            strip = "pressed"
             show = "all"
             class_icons = { "Kitty" = "utilities-terminal", "zen" = "/usr/share/icons/zen.svg" }
             overview_action = { type = "key", key = "KEY_F15" }
@@ -2120,6 +2197,8 @@ mod tests {
         assert_eq!(item.id(), Some("workspaces"));
         assert_eq!(item.size(), Size::Fixed(500.0));
         assert_eq!(item.show, Some(WsShow::All));
+        assert_eq!(item.strip, Some(WsStrip::Pressed));
+        assert_eq!(item.ws_bar(), (30.0, 18.0));
         assert_eq!(item.class_icons().get("kitty").map(String::as_str), Some("utilities-terminal"));
         assert!(matches!(item.overview_action, Some(Action::Key { .. })));
         // Defaults.
@@ -2127,6 +2206,11 @@ mod tests {
         let item = &c.layers[0].items[0];
         assert_eq!(item.size(), Size::Fixed(DEFAULT_WS_WIDTH));
         assert!(item.show.is_none() && item.overview_action.is_none());
+        assert_eq!(item.ws_bar(), (28.0, 16.0));
+        // The user's existing item loads as it is.
+        let old = "[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\nid='ws'\nwidth=520\n\
+                   max_icons=6\nactive_color='#00ffb7'";
+        assert!(parse(old).is_ok());
 
         let ws = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\n{body}");
         let bad = [
@@ -2134,10 +2218,28 @@ mod tests {
             "max_icons = 21",
             "icon_size = 4",
             "icon_size = 65",
-            "anim_ms = 5000",
             "show = 'some'",
+            "strip = 'hover'",
             "stretch = 1",
+            // What drew the old numbered pills is gone.
+            "text_color = '#ffffff'",
+            "anim_ms = 200",
+            "shape = 'rounded'",
+            "radius = 'full'",
+            "background = '#333333'",
             "shape = 'circle'",
+            // Capsule sizes: in range, and long longer than short.
+            "bar_long = 1",
+            "bar_long = 61",
+            "bar_short = 0",
+            "bar_long = 16\nbar_short = 16",
+            "bar_long = 10",
+            "gap = -1",
+            "gap = 41",
+            "icon_gap = 50",
+            "strip_pad = -2",
+            "inactive_color = 'white'",
+            "strip_background = '#12'",
             "size = 40",
             "pressed_background = '#ffffff'",
             "pressed_scale = 0.9",
@@ -2162,13 +2264,17 @@ mod tests {
         let err = format!("{:#}", parse(&ws("max_icons = 0")).unwrap_err());
         assert!(err.contains("max_icons must be in 1..=20"), "{err}");
         assert!(parse(&ws("overview_action = { type = 'socket' }\ndrag_px = 8")).is_ok());
-        // A layer of circles doesn't make it one.
+        let err = format!("{:#}", parse(&ws("bar_long = 16\nbar_short = 16")).unwrap_err());
+        assert!(err.contains("bar_short (16) must be less than bar_long (16)"), "{err}");
+        // A layer of circles doesn't make it one (it has no box).
         let circles = "[[layers]]\nid='m'\nitem_shape='circle'\n[[layers.items]]\ntype='workspaces'";
-        assert!(parse(circles).is_err());
-        assert!(parse(&format!("{circles}\nshape='rounded'")).is_ok());
+        let c = parse(circles).unwrap();
+        assert!(!c.layers[0].is_circle(&c.layers[0].items[0]));
         // And the options are only for workspaces.
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nmax_icons=3").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow='all'").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nstrip='all'").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ngap=3").is_err());
     }
 
     #[test]

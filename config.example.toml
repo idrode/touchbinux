@@ -226,18 +226,27 @@ format = "%H:%M"
 # thumb_size = 44                  # thumbnails' height, px (default: the row's)
 # active_color = "#00ffb750"       # behind the chosen GIF's thumbnail
 
-# Hyprland's workspaces as pills (needs Hyprland: without it, the item isn't drawn
-# and takes no room). The active one is wider, in active_color, with an icon per
-# window (the focused one highlighted). Tap a pill to go to that workspace, an icon
-# to focus that window (sent on Hyprland's control socket). Icons by window class:
-# class_icons first, then your icon theme, else a coloured initial.
+# Hyprland's workspaces as capsules (needs Hyprland: without it, the item isn't
+# drawn and takes no room). Inactive: a horizontal bar; active: the same capsule
+# turned upright, in active_color. Beside a capsule a strip of its windows' icons
+# opens (strip = "active": the active one's; "pressed": under the finger; "all";
+# "none"). New workspaces are born out of their neighbour, closed ones merge back.
+# Tap a capsule to go to that workspace, an icon to focus that window (sent on
+# Hyprland's control socket). Icons: class_icons, then your theme, else an initial.
 # [[layers.items]]
 # type = "workspaces"
 # width = 520                      # the most it takes; what doesn't fit is "+N"
+# active_color = "#00ffb7"
+# inactive_color = "#ffffff"
+# bar_long = 28                    # capsule axes, px (14:8 like the island)
+# bar_short = 16
+# gap = 6                          # between capsules
+# strip = "active"
+# strip_background = "#1a1d1c"
+# icon_size = 30
+# icon_gap = 10
+# strip_pad = 10
 # max_icons = 6
-# active_color = "#1793d1"
-# icon_size = 32                   # default: the row's icon size minus 4
-# anim_ms = 220                    # icons emerging, windows opening and closing
 # show = "existing"                # or "all": 1 to 10 even if empty
 # class_icons = { "kitty" = "utilities-terminal" }
 # overview_action = { type = "key", key = "KEY_F15" }   # a horizontal drag runs it

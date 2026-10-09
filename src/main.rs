@@ -26,6 +26,7 @@ mod stats;
 mod touch;
 mod user;
 mod widgets;
+mod workspaces;
 
 use anim::{Pulse, Spinner};
 use anyhow::{Result, anyhow};

@@ -1047,6 +1047,10 @@ pub enum Action {
         argv: Vec<String>,
         #[serde(default)]
         timeout_ms: Option<u64>,
+        /// An app that stays open (a terminal): no timeout, its own session, and
+        /// left running when the daemon exits.
+        #[serde(default)]
+        detach: bool,
     },
     /// A Hyprland dispatch, rendered for the running config provider (Lua or
     /// hyprlang). Exactly one of the fields, see `HyprctlAction`.
@@ -1316,9 +1320,16 @@ impl Config {
 /// `what` names the owner in error messages, e.g. `button "play"`.
 fn validate_action(what: &str, action: &Action) -> Result<()> {
     match action {
-        Action::Command { argv, timeout_ms } => {
+        Action::Command {
+            argv,
+            timeout_ms,
+            detach,
+        } => {
             if argv.first().is_none_or(|p| p.is_empty()) {
                 bail!("{what}: command needs a non-empty argv");
+            }
+            if *detach && timeout_ms.is_some() {
+                bail!("{what}: a detached command has no timeout_ms (it runs until it exits)");
             }
             if timeout_ms.is_some_and(|t| t == 0 || t > MAX_TIMEOUT_MS) {
                 bail!("{what}: timeout_ms must be 1..={MAX_TIMEOUT_MS}");
@@ -1963,6 +1974,22 @@ mod tests {
         let tap_only = "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='b'\n\
                         action={type='socket'}";
         assert!(!parse(tap_only).unwrap().layers[0].items[0].drags());
+    }
+
+    #[test]
+    fn detached_commands() {
+        let item = |action: &str| {
+            format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='b'\naction={action}")
+        };
+        let c = parse(&item("{type='command', argv=['/usr/bin/kitty'], detach=true}")).unwrap();
+        assert!(matches!(c.action("b"), Some(Action::Command { detach: true, .. })));
+        let c = parse(&item("{type='command', argv=['true']}")).unwrap();
+        assert!(matches!(c.action("b"), Some(Action::Command { detach: false, .. })));
+        // An app has no deadline.
+        let both = item("{type='command', argv=['kitty'], detach=true, timeout_ms=5000}");
+        let err = format!("{:#}", parse(&both).unwrap_err());
+        assert!(err.contains("a detached command has no timeout_ms"), "{err}");
+        assert!(parse(&item("{type='key', key='KEY_F13', detach=true}")).is_err());
     }
 
     #[test]

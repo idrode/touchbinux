@@ -851,6 +851,11 @@ impl App {
             return;
         };
         match &action {
+            Action::Command { argv, detach: true, .. } => {
+                if let Err(e) = self.runner.spawn_detached(argv) {
+                    eprintln!("action: {e:#}");
+                }
+            }
             Action::Command { argv, .. } => {
                 let timeout = action.timeout().unwrap_or(runner::DEFAULT_TIMEOUT);
                 if let Err(e) = self

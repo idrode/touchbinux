@@ -16,6 +16,25 @@ pub fn ease_out(k: f32) -> f32 {
     1.0 - (1.0 - k).powi(3)
 }
 
+/// QML's `Easing.OutCubic`: the same curve as `ease_out` (what `Tween` follows).
+pub fn ease_out_cubic(k: f32) -> f32 {
+    ease_out(k)
+}
+
+/// QML's `Easing.OutQuad`: 1 - (1 - k)², `k` in 0..=1.
+pub fn ease_out_quad(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    1.0 - (1.0 - k) * (1.0 - k)
+}
+
+/// QML's `Easing.OutBack` (overshoot 1.70158): passes 1 and comes back. Not clamped
+/// above 1 in its output; `k` is clamped to 0..=1, so it is exactly 0 at 0 and 1 at 1.
+pub fn ease_out_back(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    let (c1, c3) = (1.70158, 2.70158);
+    1.0 + c3 * (k - 1.0).powi(3) + c1 * (k - 1.0).powi(2)
+}
+
 /// Slow start, slow stop (smoothstep): 3k² - 2k³, `k` in 0..=1.
 pub fn ease_in_out(k: f32) -> f32 {
     let k = k.clamp(0.0, 1.0);

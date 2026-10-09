@@ -27,6 +27,7 @@ mod touch;
 mod user;
 mod widgets;
 mod workspaces;
+mod wsbirth;
 
 use anim::{Pulse, Spinner};
 use anyhow::{Result, anyhow};

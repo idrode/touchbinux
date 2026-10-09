@@ -4,8 +4,8 @@
 //! We run as root via sudo, without the user's `HYPRLAND_INSTANCE_SIGNATURE` or
 //! `XDG_RUNTIME_DIR`, so instances are discovered under `/run/user/*/hypr/<sig>/`.
 
-use crate::hyprctl::{ConfigProvider, parse_provider};
-use anyhow::{Context, Result, anyhow};
+use crate::hyprctl::{ConfigProvider, HyprAction, dispatch_succeeded, parse_provider};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -190,6 +190,25 @@ impl HyprState {
             Effect::Changed
         }
     }
+}
+
+/// A workspace id as the bar sends it: 1 to 9 digits, no sign (special workspaces
+/// are never shown), not zero.
+pub fn workspace_arg(s: &str) -> Result<i64> {
+    let digits = !s.is_empty() && s.len() <= 9 && s.bytes().all(|b| b.is_ascii_digit());
+    match s.parse::<i64>() {
+        Ok(id) if digits && id > 0 => Ok(id),
+        _ => bail!("bad workspace id {s:?} (want digits, 1 or more)"),
+    }
+}
+
+/// A window address as the bar sends it: `0x` and 1 to 16 hex digits.
+pub fn window_arg(s: &str) -> Result<String> {
+    let hex = s.strip_prefix("0x").unwrap_or("");
+    if hex.is_empty() || hex.len() > 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("bad window address {s:?} (want 0x and hex digits)");
+    }
+    Ok(s.to_string())
 }
 
 /// Splits `a,b` at the first comma (`b` may contain commas, e.g. titles).
@@ -444,6 +463,39 @@ impl Hypr {
         })
     }
 
+    /// Whether the event socket is connected (the state is live).
+    pub fn connected(&self) -> bool {
+        self.events.is_some()
+    }
+
+    /// `dispatch` focusing workspace `id` (digits only, a regular workspace), sent
+    /// on the control socket.
+    pub fn dispatch_workspace(&self, id: &str) -> Result<()> {
+        let id = workspace_arg(id)?;
+        self.dispatch(&HyprAction::Workspace(id.to_string()))
+    }
+
+    /// `dispatch` focusing the window at `addr` (`0x` and 1-16 hex digits).
+    pub fn dispatch_focus_window(&self, addr: &str) -> Result<()> {
+        let addr = window_arg(addr)?;
+        self.dispatch(&HyprAction::FocusWindow(addr))
+    }
+
+    /// Sends `dispatch <expr>` (in the connected instance's config syntax) on the
+    /// control socket, as hyprctl would, without starting a process. Hyprland
+    /// answers "ok" or an error. Blocks for `REQUEST_TIMEOUT` at most.
+    fn dispatch(&self, action: &HyprAction) -> Result<()> {
+        let (Some(inst), Some(provider)) = (&self.instance, self.provider) else {
+            bail!("Hyprland not connected");
+        };
+        let expr = action.render(provider)?;
+        let reply = inst.request(&format!("dispatch {expr}"))?;
+        if !dispatch_succeeded(&reply) {
+            bail!("dispatch {expr}: {:?}", reply.trim_end());
+        }
+        Ok(())
+    }
+
     pub fn disconnect(&mut self) {
         self.events = None;
         self.instance = None;
@@ -515,6 +567,104 @@ impl Hypr {
     }
 }
 
+/// A Hyprland made of two sockets in a temporary directory, for tests: requests on
+/// the control socket are recorded and answered (state queries from `state`,
+/// anything else with `reply`), and events can be written to the event socket.
+#[cfg(test)]
+pub mod fake {
+    use super::*;
+    use std::{
+        os::unix::net::UnixListener,
+        sync::{Arc, Mutex},
+    };
+
+    pub struct FakeHypr {
+        pub dir: PathBuf,
+        pub requests: Arc<Mutex<Vec<String>>>,
+        events: UnixListener,
+    }
+
+    impl FakeHypr {
+        pub fn new(name: &str, state: &HyprState, reply: &'static str) -> FakeHypr {
+            let dir = std::env::temp_dir()
+                .join(format!("touchbinux-hypr-{}-{name}", std::process::id()))
+                .join("abc_1_2");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let control = UnixListener::bind(dir.join(".socket.sock")).unwrap();
+            let events = UnixListener::bind(dir.join(".socket2.sock")).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let log = requests.clone();
+            let json = answers(state);
+            std::thread::spawn(move || {
+                for conn in control.incoming() {
+                    let Ok(mut conn) = conn else { break };
+                    let mut buf = [0u8; 4096];
+                    let n = conn.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let answer = json.get(req.as_str()).cloned().unwrap_or(reply.to_string());
+                    log.lock().unwrap().push(req);
+                    let _ = conn.write_all(answer.as_bytes());
+                }
+            });
+            FakeHypr {
+                dir,
+                requests,
+                events,
+            }
+        }
+
+        /// A `Hypr` connected to it (Lua syntax), and the event socket's far end.
+        pub fn connect(&self, provider: ConfigProvider) -> (Hypr, UnixStream) {
+            let mut h = Hypr::new(None);
+            let inst = Instance {
+                dir: self.dir.clone(),
+            };
+            h.state = inst.query_state().unwrap();
+            let ev = UnixStream::connect(self.dir.join(".socket2.sock")).unwrap();
+            ev.set_nonblocking(true).unwrap();
+            let (far, _) = self.events.accept().unwrap();
+            h.events = Some(ev);
+            h.instance = Some(inst);
+            h.provider = Some(provider);
+            self.requests.lock().unwrap().clear();
+            (h, far)
+        }
+
+        /// What was asked besides the state queries.
+        pub fn dispatches(&self) -> Vec<String> {
+            let r = self.requests.lock().unwrap();
+            r.iter().filter(|q| !q.starts_with("j/")).cloned().collect()
+        }
+    }
+
+    /// `j/...` replies describing `s`.
+    fn answers(s: &HyprState) -> std::collections::HashMap<&'static str, String> {
+        use serde_json::json;
+        let ws: Vec<_> = s.workspaces.iter().map(|(id, n)| json!({"id": id, "name": n})).collect();
+        let clients: Vec<_> = s
+            .windows
+            .iter()
+            .map(|w| {
+                json!({"address": format!("0x{}", w.addr), "class": w.class,
+                       "title": w.title, "workspace": {"id": w.workspace}})
+            })
+            .collect();
+        let active = json!({"id": s.active_workspace.unwrap_or(1)});
+        let win = match &s.focused {
+            Some(a) => json!({"address": format!("0x{a}")}),
+            None => json!({}),
+        };
+        [
+            ("j/workspaces", json!(ws).to_string()),
+            ("j/clients", json!(clients).to_string()),
+            ("j/activeworkspace", active.to_string()),
+            ("j/activewindow", win.to_string()),
+        ]
+        .into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +727,67 @@ mod tests {
         assert_eq!(s.apply("workspacev2>>abc,x"), Effect::Resync);
         assert_eq!(s.apply("no separator"), Effect::Unchanged);
         assert_eq!(s.apply("fullscreen>>1"), Effect::Unchanged);
+    }
+
+    #[test]
+    fn dispatch_arguments_are_checked() {
+        assert_eq!(workspace_arg("4").unwrap(), 4);
+        assert_eq!(workspace_arg("123456789").unwrap(), 123456789);
+        for bad in ["", "0", "-1", "+1", "e+1", "1 ", "4;exit", "name:web", "1234567890", "١"] {
+            assert!(workspace_arg(bad).is_err(), "accepted {bad:?}");
+        }
+        assert_eq!(window_arg("0xaaab33103270").unwrap(), "0xaaab33103270");
+        assert!(window_arg("0xABCDEF0123456789").is_ok());
+        for bad in ["", "0x", "aaab", "0xzz", "0x12 34", "0x1\n", "0x12345678901234567", "address:0x1"] {
+            assert!(window_arg(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn dispatches_go_out_on_the_control_socket() {
+        let fake = fake::FakeHypr::new("dispatch", &state(), "ok");
+        let (h, _ev) = fake.connect(ConfigProvider::Lua);
+        assert_eq!(h.state, state(), "state from the fake's replies");
+        h.dispatch_workspace("4").unwrap();
+        h.dispatch_focus_window("0xaaa1").unwrap();
+        assert_eq!(
+            fake.dispatches(),
+            [
+                r#"dispatch hl.dsp.focus({ workspace = "4" })"#,
+                r#"dispatch hl.dsp.focus({ window = "address:0xaaa1" })"#,
+            ]
+        );
+        // Bad arguments never reach Hyprland.
+        assert!(h.dispatch_workspace("4 ; exit").is_err());
+        assert!(h.dispatch_focus_window("aaa1").is_err());
+        assert_eq!(fake.dispatches().len(), 2);
+        // Classic syntax.
+        let (h, _ev) = fake.connect(ConfigProvider::Hyprlang);
+        h.dispatch_workspace("2").unwrap();
+        h.dispatch_focus_window("0xaaa1").unwrap();
+        assert_eq!(fake.dispatches(), ["dispatch workspace 2", "dispatch focuswindow address:0xaaa1"]);
+        // An error from Hyprland is an error.
+        let refusing = fake::FakeHypr::new("refuse", &state(), "error: no such workspace");
+        let (h, _ev) = refusing.connect(ConfigProvider::Lua);
+        assert!(h.dispatch_workspace("9").is_err());
+        // Not connected: nothing sent.
+        assert!(Hypr::new(None).dispatch_workspace("1").is_err());
+    }
+
+    #[test]
+    fn events_arrive_on_the_event_socket() {
+        let fake = fake::FakeHypr::new("events", &state(), "ok");
+        let (mut h, mut ev) = fake.connect(ConfigProvider::Lua);
+        assert!(h.connected());
+        ev.write_all(b"windowtitlev2>>aaa1,vim\n").unwrap();
+        assert!(matches!(h.read(), ReadOutcome::Changed));
+        assert_eq!(h.state.windows[0].title, "vim");
+        ev.write_all(b"workspacev2>>2,2\n").unwrap();
+        assert!(matches!(h.read(), ReadOutcome::Changed));
+        assert_eq!(h.state.active_workspace, Some(2));
+        drop(ev);
+        assert!(matches!(h.read(), ReadOutcome::Disconnected));
+        assert!(!h.connected());
     }
 
     #[test]

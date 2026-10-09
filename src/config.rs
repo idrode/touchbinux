@@ -13,7 +13,7 @@ use evdev::KeyCode;
 use serde::Deserialize;
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::Path,
     rc::Rc,
@@ -60,6 +60,13 @@ const MAX_CHILDREN: usize = 12;
 const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
 /// `seek_height` of a player's seek bar, px.
 const SEEK_HEIGHT: std::ops::RangeInclusive<f32> = 1.0..=40.0;
+/// workspaces: default `width` (the most it takes), `max_icons` and their ranges.
+pub const DEFAULT_WS_WIDTH: f32 = 400.0;
+pub const DEFAULT_MAX_ICONS: usize = 6;
+const MAX_ICONS: std::ops::RangeInclusive<usize> = 1..=20;
+const WS_ICON_SIZE: std::ops::RangeInclusive<f32> = 8.0..=64.0;
+/// `show = "all"`: workspaces 1 to this.
+pub const WS_ALL: i64 = 10;
 /// `drag_px` of a button with `drag_children`.
 pub const DEFAULT_DRAG_PX: f32 = 24.0;
 const DRAG_PX: std::ops::RangeInclusive<f32> = 8.0..=120.0;
@@ -132,7 +139,19 @@ pub enum ItemKind {
     GifPicker,
     Player,
     Capture,
+    Workspaces,
     Spacer,
+}
+
+/// workspaces: which pills it shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WsShow {
+    /// Those Hyprland has (it creates and destroys them as they are used).
+    #[default]
+    Existing,
+    /// 1 to `WS_ALL`, empty or not, plus any other that exists.
+    All,
 }
 
 impl ItemKind {
@@ -149,6 +168,7 @@ impl ItemKind {
             ItemKind::GifPicker => "gif_picker",
             ItemKind::Player => "player",
             ItemKind::Capture => "capture",
+            ItemKind::Workspaces => "workspaces",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -284,6 +304,23 @@ pub struct ItemConfig {
     /// capture: the item's background while recording.
     #[serde(default)]
     pub record_color: Option<Color>,
+    /// workspaces: most window icons in the active pill (then "+N").
+    #[serde(default)]
+    pub max_icons: Option<usize>,
+    /// workspaces: side of the window icons, px (default: the row's icon size).
+    #[serde(default)]
+    pub icon_size: Option<f32>,
+    /// workspaces: icon (theme name or absolute path) by window class, before the
+    /// icon theme is asked; classes compared in lowercase.
+    #[serde(default)]
+    pub class_icons: Option<BTreeMap<String, String>>,
+    /// workspaces: "existing" (default) or "all".
+    #[serde(default)]
+    pub show: Option<WsShow>,
+    /// workspaces: run by a horizontal drag across it (`drag_px`); without it there
+    /// is no gesture.
+    #[serde(default)]
+    pub overview_action: Option<Action>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
@@ -449,6 +486,7 @@ impl ItemConfig {
                 ItemKind::Text => 200.0,
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
                 ItemKind::GifPicker | ItemKind::Player | ItemKind::Capture => 80.0,
+                ItemKind::Workspaces => DEFAULT_WS_WIDTH,
             }),
         }
     }
@@ -530,6 +568,8 @@ impl ItemConfig {
         // spacers, shape/radius/background.
         let frame: &[&str] = match self.kind {
             ItemKind::Spacer => &[],
+            // Pills: no circle (a circle is made square), no pressed colour.
+            ItemKind::Workspaces => &["shape", "radius", "background"],
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
@@ -632,6 +672,18 @@ impl ItemConfig {
                 "record",
                 "record_color",
             ],
+            ItemKind::Workspaces => &[
+                "id",
+                "max_icons",
+                "active_color",
+                "text_color",
+                "icon_size",
+                "anim_ms",
+                "class_icons",
+                "show",
+                "overview_action",
+                "drag_px",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -658,6 +710,11 @@ impl ItemConfig {
             ("children", self.children.is_some()),
             ("drag_children", self.drag_children.is_some()),
             ("drag_px", self.drag_px.is_some()),
+            ("max_icons", self.max_icons.is_some()),
+            ("icon_size", self.icon_size.is_some()),
+            ("class_icons", self.class_icons.is_some()),
+            ("show", self.show.is_some()),
+            ("overview_action", self.overview_action.is_some()),
             ("active_color", self.active_color.is_some()),
             ("dir", self.dir.is_some()),
             ("thumb_size", self.thumb_size.is_some()),
@@ -775,6 +832,9 @@ impl ItemConfig {
                 bail!("{what}: seek_height must be in {SEEK_HEIGHT:?} px");
             }
         }
+        if self.kind == ItemKind::Workspaces {
+            self.validate_workspaces(&what)?;
+        }
         if self.kind == ItemKind::Capture {
             if self.screenshot.is_none() && self.record.is_none() {
                 bail!("{what}: a capture needs `screenshot`, `record` or both (script paths)");
@@ -840,6 +900,50 @@ impl ItemConfig {
             validate_action(&what, action)?;
         }
         Ok(())
+    }
+
+    fn validate_workspaces(&self, what: &str) -> Result<()> {
+        if self.stretch.is_some() {
+            bail!("{what}: use `width` (the most it takes), not `stretch`");
+        }
+        if self.shape == Some(Shape::Circle) {
+            bail!("{what}: shape = \"circle\" is not for workspaces (use radius = \"full\")");
+        }
+        if self.max_icons.is_some_and(|n| !MAX_ICONS.contains(&n)) {
+            bail!("{what}: max_icons must be in {MAX_ICONS:?}");
+        }
+        if self.icon_size.is_some_and(|s| !WS_ICON_SIZE.contains(&s)) {
+            bail!("{what}: icon_size must be in {WS_ICON_SIZE:?} px");
+        }
+        for (class, icon) in self.class_icons.iter().flatten() {
+            if class.trim().is_empty() || icon.trim().is_empty() {
+                bail!("{what}: class_icons: empty class or icon ({class:?} = {icon:?})");
+            }
+            validate_icon(what, icon)?;
+            if icon.starts_with("builtin:") {
+                bail!("{what}: class_icons: built-in icons are not window icons ({icon:?})");
+            }
+        }
+        match &self.overview_action {
+            Some(a) => validate_action(&format!("{what}: overview_action"), a)?,
+            None if self.drag_px.is_some() => {
+                bail!("{what}: `drag_px` only applies with `overview_action`")
+            }
+            None => {}
+        }
+        if self.drag_px.is_some_and(|px| !DRAG_PX.contains(&px)) {
+            bail!("{what}: drag_px must be in {DRAG_PX:?} px");
+        }
+        Ok(())
+    }
+
+    /// workspaces: `class_icons` with lowercase classes.
+    pub fn class_icons(&self) -> BTreeMap<String, String> {
+        self.class_icons
+            .iter()
+            .flatten()
+            .map(|(c, i)| (c.to_lowercase(), i.clone()))
+            .collect()
     }
 
     fn validate_expandable(&self, what: &str) -> Result<()> {
@@ -1274,6 +1378,11 @@ impl Config {
                 children: None,
                 drag_children: None,
                 drag_px: None,
+                max_icons: None,
+                icon_size: None,
+                class_icons: None,
+                show: None,
+                overview_action: None,
                 active_color: None,
                 dir: None,
                 thumb_size: None,
@@ -1974,6 +2083,80 @@ mod tests {
         let tap_only = "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='b'\n\
                         action={type='socket'}";
         assert!(!parse(tap_only).unwrap().layers[0].items[0].drags());
+    }
+
+    #[test]
+    fn workspaces_options() {
+        let c = parse(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "workspaces"
+            width = 500
+            max_icons = 4
+            active_color = "#1793d1"
+            text_color = "#ffffff"
+            radius = "full"
+            background = "#2a2a2c"
+            icon_size = 30
+            anim_ms = 180
+            show = "all"
+            class_icons = { "Kitty" = "utilities-terminal", "zen" = "/usr/share/icons/zen.svg" }
+            overview_action = { type = "key", key = "KEY_F15" }
+            drag_px = 40
+            "##,
+        )
+        .unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.id(), Some("workspaces"));
+        assert_eq!(item.size(), Size::Fixed(500.0));
+        assert_eq!(item.show, Some(WsShow::All));
+        assert_eq!(item.class_icons().get("kitty").map(String::as_str), Some("utilities-terminal"));
+        assert!(matches!(item.overview_action, Some(Action::Key { .. })));
+        // Defaults.
+        let c = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.size(), Size::Fixed(DEFAULT_WS_WIDTH));
+        assert!(item.show.is_none() && item.overview_action.is_none());
+
+        let ws = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\n{body}");
+        let bad = [
+            "max_icons = 0",
+            "max_icons = 21",
+            "icon_size = 4",
+            "icon_size = 65",
+            "anim_ms = 5000",
+            "show = 'some'",
+            "stretch = 1",
+            "shape = 'circle'",
+            "size = 40",
+            "pressed_background = '#ffffff'",
+            "pressed_scale = 0.9",
+            "action = { type = 'socket' }",
+            "children = []",
+            "label = 'ws'",
+            "class_icons = { '' = 'x' }",
+            "class_icons = { kitty = '' }",
+            "class_icons = { kitty = 'builtin:folder' }",
+            "class_icons = { kitty = 'builtin:rocket' }",
+            // The gesture only with an action, and a sane threshold.
+            "drag_px = 30",
+            "overview_action = { type = 'socket' }\ndrag_px = 7",
+            "overview_action = { type = 'key', key = 'KEY_NOPE' }",
+            "overview_action = { type = 'command', argv = [] }",
+        ];
+        for body in bad {
+            assert!(parse(&ws(body)).is_err(), "accepted: {body}");
+        }
+        let err = format!("{:#}", parse(&ws("drag_px = 30")).unwrap_err());
+        assert!(err.contains("`drag_px` only applies with `overview_action`"), "{err}");
+        let err = format!("{:#}", parse(&ws("max_icons = 0")).unwrap_err());
+        assert!(err.contains("max_icons must be in 1..=20"), "{err}");
+        assert!(parse(&ws("overview_action = { type = 'socket' }\ndrag_px = 8")).is_ok());
+        // And the options are only for workspaces.
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nmax_icons=3").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow='all'").is_err());
     }
 
     #[test]

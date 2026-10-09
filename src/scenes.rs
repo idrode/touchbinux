@@ -1655,6 +1655,7 @@ pub fn bar(
                     pull: None,
                 });
             }
+            ItemKind::Workspaces => {} // (next)
             ItemKind::Spacer => {}
         }
     }

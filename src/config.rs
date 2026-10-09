@@ -60,6 +60,9 @@ const MAX_CHILDREN: usize = 12;
 const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
 /// `seek_height` of a player's seek bar, px.
 const SEEK_HEIGHT: std::ops::RangeInclusive<f32> = 1.0..=40.0;
+/// `drag_px` of a button with `drag_children`.
+pub const DEFAULT_DRAG_PX: f32 = 24.0;
+const DRAG_PX: std::ops::RangeInclusive<f32> = 8.0..=120.0;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -229,6 +232,14 @@ pub struct ItemConfig {
     /// expandable: what it unfolds into, left to right.
     #[serde(default)]
     pub children: Option<Vec<ChildConfig>>,
+    /// button: a row of children pulled out to its right by dragging the button
+    /// rightwards (a tap still runs its `action`).
+    #[serde(default)]
+    pub drag_children: Option<Vec<ChildConfig>>,
+    /// button with `drag_children`: how far right (px) the finger must go for the
+    /// row to stay out (default `DEFAULT_DRAG_PX`).
+    #[serde(default)]
+    pub drag_px: Option<f32>,
     /// expandable: background of the children the daemon marks as active;
     /// gif_picker: of the chosen GIF's thumbnail.
     #[serde(default)]
@@ -458,9 +469,23 @@ impl ItemConfig {
         self.icon_dir.as_deref().unwrap_or(ICON_DIR)
     }
 
-    /// An expandable's children (empty for other types).
+    /// An expandable's children, or a button's `drag_children` (empty for other
+    /// types; `validate` never lets an item have both).
     pub fn children(&self) -> &[ChildConfig] {
-        self.children.as_deref().unwrap_or_default()
+        self.children
+            .as_deref()
+            .or(self.drag_children.as_deref())
+            .unwrap_or_default()
+    }
+
+    /// A button that unfolds a row of children when dragged.
+    pub fn drags(&self) -> bool {
+        self.kind == ItemKind::Button && self.drag_children.is_some()
+    }
+
+    /// How far right a drag must go (buttons with `drag_children`).
+    pub fn drag_px(&self) -> f32 {
+        self.drag_px.unwrap_or(DEFAULT_DRAG_PX)
     }
 
     /// A capture's children, in order: those whose script is configured, with
@@ -536,6 +561,11 @@ impl ItemConfig {
                 "grid",
                 "battery_colors",
                 "full_color",
+                "drag_children",
+                "drag_px",
+                "expand_width",
+                "collapse_after_ms",
+                "active_color",
             ],
             ItemKind::Clock => &["id", "format", "action", "text_color"],
             ItemKind::Battery => &["id", "icon_dir", "action", "text_color"],
@@ -626,6 +656,8 @@ impl ItemConfig {
             ("pressed_scale", self.pressed_scale.is_some()),
             ("text_color", self.text_color.is_some()),
             ("children", self.children.is_some()),
+            ("drag_children", self.drag_children.is_some()),
+            ("drag_px", self.drag_px.is_some()),
             ("active_color", self.active_color.is_some()),
             ("dir", self.dir.is_some()),
             ("thumb_size", self.thumb_size.is_some()),
@@ -667,9 +699,30 @@ impl ItemConfig {
                 bail!("{what}: a button needs an `icon`, a `label` or both");
             }
             if self.anim_ms.is_some()
+                && self.drag_children.is_none()
                 && !self.icon.as_deref().is_some_and(|i| BUILTIN_ICONS.contains(&i))
             {
-                bail!("{what}: `anim_ms` only applies to the built-in icons {BUILTIN_ICONS:?}");
+                bail!(
+                    "{what}: `anim_ms` only applies to the built-in icons {BUILTIN_ICONS:?} \
+                     or with `drag_children`"
+                );
+            }
+            if self.drag_children.is_some() {
+                self.validate_children(&what, 1)?;
+                if self.drag_px.is_some_and(|px| !DRAG_PX.contains(&px)) {
+                    bail!("{what}: drag_px must be in {DRAG_PX:?} px");
+                }
+            } else {
+                for (field, set) in [
+                    ("drag_px", self.drag_px.is_some()),
+                    ("expand_width", self.expand_width.is_some()),
+                    ("collapse_after_ms", self.collapse_after_ms.is_some()),
+                    ("active_color", self.active_color.is_some()),
+                ] {
+                    if set {
+                        bail!("{what}: `{field}` only applies with `drag_children`");
+                    }
+                }
             }
             if let Some(n) = self.grid {
                 if self.icon.as_deref() != Some(BUILTIN_GRID_WAVE) {
@@ -803,9 +856,10 @@ impl ItemConfig {
     /// Children's count (`min` to `MAX_CHILDREN`), actions and icons.
     fn validate_children(&self, what: &str, min: usize) -> Result<()> {
         let kind = self.kind.name();
+        let field = if self.drags() { "drag_children" } else { "children" };
         let n = self.children().len();
         if !(min..=MAX_CHILDREN).contains(&n) {
-            bail!("{what}: a {kind} needs {min} to {MAX_CHILDREN} `children`, it has {n}");
+            bail!("{what}: a {kind} needs {min} to {MAX_CHILDREN} `{field}`, it has {n}");
         }
         for (id, child) in self.child_ids() {
             let what = format!("{what}: child {id:?}");
@@ -814,6 +868,14 @@ impl ItemConfig {
                     ("role", child.role.is_some()),
                     ("icon_playing", child.icon_playing.is_some()),
                     ("icon_paused", child.icon_paused.is_some()),
+                ];
+                if let Some((field, _)) = player_only.iter().find(|(_, set)| *set) {
+                    bail!("{what}: `{field}` is only for a player's children");
+                }
+            }
+            // A drag row's children have the player's boxes too.
+            if self.kind != ItemKind::Player && !self.drags() {
+                let boxed_only = [
                     ("shape", child.shape.is_some()),
                     ("radius", child.radius.is_some()),
                     ("size", child.diameter.is_some()),
@@ -822,8 +884,8 @@ impl ItemConfig {
                     ("pressed_scale", child.pressed_scale.is_some()),
                     ("text_color", child.text_color.is_some()),
                 ];
-                if let Some((field, _)) = player_only.iter().find(|(_, set)| *set) {
-                    bail!("{what}: `{field}` is only for a player's children");
+                if let Some((field, _)) = boxed_only.iter().find(|(_, set)| *set) {
+                    bail!("{what}: `{field}` is only for a player's children or drag_children");
                 }
             }
             match (&child.action, child.role) {
@@ -1206,6 +1268,8 @@ impl Config {
                 play: None,
                 key: None,
                 children: None,
+                drag_children: None,
+                drag_px: None,
                 active_color: None,
                 dir: None,
                 thumb_size: None,
@@ -1848,6 +1912,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!(inline.layers[0].items[0].children().len(), 2);
+    }
+
+    /// The launcher: a tap sends F13, a drag pulls out the terminal apps.
+    const LAUNCHER: &str = r##"
+        [[layers]]
+        id = "main"
+        [[layers.items]]
+        type = "button"
+        id = "launcher"
+        icon = "x"
+        shape = "circle"
+        size = 52
+        action = { type = "key", key = "KEY_F13" }
+        drag_px = 40
+        expand_width = 700
+        anim_ms = 150
+        collapse_after_ms = 4000
+        active_color = "#ff000080"
+        [[layers.items.drag_children]]
+        label = "nvim"
+        action = { type = "command", argv = ["/usr/bin/kitty", "-e", "/usr/bin/nvim"] }
+        [[layers.items.drag_children]]
+        id = "htop"
+        icon = "htop"
+        shape = "circle"
+        background = "#333333"
+        action = { type = "command", argv = ["/usr/bin/kitty", "-e", "/usr/bin/htop"] }
+    "##;
+
+    #[test]
+    fn buttons_with_drag_children() {
+        let c = parse(LAUNCHER).unwrap();
+        let item = &c.layers[0].items[0];
+        assert!(item.drags());
+        assert_eq!(item.drag_px(), 40.0);
+        let ids: Vec<_> = item.child_ids().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["launcher.1", "htop"]);
+        // The button keeps its own action; each child has its own.
+        assert!(matches!(c.action("launcher"), Some(Action::Key { .. })));
+        assert!(matches!(c.action("launcher.1"), Some(Action::Command { argv, .. }) if argv[2] == "/usr/bin/nvim"));
+        assert!(matches!(c.action("htop"), Some(Action::Command { .. })));
+        // Style fields give a child its own box.
+        let f = c.layers[0].frame_for(item);
+        assert!(item.children()[1].frame(&f).is_some());
+        assert!(item.children()[0].frame(&f).is_none());
+        // Default threshold; a button without them doesn't drag.
+        let plain = LAUNCHER.replace("drag_px = 40\n", "");
+        assert_eq!(parse(&plain).unwrap().layers[0].items[0].drag_px(), DEFAULT_DRAG_PX);
+        let tap_only = "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='b'\n\
+                        action={type='socket'}";
+        assert!(!parse(tap_only).unwrap().layers[0].items[0].drags());
+    }
+
+    #[test]
+    fn rejects_bad_drag_children() {
+        let child = "[[layers.items.drag_children]]\nlabel='c'\naction={type='socket'}";
+        let button = |body: &str, children: &str| {
+            format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='b'\n\
+                 action={{type='socket'}}\n{body}\n{children}"
+            )
+        };
+        let bad = [
+            // drag_px out of range.
+            button("drag_px=7", child),
+            button("drag_px=121", child),
+            button("drag_px=0", child),
+            // Empty, or too many.
+            button("drag_children=[]", ""),
+            button("", &[child; 13].join("\n")),
+            // Children need an action and something to show; no player roles.
+            button("", "[[layers.items.drag_children]]\nlabel='c'"),
+            button("", "[[layers.items.drag_children]]\naction={type='socket'}"),
+            button("", "[[layers.items.drag_children]]\nlabel='c'\nrole='next'\naction={type='socket'}"),
+            button("", "[[layers.items.drag_children]]\nlabel='c'\nsize=30\naction={type='socket'}"),
+            // drag_* and the row's options without drag_children.
+            button("drag_px=30", ""),
+            button("expand_width=500", ""),
+            button("collapse_after_ms=4000", ""),
+            button("active_color='#ffffff'", ""),
+            button("anim_ms=100", ""),
+            // A child id clashing with another item.
+            format!("{}\n[[layers.items]]\ntype='clock'\nid='b.1'", button("", child)),
+            // drag_* on other types.
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ndrag_px=30".into(),
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\nicon='x'\n\
+             drag_children=[{label='c', action={type='socket'}}]\n\
+             children=[{label='c', action={type='socket'}}]"
+                .into(),
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='gif'\npath='/x.gif'\n\
+             drag_children=[{label='c', action={type='socket'}}]"
+                .into(),
+        ];
+        for body in &bad {
+            assert!(parse(body).is_err(), "accepted: {body}");
+        }
+        let err = format!("{:#}", parse(&button("drag_px=200", child)).unwrap_err());
+        assert!(err.contains("drag_px must be in 8.0..=120.0"), "{err}");
+        let err = format!("{:#}", parse(&button("drag_children=[]", "")).unwrap_err());
+        assert!(err.contains("1 to 12 `drag_children`, it has 0"), "{err}");
+        let err = format!("{:#}", parse(&button("drag_px=30", "")).unwrap_err());
+        assert!(err.contains("`drag_px` only applies with `drag_children`"), "{err}");
+        assert!(parse(&button("drag_px=8", child)).is_ok());
+        assert!(parse(&button("drag_px=120\nanim_ms=100", child)).is_ok());
     }
 
     #[test]

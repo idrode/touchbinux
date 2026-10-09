@@ -2445,6 +2445,26 @@ mod tests {
         }
     }
 
+    /// The launcher commented out in the example is valid once uncommented.
+    #[test]
+    fn example_launcher_is_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let start = text.find("# [[layers.items]]\n# type = \"button\"\n# id = \"launcher\"").unwrap();
+        let block = &text[start..start + text[start..].find("\n\n").unwrap()];
+        let body: String = block
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = parse(&format!("[[layers]]\nid='m'\n{body}")).unwrap();
+        let item = &c.layers[0].items[0];
+        assert!(item.drags());
+        assert_eq!(item.children().len(), 5);
+        let nvim = c.action("launcher.2").unwrap();
+        assert!(matches!(nvim, Action::Command { argv, detach: true, .. } if argv[4] == "/usr/bin/nvim"));
+    }
+
     /// A real 2-frame GIF (6x3) in a fresh temporary directory.
     fn temp_gif(name: &str) -> std::path::PathBuf {
         use image::{Delay, Frame, RgbaImage, codecs::gif::GifEncoder};

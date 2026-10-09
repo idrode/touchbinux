@@ -170,6 +170,50 @@ format = "%H:%M"
 # label = "Next"
 # action = { type = "key", key = "KEY_NEXTSONG" }
 #
+# A launcher: a tap runs its action (here F13, for a Quickshell widget bound to
+# it); dragging it to the right pulls out a row of terminal apps beside it (the
+# circle keeps its shape). The row follows the finger and stays out once the finger
+# has gone drag_px to the right; let go before and it goes back in. A move that is
+# not a drag to the right (up, down, left, too diagonal) does nothing at all.
+# Children are like an expandable's (icon and/or label, action) and may have a box
+# of their own (shape, radius, size, background, pressed_background,
+# pressed_scale, text_color). detach = true: the app stays open (no timeout, its
+# own session; it still ends if the service stops or restarts). Use absolute
+# paths: commands run without a shell, with a clean environment (see "Acciones"
+# in docs/GUIA.md). Replace /home/USUARIO with your home.
+# [[layers.items]]
+# type = "button"
+# id = "launcher"
+# icon = "/etc/touchbinux/icons/arch.svg"   # any icon; this one is not shipped
+# color = "#00ffb7"
+# shape = "circle"
+# size = 52
+# background = "transparent"
+# action = { type = "key", key = "KEY_F13" }
+# drag_px = 24                     # default; 8 to 120
+# collapse_after_ms = 4000         # also expand_width, anim_ms, active_color
+#
+# [[layers.items.drag_children]]
+# id = "launcher_kitty"
+# icon = "kitty"
+# action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO"], detach = true }
+#
+# [[layers.items.drag_children]]
+# label = "nvim"
+# action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/nvim"], detach = true }
+#
+# [[layers.items.drag_children]]
+# label = "yazi"
+# action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/yazi"], detach = true }
+#
+# [[layers.items.drag_children]]
+# label = "htop"
+# action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/htop"], detach = true }
+#
+# [[layers.items.drag_children]]
+# label = "claude"
+# action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/home/USUARIO/.local/bin/claude"], detach = true }
+
 # A GIF you choose on the bar: tap it to unfold thumbnails of the GIFs in `dir`
 # (read again on every tap, as the run_as user); tap one to show it here. The choice
 # is kept in /var/lib/touchbinux/state.toml, not in this file. Without the folder or

@@ -493,10 +493,13 @@ un error.
 | `icon` | — | ruta absoluta a `.svg`/`.png`, nombre del tema de iconos, o un icono integrado (`"builtin:folder"`, `"builtin:folder_classic"`, `"builtin:grid_wave"`, `"builtin:battery"`) |
 | `label` | — | texto junto al icono. Sin él, el icono va solo y centrado |
 | `color` | — | pinta el icono de un solo color (`"#rrggbb"` o `"#rrggbbaa"`); no vale con `builtin:battery` |
-| `anim_ms` | `300` / `450` | solo con los iconos integrados: duración de la apertura de las carpetas (300), de la ola de `grid_wave` (450) o del vaciado y llenado de `battery` (450); 0-2000 |
+| `anim_ms` | `300` / `450` | con los iconos integrados: duración de la apertura de las carpetas (300), de la ola de `grid_wave` (450) o del vaciado y llenado de `battery` (450); con `drag_children`, también la de plegar su fila (200); 0-2000 |
 | `grid` | `3` | solo con `builtin:grid_wave`: cuadrados por lado (2-4) |
 | `battery_colors` | `["#00ffb7", "#ffd60a", "#ff9500", "#ff2d2d"]` | solo con `builtin:battery`: cuatro colores, desde 60 %, 30-59 %, 15-29 % y menos de 15 % |
 | `full_color` | `"#00ffff"` | solo con `builtin:battery`: color cuando está llena |
+| `drag_children` | — | hijos que se despliegan **arrastrando** el botón a la derecha, ver [abajo](#arrastrar-para-desplegar-drag_children) (1-12) |
+| `drag_px` | `24` | solo con `drag_children`: cuántos px a la derecha hay que arrastrar para que la fila se quede fuera (8-120) |
+| `expand_width`, `collapse_after_ms`, `active_color` | | solo con `drag_children`: como en [`expandable`](#expandable), para su fila |
 
 Necesita `icon`, `label` o ambos.
 
@@ -609,6 +612,104 @@ La barra es negra: usa iconos claros o `color`.
 `fast_rewind`, `fast_forward`, `volume_up`, `volume_down`, `volume_off`, `mic_off`,
 `brightness_high`, `brightness_low`, `backlight_high`, `backlight_low`, `search`,
 `bolt` y los `battery_*` (licencia en `icons/README.md`).
+
+##### Arrastrar para desplegar: `drag_children`
+
+Un `button` con `drag_children` sigue siendo un botón (al tocarlo hace su `action`),
+pero además, **arrastrándolo hacia la derecha**, saca a su lado una fila de hijos,
+como la de un `expandable`. Pensado para un lanzador: tocar abre tu menú de
+Quickshell, arrastrar ofrece unas apps de terminal.
+
+Qué hace el dedo que baja sobre el botón:
+
+- **Toque** (no se aleja más de 8 px de donde bajó): al levantarlo, la `action` del
+  botón, como siempre. Mientras, el botón se ve pulsado.
+- **Arrastre a la derecha** (pasados 8 px, hacia la derecha y casi horizontal: como
+  mucho ~27° de inclinación, es decir, el doble de recorrido horizontal que
+  vertical): la fila **sigue al dedo**, fuera en proporción a lo recorrido
+  (`recorrido / drag_px`). Al llegar a `drag_px` se queda fuera aunque el dedo
+  vuelva atrás; si se suelta antes, **vuelve dentro** con la animación (`anim_ms`).
+  Un arrastre nunca ejecuta la `action` del botón.
+- **Cualquier otro movimiento** de más de 8 px (vertical, a la izquierda,
+  demasiado diagonal): el toque se **cancela**; no hace nada aunque se levante
+  sobre el botón. La dirección se decide al pasar de 8 px y no cambia después.
+- Un toque **cancelado** por el sistema (palma, seguimiento perdido) no ejecuta
+  nada y deja la fila dentro.
+
+Fuera, la fila funciona como la de un `expandable`: **tocar un hijo** ejecuta su
+acción (y se avisa por el socket con el `id` del hijo) y la pliega; **tocar fuera**
+la pliega sin hacer nada más (también si es el propio botón); se pliega sola tras
+`collapse_after_ms`. En reposo, plegada o fuera, 0 fps.
+
+**Aspecto.** La fila sale **a la derecha del botón** (8 px de separación), con la
+caja del botón (`background`, `radius`; si el botón es un círculo, la fila es una
+píldora) y la misma altura. El botón no cambia: un círculo sigue siendo un círculo.
+Crece desde el borde del botón como un cajón: tapa en negro lo que va cubriendo,
+oscurece el resto de lo que quedará debajo y sus hijos se deslizan con su borde
+derecho, apareciendo al salir de detrás del botón. Sin hijos de icono ni fondo
+(`background = "transparent"`), se ven solo sus textos sobre negro. Ancho por
+defecto: lo justo para que cada hijo muestre su icono y texto enteros; con
+`expand_width`, ese ancho; nunca pasa del final de la barra.
+
+Los hijos (`[[layers.items.drag_children]]`, de izquierda a derecha) llevan lo
+mismo que los de un `expandable` (`icon` y/o `label`, `action`, `color`, `id`, por
+defecto `"<id del botón>.<n>"`) y, como los del `player`, pueden tener **caja
+propia** con `shape`, `radius`, `size` (círculos), `background`,
+`pressed_background`, `pressed_scale` y `text_color`. `role`, `icon_playing` e
+`icon_paused` son solo del `player`. El resaltado de un hijo pulsado sin caja
+propia es el `pressed_background` del botón.
+
+**Validación estricta**: `drag_children` vacío o con más de 12, `drag_px` fuera de
+8-120, `drag_px`/`expand_width`/`collapse_after_ms`/`active_color` sin
+`drag_children`, o `drag_children`/`drag_px` en otro tipo de elemento son errores
+de configuración.
+
+Ejemplo, un lanzador circular (sustituye `USUARIO`; `arch.svg` es un icono tuyo,
+no viene en `icons/`):
+
+```toml
+[[layers.items]]
+type = "button"
+id = "launcher"
+icon = "/etc/touchbinux/icons/arch.svg"
+color = "#00ffb7"
+shape = "circle"
+size = 52
+background = "transparent"
+pressed_background = "#00000000"
+pressed_scale = 1.0
+action = { type = "key", key = "KEY_F13" }      # el toque: tu widget de Quickshell
+drag_px = 24
+collapse_after_ms = 4000
+
+[[layers.items.drag_children]]
+id = "launcher_kitty"
+icon = "kitty"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO"], detach = true }
+
+[[layers.items.drag_children]]
+label = "nvim"                                   # id "launcher.2"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/nvim"], detach = true }
+
+[[layers.items.drag_children]]
+label = "yazi"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/yazi"], detach = true }
+
+[[layers.items.drag_children]]
+label = "htop"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/htop"], detach = true }
+
+[[layers.items.drag_children]]
+label = "claude"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/home/USUARIO/.local/bin/claude"], detach = true }
+```
+
+Los hijos sin icono llevan `label`. **`detach = true` es necesario** para apps que
+se quedan abiertas: sin él, el timeout de los `command` (10 s por defecto) cerraría
+la terminal. Las rutas van completas porque no hay shell; el entorno que reciben
+(Wayland, Hyprland...) se explica en [Acciones](#acciones). Con este ejemplo en la
+barra, `pressed_background = "#00000000"` hace que tampoco los hijos se resalten al
+pulsarlos: quítalo o pon un color si quieres verlo.
 
 #### `clock`
 
@@ -1079,17 +1180,49 @@ Campo `action` (tabla en línea). Al tocar se ejecuta la acción **y**, siempre,
 avisa por el socket (`{"type":"tap","id":"..."}`).
 
 **`command`**: lanza un programa **sin shell**, como `run_as`, con un entorno limpio
-de su sesión (`HOME`, `PATH`, `XDG_RUNTIME_DIR`, D-Bus, y las variables de Hyprland
-si está conectado).
+de su sesión (ver abajo).
 
 ```toml
 action = { type = "command", argv = ["notify-send", "Hola"], timeout_ms = 5000 }
+action = { type = "command", argv = ["/usr/bin/kitty", "-e", "/usr/bin/htop"], detach = true }
 ```
 
 `timeout_ms`: por defecto 10000, máximo 60000. Al vencer se mata el grupo de procesos
-entero, así que **no lo uses para abrir aplicaciones** (morirían): usa `hyprctl` con
-`exec`. Máximo 8 comandos a la vez. Sin shell: nada de `~`, `$VAR`, `|` ni `&&`
+entero, así que **para abrir aplicaciones usa `detach = true`** (o `hyprctl` con
+`exec`). Máximo 8 comandos a la vez. Sin shell: nada de `~`, `$VAR`, `|` ni `&&`
 (si los necesitas, `argv = ["sh", "-c", "..."]`).
+
+`detach = true` (por defecto `false`): para apps que se quedan abiertas (una
+terminal). Sin timeout (ponerle `timeout_ms` es un error), en una **sesión propia**
+(`setsid`), no ocupa los 8 huecos de los comandos (hasta 16 abiertas a la vez), se
+recoge al cerrarse y el daemon **no la mata al salir**. **Límite**: como servicio
+sigue en el cgroup de `touchbinux.service`, así que `systemctl stop`/`restart`
+(también el `restart` tras reinstalar) **la cierran**. Si quieres que sobreviva a eso, que la
+lance Hyprland (`hyprctl` con `exec`), que la saca del servicio.
+
+**Entorno de los comandos.** Ni `command` ni `hyprctl`, `wpctl`, `pactl` o los
+scripts de `capture` heredan el entorno del daemon (el de root o el del servicio):
+cada uno recibe uno nuevo, construido y comprobado al lanzarlo:
+
+| Variable | Valor | Solo si |
+|---|---|---|
+| `HOME`, `USER`, `LOGNAME` | los de `run_as` | siempre |
+| `PATH` | `~/.local/bin:/usr/local/bin:/usr/bin:/bin` | siempre |
+| `LANG`, `LC_ALL` | los del daemon | están definidas |
+| `XDG_RUNTIME_DIR` | `/run/user/<uid>` | es un directorio (no un enlace) del usuario y privado (sin permisos de grupo ni otros, como lo crea logind). Si no, ninguna de las siguientes |
+| `DBUS_SESSION_BUS_ADDRESS` | `unix:path=<runtime>/bus` | `bus` es un socket del usuario |
+| `WAYLAND_DISPLAY` | el de Hyprland (segunda línea de su `hyprland.lock`); si no vale, el primer `wayland-*` por nombre | es un nombre simple (sin `/`) de un socket (no un enlace) del usuario dentro de su runtime |
+| `HYPRLAND_INSTANCE_SIGNATURE`, `XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=Hyprland` | la instancia a la que está conectado el daemon | esa instancia es `<runtime>/hypr/<firma>`, un directorio del usuario |
+
+Lo que no se encuentra no se pasa y el comando se lanza igual: una app gráfica
+fallará como en una consola sin sesión (el error sale en el log del servicio).
+**Límites**: solo se conoce la sesión gráfica de Hyprland (otro compositor
+funcionaría solo por el `wayland-*` encontrado); con varias sesiones Wayland del
+mismo usuario sin Hyprland se usa la primera por nombre; no hay `DISPLAY` (las apps
+X11 solo funcionan si saben usar Wayland o si Xwayland ya está en el entorno de
+otra forma); y lo de tu shell (`~/.zshrc`, variables de `hyprland.conf` con `env =`)
+no llega: si una app lo necesita, `argv = ["sh", "-c", "..."]` o `hyprctl` con
+`exec` (que hereda el entorno de Hyprland).
 
 **`hyprctl`**: un `hyprctl dispatch`, con exactamente uno de:
 
@@ -1171,6 +1304,7 @@ el código (`src/widgets.rs`).
 | Ola de `builtin:grid_wave` | `anim_ms` | 450 ms |
 | Vaciado y llenado de `builtin:battery` | `anim_ms` | 450 ms |
 | Desplegar volumen/brillo/`expandable` | `anim_ms` | 200 ms |
+| Fila de `drag_children` (sigue al dedo; plegar) | `anim_ms` del botón | 200 ms |
 | Plegado automático | `collapse_after_ms` | 3000 ms |
 | GIF y `gif_picker` | `play` | `"on_tap"` |
 | Desplegar `gif_picker`, `player` y `capture` | `anim_ms` | 200 ms |
@@ -1198,7 +1332,8 @@ Cada receta es un elemento para añadir a `[[layers.items]]`; después,
 
 ### Botón que abre una app
 
-Que la lance Hyprland (sigue abierta tras el toque y no la afecta el timeout):
+Que la lance Hyprland (sigue abierta tras el toque, no la afecta el timeout y
+sobrevive a reiniciar el servicio):
 
 ```toml
 [[layers.items]]
@@ -1208,8 +1343,11 @@ icon = "utilities-terminal"     # o el nombre del icono de la app, p. ej. "kitty
 action = { type = "hyprctl", exec = ["kitty"] }
 ```
 
-Sin Hyprland: `{ type = "command", argv = ["setsid", "-f", "kitty"] }` también funciona
-en teoría (se separa del grupo de procesos), pero **no está probado**.
+O como `command` con `detach = true` (no depende de Hyprland, pero se cierra si se
+para o reinicia el servicio):
+`{ type = "command", argv = ["/usr/bin/kitty"], detach = true }`. Para varias
+apps detrás de un mismo botón, ver
+[`drag_children`](#arrastrar-para-desplegar-drag_children).
 
 ### Botón que lanza un comando
 
@@ -1349,7 +1487,9 @@ También lee los iconos, GIF y fuentes, y crea el socket.
 
 **Qué NO corre como root.** Todo lo que lanza: acciones `command`, `hyprctl`, `wpctl` y
 `pactl`. Corren como el usuario de sesión, con sus grupos, un entorno limpio (nada
-heredado de root), su propio grupo de procesos, sin shell, y con timeout. **Nunca se
+heredado de root; ver [Entorno de los comandos](#acciones)), su propio grupo de
+procesos, sin shell, y con timeout (salvo las `command` con `detach`, que van en su
+propia sesión, sin timeout, y siguen abiertas si el daemon sale). **Nunca se
 ejecuta nada como root**: si no hay usuario válido, los comandos se rechazan
 (`runner: no session user; commands disabled`).
 

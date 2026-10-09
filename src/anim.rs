@@ -67,23 +67,12 @@ impl Tween {
         }
     }
 
-    /// From `from` to `to` over `dur`, starting at `start` (it may be later than
-    /// now: it stays at `from` until then).
-    pub fn starting(from: f32, to: f32, start: Duration, dur: Duration) -> Tween {
-        Tween {
-            from,
-            to,
-            start,
-            dur,
-        }
-    }
-
     pub fn value(&self, t: Duration) -> f32 {
         if self.dur.is_zero() || t >= self.start + self.dur {
             return self.to;
         }
         let k = t.saturating_sub(self.start).as_secs_f32() / self.dur.as_secs_f32();
-        self.from + (self.to - self.from) * ease_out(k)
+        self.from + (self.to - self.from) * ease_out_cubic(k)
     }
 
     /// Where it is going (or resting).

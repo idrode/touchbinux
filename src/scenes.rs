@@ -13,7 +13,7 @@ use crate::{
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
-    frame::{Frame, Radius},
+    frame::Frame,
     gif::{Gif, GifPlayer, Play},
     gifpick::PickerFace,
     player::{PlayerFace, SeekBar},
@@ -336,10 +336,9 @@ pub struct Scene {
     menus: Vec<Expandable>,
     /// `workspaces` items, with their overview drag's `drag_px` if they have one.
     workspaces: Vec<(Workspaces, Option<f32>)>,
-    /// What the finger on a workspaces item came down on, and whether it is still
-    /// on it.
+    /// What the finger on a workspaces item came down on, and what it is on now.
     ws_target: Option<Hit>,
-    ws_on_target: bool,
+    ws_hover: Option<Hit>,
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
     texts: Vec<TextItem>,
@@ -371,7 +370,7 @@ impl Scene {
             menus: Vec::new(),
             workspaces: Vec::new(),
             ws_target: None,
-            ws_on_target: false,
+            ws_hover: None,
             buttons: Vec::new(),
             sliders: Vec::new(),
             texts: Vec::new(),
@@ -425,12 +424,10 @@ impl Scene {
         }
         for (i, (ws, _)) in self.workspaces.iter().enumerate() {
             let pressed = match self.capture {
-                Capture::Ws(j, _, PullState::Tap) if j == i && self.ws_on_target => {
-                    self.ws_target.as_ref()
-                }
+                Capture::Ws(j, _, PullState::Tap) if j == i => self.ws_pick(i),
                 _ => None,
             };
-            ws.draw(canvas, t, font, pressed);
+            ws.draw(canvas, t, font, pressed.as_ref());
         }
         // Everything of the pressed item is drawn by now (background, highlight, icon,
         // live content): scale it as a whole.
@@ -669,6 +666,33 @@ impl Scene {
         }
     }
 
+    /// What a finger lifted now on workspaces item `i` would choose: what it is on,
+    /// if that is what it came down on, or an icon in the strip of the workspace it
+    /// came down on (a pressed strip opens under the finger and is chosen from).
+    fn ws_pick(&self, i: usize) -> Option<Hit> {
+        let w = &self.workspaces[i].0;
+        let (target, hover) = (self.ws_target.as_ref()?, self.ws_hover.as_ref()?);
+        let same = w.workspace_of(target).is_some() && w.workspace_of(target) == w.workspace_of(hover);
+        let ok = hover == target || (same && matches!(target, Hit::Workspace(_)));
+        ok.then(|| hover.clone())
+    }
+
+    /// Tells workspaces item `i` which workspace the finger is on (its capsule
+    /// grows; with strip = "pressed" its strip opens), if `tapping` and on the one
+    /// it came down on. Returns whether that changed anything.
+    fn ws_touch(&mut self, i: usize, tapping: bool, t: Duration) -> bool {
+        let w = &self.workspaces[i].0;
+        let touched = match (tapping, &self.ws_target, &self.ws_hover) {
+            (true, Some(target), Some(hover)) => {
+                let ws = w.workspace_of(hover);
+                (ws.is_some() && ws == w.workspace_of(target))
+                    .then(|| (ws.unwrap_or_default(), matches!(hover, Hit::Workspace(_))))
+            }
+            _ => None,
+        };
+        self.workspaces[i].0.set_touch(touched, t)
+    }
+
     /// Shortest wall-clock period any widget follows (see `Widget::wall_period`).
     pub fn wall_period(&self) -> Option<u64> {
         self.widgets
@@ -705,8 +729,10 @@ impl Scene {
                 } else if let Some(i) =
                     self.workspaces.iter().position(|(w, _)| contains(w.rect, x, y))
                 {
-                    self.ws_target = self.workspaces[i].0.hit(x, y);
-                    self.ws_on_target = self.ws_target.is_some();
+                    let hit = self.workspaces[i].0.hit(x, y, t);
+                    self.ws_target = hit.clone();
+                    self.ws_hover = hit;
+                    self.ws_touch(i, true, t);
                     changed = true;
                     Capture::Ws(i, (x, y), PullState::Tap)
                 } else if let Some(i) = self.buttons.iter().position(|b| contains(b.rect, x, y)) {
@@ -740,7 +766,7 @@ impl Scene {
             }
             (Phase::Move, Capture::Ws(i, from, state)) => {
                 let (w, drag) = &self.workspaces[i];
-                let on = self.ws_target.is_some() && w.hit(x, y) == self.ws_target;
+                let hover = w.hit(x, y, t);
                 let (dx, dy) = (x - from.0, y - from.1);
                 let next = match (*drag, state) {
                     // No gesture: a press, as on a button (off it, no highlight).
@@ -756,9 +782,10 @@ impl Scene {
                     (Some(_), PullState::Tap) => PullState::Cancelled,
                     (_, s) => s,
                 };
-                changed |= on != self.ws_on_target;
-                self.ws_on_target = on;
+                changed |= hover != self.ws_hover;
+                self.ws_hover = hover;
                 self.capture = Capture::Ws(i, from, next);
+                changed |= self.ws_touch(i, next == PullState::Tap, t);
             }
             (Phase::Move, Capture::Slider(i)) => {
                 let s = &mut self.sliders[i];
@@ -828,22 +855,24 @@ impl Scene {
                         changed = true;
                     }
                     Capture::Ws(i, _, state) => {
-                        let w = &self.workspaces[i].0;
-                        let target = self.ws_target.take();
-                        let on = target.is_some() && w.hit(x, y) == target;
+                        self.ws_hover = self.workspaces[i].0.hit(x, y, t);
+                        let pick = self.ws_pick(i);
+                        let id = self.workspaces[i].0.id.clone();
                         if phase == Phase::Up {
-                            match (state, target) {
-                                (PullState::Tap, Some(Hit::Workspace(id))) if on => {
-                                    out.push(UiEvent::Workspace(w.id.clone(), id.to_string()));
+                            match (state, pick) {
+                                (PullState::Tap, Some(Hit::Workspace(ws))) => {
+                                    out.push(UiEvent::Workspace(id, ws.to_string()));
                                 }
-                                (PullState::Tap, Some(Hit::Window(addr))) if on => {
-                                    out.push(UiEvent::FocusWindow(w.id.clone(), format!("0x{addr}")));
+                                (PullState::Tap, Some(Hit::Window(addr))) => {
+                                    out.push(UiEvent::FocusWindow(id, format!("0x{addr}")));
                                 }
-                                (PullState::Out, _) => out.push(UiEvent::Overview(w.id.clone())),
+                                (PullState::Out, _) => out.push(UiEvent::Overview(id)),
                                 _ => {}
                             }
                         }
-                        self.ws_on_target = false;
+                        self.ws_target = None;
+                        self.ws_hover = None;
+                        self.ws_touch(i, false, t);
                         changed = true;
                     }
                     Capture::Slider(i) => {
@@ -993,7 +1022,7 @@ impl Scene {
             Capture::Ws(i, from, state) => {
                 let id = &old.workspaces[i].0.id;
                 self.ws_target = old.ws_target.clone();
-                self.ws_on_target = old.ws_on_target;
+                self.ws_hover = old.ws_hover.clone();
                 let j = self.workspaces.iter().position(|(w, _)| &w.id == id);
                 j.map_or(Capture::None, |j| Capture::Ws(j, from, state))
             }
@@ -1791,27 +1820,30 @@ pub fn bar_with(
             }
             ItemKind::Workspaces => {
                 let Some(state) = hypr else { continue };
-                let mut frame = frame;
-                // Pills, unless the layer or the item says otherwise.
-                if item.radius.is_none() && layer.item_radius.is_none() {
-                    frame.radius = Radius::Full;
-                }
-                let icon = item.icon_size.unwrap_or(icon_side(rect.h) - 4.0);
-                if icon > rect.h {
-                    bail!(
-                        "layer {:?}: workspaces {id:?}: icon_size {icon} px is larger than the row, \
-                         which is {} px high",
-                        layer.id,
-                        rect.h
-                    );
+                let icon = item.icon_size.unwrap_or(workspaces::DEFAULT_ICON);
+                let (long, short) = item.ws_bar();
+                for (what, px) in [("icon_size", icon), ("bar_long", long)] {
+                    if px > rect.h {
+                        bail!(
+                            "layer {:?}: workspaces {id:?}: {what} {px} px is larger than the row, \
+                             which is {} px high",
+                            layer.id,
+                            rect.h
+                        );
+                    }
                 }
                 let style = workspaces::Style {
-                    frame,
                     active: item.active_color.map_or(workspaces::DEFAULT_ACTIVE, |c| c.0),
-                    text: frame.text.unwrap_or(Rgba::WHITE),
+                    inactive: item.inactive_color.map_or(workspaces::DEFAULT_INACTIVE, |c| c.0),
+                    long,
+                    short,
+                    gap: item.gap.unwrap_or(workspaces::DEFAULT_GAP),
+                    strip_bg: item.strip_background.map_or(workspaces::DEFAULT_STRIP_BG, |c| c.0),
                     icon,
+                    icon_gap: item.icon_gap.unwrap_or(workspaces::DEFAULT_ICON_GAP),
+                    pad: item.strip_pad.unwrap_or(workspaces::DEFAULT_STRIP_PAD),
+                    strip: item.strip.unwrap_or_default(),
                     max_icons: item.max_icons.unwrap_or(DEFAULT_MAX_ICONS),
-                    anim: item.anim().unwrap_or(workspaces::DEFAULT_ANIM),
                     class_icons: item.class_icons(),
                 };
                 let show = item.show.unwrap_or_default();
@@ -4203,7 +4235,7 @@ mod tests {
         let y = r.y + r.h / 2.0;
         let xs: Vec<f32> = (r.x as i32..(r.x + r.w) as i32)
             .map(|x| x as f32)
-            .filter(|&x| w.hit(x, y).as_ref() == Some(what))
+            .filter(|&x| w.hit(x, y, Duration::ZERO).as_ref() == Some(what))
             .collect();
         ((xs[0] + xs[xs.len() - 1]) / 2.0, y)
     }
@@ -4241,10 +4273,10 @@ mod tests {
         let mut out = Vec::new();
         s.handle_touch(Phase::Down, four, MS(300), &font, &mut out);
         assert_eq!(s.ws_target, Some(Hit::Workspace(4)));
-        assert!(s.ws_on_target);
+        assert_eq!(s.ws_pick(0), Some(Hit::Workspace(4)));
         let five = ws_point(&s, &Hit::Workspace(5));
         assert!(s.handle_touch(Phase::Move, five, MS(310), &font, &mut out));
-        assert!(!s.ws_on_target);
+        assert_eq!(s.ws_pick(0), None);
         s.handle_touch(Phase::Up, five, MS(320), &font, &mut out);
         assert!(out.is_empty());
         // Without overview_action, a horizontal drag is no gesture.
@@ -4258,6 +4290,29 @@ mod tests {
         s.handle_touch(Phase::Cancel, four, MS(510), &font, &mut out);
         assert!(out.is_empty());
         assert_eq!(s.ws_target, None);
+    }
+
+    #[test]
+    fn a_pressed_strip_opens_under_the_finger_and_its_icons_are_chosen_from() {
+        let Some(font) = font() else { return };
+        let toml = ws_layer(false).replace("width = 600", "width = 600\n        strip = \"pressed\"");
+        let mut s = ws_scene(&font, &toml, Some(&ws_state()));
+        let four = ws_point(&s, &Hit::Workspace(4));
+        let mut out = Vec::new();
+        assert!(s.handle_touch(Phase::Down, four, MS(1000), &font, &mut out));
+        assert_eq!(s.next_change(MS(1000)), Some(MS(1000)), "opening and growing");
+        // Open after 190 ms: slide onto its icon (Code, c3) and lift.
+        let w = &s.workspaces[0].0;
+        let icon = (0..120)
+            .map(|d| four.0 + d as f32)
+            .find(|&x| w.hit(x, four.1, MS(1200)) == Some(Hit::Window("c3".into())))
+            .unwrap();
+        s.handle_touch(Phase::Move, (icon, four.1), MS(1200), &font, &mut out);
+        s.handle_touch(Phase::Up, (icon, four.1), MS(1210), &font, &mut out);
+        assert_eq!(out, vec![UiEvent::FocusWindow("ws".into(), "0xc3".into())]);
+        // Lifted: it closes again, then nothing moves.
+        s.advance(MS(1500), &live());
+        assert_eq!(s.next_change(MS(1500)), None);
     }
 
     #[test]
@@ -4323,8 +4378,9 @@ mod tests {
         assert!(!s.set_workspaces(&hypr.state, MS(900), &font, &mut icons));
     }
 
-    /// Not a check: one workspace; four (1, 3, 4, 7); many windows with "+N"; and
-    /// icons half emerged, as PNGs in $TOUCHBINUX_FRAMES (run with --ignored).
+    /// Not a check: workspaces at rest (four, strips closed), the active one with its
+    /// strip, and six frames of a birth and of a merge, cut to the item and enlarged
+    /// 4x, as PNGs in $TOUCHBINUX_FRAMES (run with --ignored).
     #[test]
     #[ignore]
     fn dump_workspaces() {
@@ -4333,49 +4389,50 @@ mod tests {
         let font = font().unwrap();
         let home = std::env::var("HOME").ok().map(PathBuf::from);
         let mut icons = IconResolver::new(home.as_deref(), icon_size(H));
-        let cfg: Config = toml::from_str(&ws_layer(false)).unwrap();
-        let layer = cfg.default_layer().unwrap();
+        let layer_for = |strip: &str| {
+            let toml = ws_layer(false).replace("width = 600", &format!("width = 600\n        strip = \"{strip}\""));
+            let cfg: Config = toml::from_str(&toml).unwrap();
+            cfg.default_layer().unwrap().into_owned()
+        };
         let live = live();
         let mut canvas = Canvas::new(W, H).unwrap();
         let mut shot = |s: &mut Scene, t: Duration, name: &str| {
             s.advance(t, &live);
             s.draw(&mut canvas, t, &font, &live).unwrap();
-            canvas.save_png(Path::new(&format!("{dir}/ws-{name}.png"))).unwrap();
+            let r = s.workspaces[0].0.rect;
+            let (x0, w) = (r.x as u32 - 4, 330);
+            let img = image::RgbaImage::from_fn(w * 4, H * 4, |x, y| {
+                let i = (((y / 4) * W + x0 + x / 4) * 4) as usize;
+                let p = &canvas.data()[i..i + 4];
+                image::Rgba([p[0], p[1], p[2], 0xff])
+            });
+            img.save(format!("{dir}/ws-{name}.png")).unwrap();
         };
-        let mut st = HyprState {
-            workspaces: [(1, "1".to_string())].into(),
-            active_workspace: Some(1),
-            windows: vec![win("a1", "kitty", 1), win("b2", "zen", 1)],
+        let st = HyprState {
+            workspaces: [1, 2, 4, 5].map(|i| (i, i.to_string())).into(),
+            active_workspace: Some(2),
+            windows: vec![win("a1", "kitty", 2), win("b2", "zen", 2), win("c3", "mpv", 4)],
             focused: Some("a1".into()),
         };
-        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&st)).unwrap();
-        shot(&mut s, MS(0), "a-one");
-        st.workspaces = [1, 3, 4, 7].map(|i| (i, i.to_string())).into();
-        st.windows.extend([win("c3", "org.gnome.Nautilus", 3), win("d4", "mpv", 4), win("e5", "Unknownapp", 7)]);
-        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&st)).unwrap();
-        shot(&mut s, MS(0), "b-four");
-        let mut many = st.clone();
-        for (i, c) in ["firefox", "foot", "gimp", "inkscape", "thunderbird", "Signal", "obsidian", "code"]
-            .iter()
-            .enumerate()
-        {
-            many.windows.push(win(&format!("f{i}"), c, 1));
+        let none = layer_for("none");
+        let mut s = bar_with(W, H, &font, &none, &mut icons, Some(&st)).unwrap();
+        shot(&mut s, MS(0), "a-rest-four");
+        let active = layer_for("active");
+        let mut s = bar_with(W, H, &font, &active, &mut icons, Some(&st)).unwrap();
+        shot(&mut s, MS(0), "b-active-strip");
+        // Birth: 3 appears (and becomes active) beside 2.
+        let mut s = bar_with(W, H, &font, &none, &mut icons, Some(&st)).unwrap();
+        let mut born = st.clone();
+        born.workspaces.insert(3, "3".into());
+        born.active_workspace = Some(3);
+        s.set_workspaces(&born, MS(1000), &font, &mut icons);
+        for (n, ms) in [0, 76, 152, 228, 304, 380].into_iter().enumerate() {
+            shot(&mut s, MS(1000 + ms), &format!("c-birth-{n}-{ms}ms"));
         }
-        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&many)).unwrap();
-        shot(&mut s, MS(0), "c-many");
-        // Switching to 1 from 3: half way through the emerging.
-        let mut from = many.clone();
-        from.active_workspace = Some(3);
-        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&from)).unwrap();
-        s.set_workspaces(&many, MS(1000), &font, &mut icons);
-        shot(&mut s, MS(1110), "d-emerging");
-        shot(&mut s, MS(1500), "e-emerged");
-        // Unknown classes: coloured initials.
-        let mut seven = st.clone();
-        seven.active_workspace = Some(7);
-        seven.windows.extend([win("g7", "Weirdtool", 7), win("h8", "zzz.qq", 7)]);
-        seven.focused = Some("e5".into());
-        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&seven)).unwrap();
-        shot(&mut s, MS(0), "f-letters");
+        // Merge: 3 (active) closes, the focus goes to 2.
+        s.set_workspaces(&st, MS(2000), &font, &mut icons);
+        for (n, ms) in [0, 72, 144, 216, 288, 360].into_iter().enumerate() {
+            shot(&mut s, MS(2000 + ms), &format!("d-merge-{n}-{ms}ms"));
+        }
     }
 }

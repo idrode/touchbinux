@@ -1,40 +1,55 @@
-//! `workspaces` items: Hyprland's workspaces as pills, the active one wider and
-//! showing an icon per window (the focused one highlighted).
+//! `workspaces` items: Hyprland's workspaces as capsules, after the user's
+//! Quickshell island (`Workspaces.qml`, `WorkspaceBirthCanvas.qml`).
+//!
+//! An inactive workspace is a horizontal white bar; the active one, the same capsule
+//! turned 90° (vertical) in mint. Beside a capsule a strip of its windows' icons can
+//! open, pushing the others along. A workspace that appears is born out of its
+//! neighbour (see `wsbirth`); one that goes merges back into it.
 //!
 //! What it shows is a `WsView`, a projection of the daemon's `HyprState` keeping only
-//! what is drawn: events that don't change it (a window's title...) change nothing
-//! here, so they cost no frame. Changes animate for `anim_ms` (icons emerge one after
-//! another, or grow and shrink as windows open and close, the rest easing into
-//! place); otherwise it schedules no frames.
+//! what is drawn: events that don't change it (a window's title...) cost no frame.
+//! Everything moves as a function of the scene time; at rest it schedules no frames.
 
 use crate::{
-    anim::Tween,
+    anim::{Tween, ease_in_out},
     canvas::{Canvas, Font, Image, Rect, Rgba},
-    config::{WS_ALL, WsShow},
-    frame::{DEFAULT_PRESSED, Frame},
+    config::{WS_ALL, WsShow, WsStrip},
+    frame::DEFAULT_PRESSED,
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
+    wsbirth::{self, Birth},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    f32::consts::PI,
     rc::Rc,
     time::Duration,
 };
 
-/// Default `active_color` and `anim_ms`.
-pub const DEFAULT_ACTIVE: Rgba = Rgba(0x17, 0x93, 0xd1, 0xff);
-pub const DEFAULT_ANIM: Duration = Duration::from_millis(220);
-/// Between one icon starting to emerge and the next.
-const STAGGER: Duration = Duration::from_millis(40);
-const PILL_GAP: f32 = 6.0;
-/// Inside a pill, at its right end.
-const PAD: f32 = 10.0;
-const ICON_GAP: f32 = 6.0;
-/// The focused window's highlight, around its icon.
-const FOCUS: Rgba = Rgba(0xff, 0xff, 0xff, 0x48);
+/// Defaults of the options (the island's look, scaled for the Touch Bar).
+pub const DEFAULT_ACTIVE: Rgba = Rgba(0x00, 0xff, 0xb7, 0xff);
+pub const DEFAULT_INACTIVE: Rgba = Rgba(0xff, 0xff, 0xff, 0xff);
+pub const DEFAULT_STRIP_BG: Rgba = Rgba(0x1a, 0x1d, 0x1c, 0xff);
+pub const DEFAULT_GAP: f32 = 6.0;
+pub const DEFAULT_ICON: f32 = 30.0;
+pub const DEFAULT_ICON_GAP: f32 = 10.0;
+pub const DEFAULT_STRIP_PAD: f32 = 10.0;
+/// Active <-> inactive (size and colour) and the press scale: 150 ms OutCubic.
+const STATE: Duration = Duration::from_millis(150);
+/// The strip opening or closing: 190 ms OutCubic.
+const STRIP: Duration = Duration::from_millis(190);
+/// Birth and merge, linear (their curves are inside `wsbirth`).
+const BIRTH: Duration = Duration::from_millis(380);
+const DEATH: Duration = Duration::from_millis(360);
+/// A capsule under the finger.
+const PRESS_SCALE: f32 = 1.15;
+/// A capsule's touch zone is at least this wide (and the row's height).
+const MIN_TOUCH: f32 = 36.0;
+/// Between a capsule and its strip.
+const STRIP_GAP: f32 = 4.0;
+/// Behind the focused window's icon in a strip.
+const FOCUS: Rgba = Rgba(0xff, 0xff, 0xff, 0x40);
 const FOCUS_MARGIN: f32 = 3.0;
-/// Empty workspaces' numbers (`show = "all"`).
-const DIM_TEXT: Rgba = Rgba(0x90, 0x90, 0x90, 0xff);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinView {
@@ -97,14 +112,19 @@ impl WsView {
 /// How it looks, from the config.
 #[derive(Clone)]
 pub struct Style {
-    /// Pills' shape, radius and (inactive) background.
-    pub frame: Frame,
     pub active: Rgba,
-    pub text: Rgba,
-    /// Window icons' side, px.
+    pub inactive: Rgba,
+    /// A capsule's long and short axes.
+    pub long: f32,
+    pub short: f32,
+    pub gap: f32,
+    pub strip_bg: Rgba,
+    /// Window icons' side, the gap between them and the strip's end padding.
     pub icon: f32,
+    pub icon_gap: f32,
+    pub pad: f32,
+    pub strip: WsStrip,
     pub max_icons: usize,
-    pub anim: Duration,
     /// Icon names by lowercase class, asked before the icon theme.
     pub class_icons: BTreeMap<String, String>,
 }
@@ -134,22 +154,21 @@ impl WinGlyph {
         }
     }
 
-    fn draw(&self, canvas: &mut Canvas, cell: Rect, font: &Font, alpha: f32) {
+    fn draw(&self, canvas: &mut Canvas, cell: Rect, font: &Font) {
         let (cx, cy) = cell.center();
         match self {
             WinGlyph::Image(img) => {
                 let x = (cx - img.width() as f32 / 2.0).round() as i32;
                 let y = (cy - img.height() as f32 / 2.0).round() as i32;
-                canvas.draw_image_faded(img, x, y, alpha);
+                canvas.draw_image(img, x, y);
             }
             WinGlyph::Letter(c, colour) => {
-                let r = cell.w * 0.45;
-                canvas.fill_circle(cx, cy, r, fade(*colour, alpha));
+                canvas.fill_circle(cx, cy, cell.w * 0.45, *colour);
                 let s = c.to_string();
                 let px = cell.w * 0.5;
                 let x = cx - font.measure(&s, px) / 2.0;
                 let baseline = font.centered_baseline(cy, px);
-                canvas.draw_text(font, &s, x, baseline, px, fade(Rgba::WHITE, alpha));
+                canvas.draw_text(font, &s, x, baseline, px, Rgba::WHITE);
             }
         }
     }
@@ -191,29 +210,8 @@ fn hsl(h: f32, s: f32, l: f32) -> Rgba {
     Rgba(byte(r), byte(g), byte(b), 0xff)
 }
 
-fn fade(c: Rgba, k: f32) -> Rgba {
-    c.with_alpha((c.3 as f32 * k.clamp(0.0, 1.0)).round() as u8)
-}
-
-/// Where things go at rest, relative to the item's left edge.
-#[derive(Clone, Debug, Default, PartialEq)]
-struct Plan {
-    pills: Vec<Pill>,
-    /// The active pill's icons: address, class and offset from the pill's left.
-    icons: Vec<(String, String, f32)>,
-    /// Windows of the active workspace without an icon ("+N" after the icons).
-    more_icons: usize,
-    more_icons_x: f32,
-    /// Workspaces left out for lack of room ("+N" after the pills), and where.
-    more_ws: usize,
-    more_ws_x: f32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct Pill {
-    id: i64,
-    x: f32,
-    w: f32,
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 /// What a point of the item is over.
@@ -224,21 +222,67 @@ pub enum Hit {
     Window(String),
 }
 
-struct PillAnim {
-    id: i64,
-    x: Tween,
-    w: Tween,
+/// A workspace being born (0 -> 1) or merging away (1 -> 0), and the neighbour it
+/// comes out of or goes into.
+#[derive(Clone, Copy, Debug)]
+struct Spawn {
+    start: Duration,
+    dying: bool,
+    neighbor: Option<i64>,
 }
 
-struct IconAnim {
-    addr: String,
-    class: String,
-    /// Offset from the active pill's left edge.
-    x: Tween,
-    /// Scale and opacity, 0..=1.
-    k: Tween,
-    /// Its window is gone: it shrinks away, then it is dropped.
-    leaving: bool,
+impl Spawn {
+    fn dur(&self) -> Duration {
+        if self.dying { DEATH } else { BIRTH }
+    }
+
+    fn progress(&self, t: Duration) -> f32 {
+        let k = (t.saturating_sub(self.start).as_secs_f32() / self.dur().as_secs_f32()).min(1.0);
+        if self.dying { 1.0 - k } else { k }
+    }
+
+    fn done(&self, t: Duration) -> bool {
+        t >= self.start + self.dur()
+    }
+}
+
+/// How much room a capsule takes in the row while born or merging: its slot opens
+/// (or closes) a little after the stretch starts, smoothly (QML `slotT`).
+fn slot_t(spawn: f32) -> f32 {
+    ease_in_out(((spawn - 0.1) / 0.75).clamp(0.0, 1.0))
+}
+
+/// One workspace's capsule.
+struct Cap {
+    id: i64,
+    /// 0 inactive (horizontal, `inactive`) .. 1 active (vertical, `active`).
+    act: Tween,
+    /// Scale: 1, or `PRESS_SCALE` under the finger.
+    press: Tween,
+    /// The strip's width, px.
+    strip: Tween,
+    /// The strip's width when open (0: no windows).
+    strip_open: f32,
+    windows: Vec<WinView>,
+    spawn: Option<Spawn>,
+}
+
+/// Where a capsule and its strip are at some instant.
+struct Placed {
+    /// Index in `Workspaces::caps`.
+    i: usize,
+    /// The capsule's left edge and drawn size.
+    x: f32,
+    w: f32,
+    h: f32,
+    strip_x: f32,
+    strip_w: f32,
+}
+
+impl Placed {
+    fn cx(&self) -> f32 {
+        self.x + self.w / 2.0
+    }
 }
 
 pub struct Workspaces {
@@ -247,10 +291,17 @@ pub struct Workspaces {
     pub show: WsShow,
     style: Style,
     view: WsView,
-    plan: Plan,
-    pills: Vec<PillAnim>,
-    icons: Vec<IconAnim>,
+    /// In id order, including those merging away.
+    caps: Vec<Cap>,
+    /// Icons a strip shows at most (`max_icons`, less if the row is short).
+    shown: usize,
+    /// Workspaces left out for lack of room ("+N" at the end).
+    hidden: usize,
     glyphs: HashMap<String, WinGlyph>,
+    /// The workspace under the finger (capsule or strip), and whether on its capsule.
+    touched: Option<(i64, bool)>,
+    /// A first list of workspaces has been shown: only what comes after is born.
+    populated: bool,
 }
 
 impl Workspaces {
@@ -261,16 +312,91 @@ impl Workspaces {
             show,
             style,
             view: WsView::default(),
-            plan: Plan::default(),
-            pills: Vec::new(),
-            icons: Vec::new(),
+            caps: Vec::new(),
+            shown: 0,
+            hidden: 0,
             glyphs: HashMap::new(),
+            touched: None,
+            populated: false,
         }
     }
 
-    /// Shows `view`; `animate` (false: at rest at once, e.g. when the scene is
-    /// built). Returns whether anything visible changed: an equal view is nothing,
-    /// and never restarts what is moving.
+    fn is_active(&self, id: i64) -> bool {
+        self.view.active == Some(id)
+    }
+
+    /// The strip's width with `n` windows, icons limited to `shown`.
+    fn strip_width(&self, n: usize, shown: usize, font: &Font) -> f32 {
+        if n == 0 {
+            return 0.0;
+        }
+        let s = &self.style;
+        let k = n.min(shown);
+        let mut w = 2.0 * s.pad + k as f32 * s.icon + k.saturating_sub(1) as f32 * s.icon_gap;
+        if n > k {
+            let more = font.measure(&format!("+{}", n - k), more_px(self.rect.h));
+            w += if k > 0 { s.icon_gap } else { 0.0 } + more;
+        }
+        w.ceil()
+    }
+
+    /// Whether `id`'s strip is open, for the current view and touch.
+    fn strip_wanted(&self, id: i64) -> bool {
+        match self.style.strip {
+            WsStrip::Active => self.is_active(id),
+            WsStrip::Pressed => self.touched.is_some_and(|(t, _)| t == id),
+            WsStrip::All => true,
+            WsStrip::None => false,
+        }
+    }
+
+    /// What fits in the row at rest: which workspaces (dropping those furthest from
+    /// the active one first) and how many icons a strip shows.
+    fn fit(&self, view: &WsView, font: &Font) -> (Vec<i64>, usize) {
+        let s = &self.style;
+        let total = |ids: &[i64], shown: usize| {
+            let mut w = 0.0;
+            let mut widest: f32 = 0.0;
+            for e in view.workspaces.iter().filter(|e| ids.contains(&e.id)) {
+                w += if view.active == Some(e.id) { s.short } else { s.long };
+                let strip = self.strip_width(e.windows.len(), shown, font);
+                let strip = strip + strip.min(STRIP_GAP);
+                match s.strip {
+                    WsStrip::Active if view.active == Some(e.id) => w += strip,
+                    WsStrip::All => w += strip,
+                    // One at a time, under the finger: room for the widest.
+                    WsStrip::Pressed => widest = widest.max(strip),
+                    _ => {}
+                }
+            }
+            let hidden = view.workspaces.len() - ids.len();
+            let more = if hidden > 0 {
+                s.gap + font.measure(&format!("+{hidden}"), more_px(self.rect.h))
+            } else {
+                0.0
+            };
+            w + widest + s.gap * ids.len().saturating_sub(1) as f32 + more
+        };
+        let mut ids: Vec<i64> = view.workspaces.iter().map(|e| e.id).collect();
+        let mut shown = s.max_icons;
+        while shown > 0 && total(&ids, shown) > self.rect.w {
+            shown -= 1;
+        }
+        while ids.len() > 1 && total(&ids, shown) > self.rect.w {
+            let at = view.active.and_then(|a| ids.iter().position(|&id| id == a));
+            let far = (0..ids.len())
+                .filter(|&i| Some(ids[i]) != view.active)
+                .max_by_key(|&i| (at.map_or(i, |a| a.abs_diff(i)), i));
+            let Some(i) = far else { break };
+            ids.remove(i);
+        }
+        (ids, shown)
+    }
+
+    /// Shows `view`. `animate`: false when the scene is built (everything at rest).
+    /// The first list shown is never born, only what appears or goes after it.
+    /// Returns whether anything visible changed: an equal view is nothing, and
+    /// never restarts what is moving.
     pub fn set_view(
         &mut self,
         view: WsView,
@@ -279,309 +405,429 @@ impl Workspaces {
         icons: &mut IconResolver,
         animate: bool,
     ) -> bool {
-        if view == self.view && !self.pills.is_empty() {
+        if view == self.view && self.populated {
             return false;
         }
-        let plan = plan(&view, self.rect, font, &self.style);
-        for (_, class, _) in &plan.icons {
-            if !self.glyphs.contains_key(class) {
-                let g = WinGlyph::resolve(class, &self.style, icons);
-                self.glyphs.insert(class.clone(), g);
+        let animate = animate && self.populated;
+        let (visible, shown) = self.fit(&view, font);
+        self.shown = shown;
+        self.hidden = view.workspaces.len() - visible.len();
+        for e in view.workspaces.iter().filter(|e| visible.contains(&e.id)) {
+            for w in e.windows.iter().take(shown) {
+                if !self.glyphs.contains_key(&w.class) {
+                    let g = WinGlyph::resolve(&w.class, &self.style, icons);
+                    self.glyphs.insert(w.class.clone(), g);
+                }
             }
         }
-        let anim = if animate { self.style.anim } else { Duration::ZERO };
-        let move_to = |tw: &mut Tween, v: f32| {
+        // Gone: merge into a neighbour (or just go, at rest).
+        let gone: Vec<i64> = self
+            .caps
+            .iter()
+            .filter(|c| !c.spawn.is_some_and(|s| s.dying) && !visible.contains(&c.id))
+            .map(|c| c.id)
+            .collect();
+        for id in gone {
+            let Some(i) = self.caps.iter().position(|c| c.id == id) else {
+                continue;
+            };
             if animate {
-                tw.retarget(t, v, anim);
+                let neighbor = self.neighbor(i);
+                let c = &mut self.caps[i];
+                c.spawn = Some(Spawn {
+                    start: t,
+                    dying: true,
+                    neighbor,
+                });
+                c.strip.retarget(t, 0.0, STRIP);
             } else {
-                *tw = Tween::still(v);
-            }
-        };
-
-        // Pills: the ones that stay ease to their place and width; new ones grow.
-        let mut pills = Vec::with_capacity(plan.pills.len());
-        for p in &plan.pills {
-            match self.pills.iter().position(|o| o.id == p.id) {
-                Some(i) => {
-                    let mut o = self.pills.swap_remove(i);
-                    move_to(&mut o.x, p.x);
-                    move_to(&mut o.w, p.w);
-                    pills.push(o);
-                }
-                None => pills.push(PillAnim {
-                    id: p.id,
-                    x: Tween::still(p.x),
-                    w: Tween::starting(if animate { 0.0 } else { p.w }, p.w, t, anim),
-                }),
+                self.caps.remove(i);
             }
         }
-        self.pills = pills;
-
-        // Icons: another workspace's emerge one after another; in the same one, new
-        // windows grow, closed ones shrink away and the rest ease into place.
-        let switched = view.active != self.view.active;
-        if switched || !animate {
-            self.icons = plan
-                .icons
-                .iter()
-                .enumerate()
-                .map(|(j, (addr, class, x))| IconAnim {
-                    addr: addr.clone(),
-                    class: class.clone(),
-                    x: Tween::still(*x),
-                    k: Tween::starting(0.0, 1.0, t + STAGGER * j as u32, anim),
-                    leaving: false,
-                })
-                .collect();
-            if !animate {
-                for i in &mut self.icons {
-                    i.k = Tween::still(1.0);
-                }
+        // New: born out of a neighbour (or just there).
+        for &id in &visible {
+            if self.caps.iter().any(|c| c.id == id && !c.spawn.is_some_and(|s| s.dying)) {
+                continue;
             }
-        } else {
-            for i in &mut self.icons {
-                if !plan.icons.iter().any(|(a, ..)| a == &i.addr) {
-                    i.leaving = true;
-                    i.k.retarget(t, 0.0, anim);
-                }
-            }
-            for (addr, class, x) in &plan.icons {
-                match self.icons.iter_mut().find(|i| &i.addr == addr) {
-                    Some(i) => {
-                        i.leaving = false;
-                        i.x.retarget(t, *x, anim);
-                        i.k.retarget(t, 1.0, anim);
-                    }
-                    None => self.icons.push(IconAnim {
-                        addr: addr.clone(),
-                        class: class.clone(),
-                        x: Tween::still(*x),
-                        k: Tween::starting(0.0, 1.0, t, anim),
-                        leaving: false,
-                    }),
-                }
+            // Back before it had merged away: it is simply born again.
+            self.caps.retain(|c| c.id != id);
+            let i = self.caps.iter().position(|c| c.id > id).unwrap_or(self.caps.len());
+            let active = view.active == Some(id);
+            self.caps.insert(
+                i,
+                Cap {
+                    id,
+                    act: Tween::still(if active { 1.0 } else { 0.0 }),
+                    press: Tween::still(1.0),
+                    strip: Tween::still(0.0),
+                    strip_open: 0.0,
+                    windows: Vec::new(),
+                    spawn: None,
+                },
+            );
+            if animate {
+                let neighbor = self.neighbor(i);
+                self.caps[i].spawn = Some(Spawn {
+                    start: t,
+                    dying: false,
+                    neighbor,
+                });
             }
         }
         self.view = view;
-        self.plan = plan;
+        self.populated |= !self.view.workspaces.is_empty();
+        // Everyone: state, windows and strip.
+        for i in 0..self.caps.len() {
+            if self.caps[i].spawn.is_some_and(|s| s.dying) {
+                continue;
+            }
+            let id = self.caps[i].id;
+            let windows = self.view.entry(id).map(|e| e.windows.clone()).unwrap_or_default();
+            let open = self.strip_width(windows.len(), shown, font);
+            let act = if self.is_active(id) { 1.0 } else { 0.0 };
+            let strip = if self.strip_wanted(id) { open } else { 0.0 };
+            let c = &mut self.caps[i];
+            c.windows = windows;
+            c.strip_open = open;
+            if animate {
+                c.act.retarget(t, act, STATE);
+                c.strip.retarget(t, strip, STRIP);
+            } else {
+                c.act = Tween::still(act);
+                c.strip = Tween::still(strip);
+            }
+        }
         true
     }
 
-    /// Drops icons that have finished shrinking away. Draws the same either way.
+    /// The finger is on workspace `ws` (its capsule or strip; `on_capsule`), or on
+    /// none. Returns whether anything changed.
+    pub fn set_touch(&mut self, touched: Option<(i64, bool)>, t: Duration) -> bool {
+        if touched == self.touched {
+            return false;
+        }
+        self.touched = touched;
+        for i in 0..self.caps.len() {
+            let id = self.caps[i].id;
+            let pressed = touched == Some((id, true));
+            let strip = if self.strip_wanted(id) {
+                self.caps[i].strip_open
+            } else {
+                0.0
+            };
+            let c = &mut self.caps[i];
+            c.press.retarget(t, if pressed { PRESS_SCALE } else { 1.0 }, STATE);
+            if !c.spawn.is_some_and(|s| s.dying) {
+                c.strip.retarget(t, strip, STRIP);
+            }
+        }
+        true
+    }
+
+    /// The indicator a birth or merge at `i` uses: the nearest to its left, or to
+    /// its right if it is the first, among those not born or merging themselves.
+    fn neighbor(&self, i: usize) -> Option<i64> {
+        let settled = |j: &usize| *j != i && self.caps[*j].spawn.is_none();
+        let left = (0..i).rev().find(settled);
+        left.or_else(|| (i + 1..self.caps.len()).find(settled))
+            .map(|j| self.caps[j].id)
+    }
+
+    /// Drops what has finished merging away, and the record of finished births.
+    /// Draws the same either way.
     pub fn advance(&mut self, t: Duration) {
-        self.icons.retain(|i| !i.leaving || i.k.running(t));
+        self.caps
+            .retain(|c| !c.spawn.is_some_and(|s| s.dying && s.done(t)));
+        for c in &mut self.caps {
+            if c.spawn.is_some_and(|s| s.done(t)) {
+                c.spawn = None;
+            }
+        }
     }
 
     /// Frames only while something moves.
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
-        let pills = self.pills.iter().any(|p| p.x.running(t) || p.w.running(t));
-        let icons = self.icons.iter().any(|i| i.x.running(t) || i.k.running(t));
-        (pills || icons).then_some(t)
+        let moving = self.caps.iter().any(|c| {
+            c.act.running(t)
+                || c.press.running(t)
+                || c.strip.running(t)
+                || c.spawn.is_some_and(|s| !s.done(t))
+        });
+        moving.then_some(t)
     }
 
-    /// What is under (`x`, `y`), where things are at rest.
-    pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
+    /// How active (0..1) the capsules in a birth or merge look at `t`, by index:
+    /// the one coming or going, and its neighbour (see `draw`). Their place in the
+    /// row follows that shape, not their own state change, so they never stick out
+    /// of it; at both ends it is the same.
+    fn looks(&self, t: Duration) -> HashMap<usize, f32> {
+        let mut out = HashMap::new();
+        for (i, c) in self.caps.iter().enumerate() {
+            let Some(sp) = c.spawn else { continue };
+            let k = sp.progress(t);
+            if k <= 0.0 || k >= 1.0 {
+                continue;
+            }
+            out.insert(i, if sp.dying || self.is_active(c.id) { 1.0 } else { 0.0 });
+            let nb = sp.neighbor.and_then(|id| self.caps.iter().position(|c| c.id == id));
+            if let Some(j) = nb {
+                out.insert(j, self.absorbed(self.caps[j].id, sp, k));
+            }
+        }
+        out
+    }
+
+    /// How "active" a birth's or merge's neighbour looks: merging into it, it takes
+    /// the colour and shape the leaving one had as it absorbs it, only if the focus
+    /// went to it.
+    fn absorbed(&self, neighbor: i64, sp: Spawn, k: f32) -> f32 {
+        if !self.is_active(neighbor) {
+            0.0
+        } else if !sp.dying {
+            1.0
+        } else {
+            1.0 - ((k - 0.1) / 0.45).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Where everything is at `t`: capsules left to right, each followed by its
+    /// strip; slots and the gaps before them open and close with births and merges.
+    fn place(&self, t: Duration) -> (Vec<Placed>, f32) {
+        let s = &self.style;
+        let looks = self.looks(t);
+        let mut out = Vec::with_capacity(self.caps.len());
+        let mut x = self.rect.x;
+        // The widest slot so far: a gap shows only between two that take room.
+        let mut before: f32 = 0.0;
+        for (i, c) in self.caps.iter().enumerate() {
+            let slot = c.spawn.map_or(1.0, |sp| slot_t(sp.progress(t)));
+            x += s.gap * slot * before;
+            let a = looks.get(&i).copied().unwrap_or_else(|| c.act.value(t));
+            let (w, h) = (lerp(s.long, s.short, a), lerp(s.short, s.long, a));
+            let strip_w = c.strip.value(t).max(0.0);
+            out.push(Placed {
+                i,
+                x,
+                w,
+                h,
+                strip_x: x + w * slot + STRIP_GAP,
+                strip_w,
+            });
+            x += w * slot + strip_w + strip_w.min(STRIP_GAP);
+            before = before.max(slot);
+        }
+        (out, x)
+    }
+
+    /// What is under (`x`, `y`) at `t`. A capsule's zone is the row's height and at
+    /// least `MIN_TOUCH` wide (the nearest capsule wins where zones overlap); an
+    /// open strip's icons, or the strip itself, come first.
+    pub fn hit(&self, x: f32, y: f32, t: Duration) -> Option<Hit> {
         let r = self.rect;
-        if !(y >= r.y && y < r.y + r.h) {
+        if !(y >= r.y && y < r.y + r.h && x >= r.x && x < r.x + r.w) {
             return None;
         }
-        let p = self
-            .plan
-            .pills
-            .iter()
-            .find(|p| x >= r.x + p.x && x < r.x + p.x + p.w)?;
-        if Some(p.id) == self.view.active {
-            let half = ICON_GAP / 2.0;
-            let icon = self.plan.icons.iter().find(|(_, _, off)| {
-                let ix = r.x + p.x + off;
-                x >= ix - half && x < ix + self.style.icon + half
-            });
-            if let Some((addr, ..)) = icon {
-                return Some(Hit::Window(addr.clone()));
-            }
-        }
-        Some(Hit::Workspace(p.id))
-    }
-
-    /// `pressed`: what a finger is on, highlighted.
-    pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, pressed: Option<&Hit>) {
-        let r = self.rect;
-        let px = number_px(r.h);
-        let style = &self.style;
-        let mut active = None;
-        for p in &self.pills {
-            let x = (r.x + p.x.value(t)).round();
-            let w = p.w.value(t).round();
-            if w < 1.0 {
+        let (placed, _) = self.place(t);
+        let live = |p: &&Placed| !self.caps[p.i].spawn.is_some_and(|s| s.dying);
+        let s = &self.style;
+        for p in placed.iter().filter(live).filter(|p| p.strip_w >= 1.0) {
+            if x < p.strip_x || x >= p.strip_x + p.strip_w {
                 continue;
             }
-            let target = self.plan.pills.iter().find(|q| q.id == p.id).map_or(w, |q| q.w);
-            let box_ = Rect::new(x, r.y, w, r.h);
-            let is_active = Some(p.id) == self.view.active;
-            if is_active {
-                style.frame.fill(canvas, box_, style.active);
-                active = Some((x, w));
-            } else {
-                style.frame.draw_background(canvas, box_);
-            }
-            let empty = self.view.entry(p.id).is_none_or(|e| e.windows.is_empty());
-            let colour = if empty && !is_active { DIM_TEXT } else { style.text };
-            let text = p.id.to_string();
-            let slot = slot_w(p.id, r.h, font).min(w);
-            let tx = x + ((slot - font.measure(&text, px)) / 2.0).round();
-            let baseline = font.centered_baseline(r.y + r.h / 2.0, px);
-            let alpha = (w / target.max(1.0)).min(1.0);
-            canvas.draw_text(font, &text, tx, baseline, px, fade(colour, alpha));
-            if pressed == Some(&Hit::Workspace(p.id)) {
-                style.frame.fill(canvas, box_, DEFAULT_PRESSED);
-            }
-        }
-        if let Some((px0, w)) = active {
-            self.draw_icons(canvas, t, font, px0, pressed);
-            if self.plan.more_icons > 0 {
-                // Only once the pill has grown to hold it, fading in over the last
-                // few px.
-                let s = format!("+{}", self.plan.more_icons);
-                let x = px0 + self.plan.more_icons_x;
-                let room = px0 + w - PAD - (x + font.measure(&s, px * 0.85));
-                let alpha = ((room + PAD) / PAD).clamp(0.0, 1.0);
-                if alpha > 0.0 {
-                    let baseline = font.centered_baseline(r.y + r.h / 2.0, px * 0.85);
-                    canvas.draw_text(font, &s, x, baseline, px * 0.85, fade(style.text, alpha));
+            let c = &self.caps[p.i];
+            let step = s.icon + s.icon_gap;
+            for (j, w) in c.windows.iter().take(self.shown).enumerate() {
+                let ix = p.strip_x + s.pad + j as f32 * step;
+                if x >= ix - s.icon_gap / 2.0 && x < ix + s.icon + s.icon_gap / 2.0 {
+                    return Some(Hit::Window(w.addr.clone()));
                 }
             }
+            return Some(Hit::Workspace(c.id));
         }
-        if self.plan.more_ws > 0 {
-            let s = format!("+{}", self.plan.more_ws);
-            let baseline = font.centered_baseline(r.y + r.h / 2.0, px * 0.85);
-            canvas.draw_text(font, &s, r.x + self.plan.more_ws_x, baseline, px * 0.85, DIM_TEXT);
+        placed
+            .iter()
+            .filter(live)
+            .filter(|p| (x - p.cx()).abs() <= (MIN_TOUCH / 2.0).max(p.w / 2.0))
+            .min_by(|a, b| (x - a.cx()).abs().total_cmp(&(x - b.cx()).abs()))
+            .map(|p| Hit::Workspace(self.caps[p.i].id))
+    }
+
+    /// The workspace a hit belongs to.
+    pub fn workspace_of(&self, hit: &Hit) -> Option<i64> {
+        match hit {
+            Hit::Workspace(id) => Some(*id),
+            Hit::Window(addr) => self
+                .view
+                .workspaces
+                .iter()
+                .find(|e| e.windows.iter().any(|w| &w.addr == addr))
+                .map(|e| e.id),
         }
     }
 
-    /// The active pill's icons; those growing or shrinking first, so the settled
-    /// ones are never painted over by their scaled squares.
-    fn draw_icons(&self, canvas: &mut Canvas, t: Duration, font: &Font, px0: f32, pressed: Option<&Hit>) {
-        let r = self.rect;
-        let side = self.style.icon;
-        let y = (r.y + (r.h - side) / 2.0).round();
-        // What shows where an icon shrinks: the active pill's colour over the bar.
-        let behind = Rgba::BLACK.lerp(self.style.active.with_alpha(0xff), self.style.active.3 as f32 / 255.0);
-        let mut order: Vec<&IconAnim> = self.icons.iter().collect();
-        order.sort_by_key(|i| i.k.value(t) >= 1.0);
-        for i in order {
-            let k = i.k.value(t);
-            if k <= 0.0 {
+    /// `pressed`: a window icon under the finger, highlighted.
+    pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, pressed: Option<&Hit>) {
+        let (placed, end) = self.place(t);
+        let s = &self.style;
+        let cy = self.rect.y + self.rect.h / 2.0;
+        // Strips first: their clipping masks never touch a capsule drawn after.
+        for p in placed.iter().filter(|p| p.strip_w >= 0.5) {
+            self.draw_strip(canvas, p, font, pressed);
+        }
+        // Births and merges replace their capsule and their neighbour's.
+        let mut hidden = vec![false; self.caps.len()];
+        let mut births = Vec::new();
+        for p in &placed {
+            let Some(sp) = self.caps[p.i].spawn else {
                 continue;
+            };
+            let k = sp.progress(t);
+            if k >= 1.0 {
+                continue; // done: at rest
             }
-            let cell = Rect::new((px0 + i.x.value(t)).round(), y, side, side);
-            let around = Rect::new(
-                cell.x - FOCUS_MARGIN,
-                cell.y - FOCUS_MARGIN,
-                side + 2.0 * FOCUS_MARGIN,
-                side + 2.0 * FOCUS_MARGIN,
+            hidden[p.i] = true;
+            if k <= 0.0 {
+                continue; // still inside its neighbour, or gone into it
+            }
+            let nb = sp
+                .neighbor
+                .and_then(|id| placed.iter().find(|q| self.caps[q.i].id == id));
+            if let Some(nb) = nb {
+                hidden[nb.i] = true;
+            }
+            births.push((p, sp, k, nb));
+        }
+        for p in placed.iter().filter(|p| !hidden[p.i]) {
+            let c = &self.caps[p.i];
+            let (a, k) = (c.act.value(t), c.press.value(t));
+            let colour = s.inactive.lerp(s.active, a);
+            wsbirth::capsule(canvas, p.cx(), cy, p.w * k / 2.0, p.h * k / 2.0, colour);
+        }
+        for (p, sp, k, nb) in births {
+            let c = &self.caps[p.i];
+            let child_active = sp.dying || self.is_active(c.id);
+            let (chw, chh) = if child_active {
+                (s.short, s.long)
+            } else {
+                (s.long, s.short)
+            };
+            let child_colour = if child_active { s.active } else { s.inactive };
+            // Its place follows its drawn shape too (`looks`): QML's rest width
+            // had a merging bar drawn upright stick out of a horizontal one's place.
+            let to_x = p.cx();
+            let Some(nb) = nb else {
+                // Nobody to come out of: it grows in place.
+                let g = ease_in_out(k);
+                wsbirth::capsule(canvas, to_x, cy, chw * g / 2.0, chh * g / 2.0, child_colour);
+                continue;
+            };
+            let mix = self.absorbed(self.caps[nb.i].id, sp, k);
+            wsbirth::draw(
+                canvas,
+                &Birth {
+                    progress: k,
+                    // Its place follows the drawn shape (see `looks`); QML used
+                    // its rest width, which made a bar drawn horizontal in a
+                    // vertical one's place stick out of it.
+                    from_x: nb.cx(),
+                    to_x,
+                    cy,
+                    neighbor_hw: lerp(s.long, s.short, mix) / 2.0,
+                    neighbor_hh: lerp(s.short, s.long, mix) / 2.0,
+                    child_hw: chw / 2.0,
+                    child_hh: chh / 2.0,
+                    neighbor_color: s.inactive.lerp(s.active, mix),
+                    child_color: child_colour,
+                },
             );
-            if self.view.focused.as_deref() == Some(i.addr.as_str()) {
+        }
+        if self.hidden > 0 {
+            let text = format!("+{}", self.hidden);
+            let px = more_px(self.rect.h);
+            let baseline = font.centered_baseline(cy, px);
+            canvas.draw_text(font, &text, end + s.gap, baseline, px, s.inactive);
+        }
+    }
+
+    /// A strip: its pill, its icons (and "+N") clipped to it while it opens or
+    /// closes.
+    fn draw_strip(&self, canvas: &mut Canvas, p: &Placed, font: &Font, pressed: Option<&Hit>) {
+        let s = &self.style;
+        let c = &self.caps[p.i];
+        let r = self.rect;
+        let (x, w, h) = (p.strip_x, p.strip_w, r.h);
+        let cy = r.y + h / 2.0;
+        canvas.fill_rounded_rect(x, r.y, w, h, h / 2.0, s.strip_bg);
+        let step = s.icon + s.icon_gap;
+        let mut right = x + w;
+        let iy = (cy - s.icon / 2.0).round();
+        for (j, win) in c.windows.iter().take(self.shown).enumerate() {
+            let ix = (x + s.pad + j as f32 * step).round();
+            if ix >= x + w {
+                break;
+            }
+            let cell = Rect::new(ix, iy, s.icon, s.icon);
+            let around = Rect::new(
+                ix - FOCUS_MARGIN,
+                iy - FOCUS_MARGIN,
+                s.icon + 2.0 * FOCUS_MARGIN,
+                s.icon + 2.0 * FOCUS_MARGIN,
+            );
+            if self.view.focused.as_deref() == Some(win.addr.as_str()) {
                 canvas.fill_rounded_rect(around.x, around.y, around.w, around.h, 6.0, FOCUS);
             }
-            if let Some(g) = self.glyphs.get(&i.class) {
-                g.draw(canvas, cell, font, k);
+            if let Some(g) = self.glyphs.get(&win.class) {
+                g.draw(canvas, cell, font);
             }
-            if pressed == Some(&Hit::Window(i.addr.clone())) {
-                canvas.fill_rounded_rect(around.x, around.y, around.w, around.h, 6.0, DEFAULT_PRESSED);
+            if pressed == Some(&Hit::Window(win.addr.clone())) {
+                let v = DEFAULT_PRESSED;
+                canvas.fill_rounded_rect(around.x, around.y, around.w, around.h, 6.0, v);
             }
-            if k < 1.0 {
-                canvas.scale_region(around, k, behind);
+            right = right.max(ix + s.icon + FOCUS_MARGIN);
+        }
+        let n = c.windows.len();
+        if n > self.shown {
+            let tx = x + s.pad + self.shown as f32 * step;
+            if tx < x + w {
+                let text = format!("+{}", n - self.shown);
+                let px = more_px(h);
+                let baseline = font.centered_baseline(cy, px);
+                canvas.draw_text(font, &text, tx, baseline, px, s.inactive);
+                right = right.max(tx + font.measure(&text, px));
             }
+        }
+        // Clip: what sticks out past the strip's round ends is painted over with the
+        // bar's black (nothing else is drawn there before the capsules).
+        if right > x + w || w < 2.0 * s.pad + s.icon {
+            let rr = (h / 2.0).min(w / 2.0);
+            let right = right.min(r.x + r.w);
+            let (cl, cr) = (x + rr, x + w - rr);
+            if right > cr {
+                let mut mask = vec![(cr, r.y), (right, r.y), (right, r.y + h), (cr, r.y + h)];
+                mask.extend(arc(cr, cy, rr, PI / 2.0, -PI / 2.0));
+                canvas.fill_polygon(&mask, Rgba::BLACK);
+            }
+            let mut mask = vec![(cl, r.y + h), (x, r.y + h), (x, r.y), (cl, r.y)];
+            mask.extend(arc(cl, cy, rr, -PI / 2.0, -1.5 * PI));
+            canvas.fill_polygon(&mask, Rgba::BLACK);
         }
     }
 }
 
-/// Workspace numbers, in a row `h` px high.
-fn number_px(h: f32) -> f32 {
-    (h * 0.40).round()
+/// Points of a circular arc from `a0` to `a1` (either way round).
+fn arc(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<(f32, f32)> {
+    let n = 24;
+    (0..=n)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / n as f32;
+            (cx + r * a.cos(), cy + r * a.sin())
+        })
+        .collect()
 }
 
-/// A compact pill: its number with room around it, never thinner than this.
-fn slot_w(id: i64, h: f32, font: &Font) -> f32 {
-    let w = font.measure(&id.to_string(), number_px(h)) + 2.0 * PAD;
-    w.max((h * 0.7).round()).round()
-}
-
-/// Where everything goes at rest in `rect`: pills from its left edge, the active one
-/// with up to `max_icons` icons, giving up icons and then workspaces (furthest from
-/// the active one first) to fit.
-fn plan(view: &WsView, rect: Rect, font: &Font, style: &Style) -> Plan {
-    let h = rect.h;
-    let small = number_px(h) * 0.85;
-    let more_w = |n: usize| font.measure(&format!("+{n}"), small);
-    let windows = view
-        .active
-        .and_then(|id| view.entry(id))
-        .map_or(&[][..], |e| &e.windows[..]);
-    let n = windows.len();
-    let active_w = |id: i64, shown: usize| {
-        let slot = slot_w(id, h, font);
-        let mut end = slot + shown as f32 * (style.icon + ICON_GAP);
-        if shown < n {
-            end += more_w(n - shown);
-        } else if shown > 0 {
-            end -= ICON_GAP;
-        }
-        (end + PAD).max(slot * 1.5).round()
-    };
-    let width = |ids: &[i64], shown: usize, hidden: usize| {
-        let pills: f32 = ids
-            .iter()
-            .map(|&id| {
-                if Some(id) == view.active {
-                    active_w(id, shown)
-                } else {
-                    slot_w(id, h, font)
-                }
-            })
-            .sum();
-        let gaps = PILL_GAP * ids.len().saturating_sub(1) as f32;
-        let more = if hidden > 0 { PILL_GAP + more_w(hidden) } else { 0.0 };
-        pills + gaps + more
-    };
-    let mut ids: Vec<i64> = view.workspaces.iter().map(|w| w.id).collect();
-    let mut shown = n.min(style.max_icons);
-    while shown > 0 && width(&ids, shown, 0) > rect.w {
-        shown -= 1;
-    }
-    let mut hidden = 0;
-    while width(&ids, shown, hidden) > rect.w {
-        // Furthest from the active one (ties: the right one); never the active one.
-        let at = view.active.and_then(|a| ids.iter().position(|&id| id == a));
-        let far = (0..ids.len())
-            .filter(|&i| Some(ids[i]) != view.active)
-            .max_by_key(|&i| (at.map_or(i, |a| a.abs_diff(i)), i));
-        let Some(i) = far else { break };
-        ids.remove(i);
-        hidden += 1;
-    }
-    let mut out = Plan {
-        more_icons: n - shown,
-        more_ws: hidden,
-        ..Plan::default()
-    };
-    let mut x = 0.0;
-    for &id in &ids {
-        let active = Some(id) == view.active;
-        let w = if active { active_w(id, shown) } else { slot_w(id, h, font) };
-        if active {
-            let slot = slot_w(id, h, font);
-            for (j, win) in windows.iter().take(shown).enumerate() {
-                let off = slot + j as f32 * (style.icon + ICON_GAP);
-                out.icons.push((win.addr.clone(), win.class.clone(), off));
-            }
-            out.more_icons_x = slot + shown as f32 * (style.icon + ICON_GAP);
-        }
-        out.pills.push(Pill { id, x, w });
-        x += w + PILL_GAP;
-    }
-    out.more_ws_x = x;
-    out
+/// "+N" text, in a row `h` px high.
+fn more_px(h: f32) -> f32 {
+    (h * 0.34).round()
 }
 
 #[cfg(test)]
@@ -615,25 +861,74 @@ pub mod tests {
         }
     }
 
-    pub fn style() -> Style {
+    pub fn style(strip: WsStrip) -> Style {
         Style {
-            frame: Frame::default(),
             active: DEFAULT_ACTIVE,
-            text: Rgba::WHITE,
-            icon: 36.0,
+            inactive: DEFAULT_INACTIVE,
+            long: 28.0,
+            short: 16.0,
+            gap: DEFAULT_GAP,
+            strip_bg: DEFAULT_STRIP_BG,
+            icon: DEFAULT_ICON,
+            icon_gap: DEFAULT_ICON_GAP,
+            pad: DEFAULT_STRIP_PAD,
+            strip,
             max_icons: 6,
-            anim: DEFAULT_ANIM,
             class_icons: BTreeMap::new(),
         }
     }
 
-    fn widget(rect_w: f32, style: Style) -> (Workspaces, Font, IconResolver) {
-        let font = Font::find(&[]);
-        let rect = Rect::new(100.0, 4.0, rect_w, 52.0);
-        // An empty resolver (no home): every class falls back to its letter.
-        let icons = IconResolver::new(None, 36);
-        (Workspaces::new("ws", rect, WsShow::Existing, style), font, icons)
+    pub struct Rig {
+        pub w: Workspaces,
+        pub font: Font,
+        pub icons: IconResolver,
     }
+
+    impl Rig {
+        /// At x 100 in a 600 x 52 row, showing `s` at rest.
+        pub fn new(strip: WsStrip, s: &HyprState) -> Rig {
+            let font = Font::find(&[]);
+            let rect = Rect::new(100.0, 4.0, 600.0, 52.0);
+            // No home: every class falls back to its letter.
+            let mut icons = IconResolver::new(None, 36);
+            let mut w = Workspaces::new("ws", rect, WsShow::Existing, style(strip));
+            let v = WsView::from_state(s, WsShow::Existing);
+            w.set_view(v, MS(0), &font, &mut icons, false);
+            Rig { w, font, icons }
+        }
+
+        pub fn set(&mut self, s: &HyprState, t: u64) -> bool {
+            let v = WsView::from_state(s, WsShow::Existing);
+            self.w.set_view(v, MS(t), &self.font, &mut self.icons, true)
+        }
+
+        pub fn frame(&mut self, t: u64) -> Canvas {
+            self.w.advance(MS(t));
+            let mut c = Canvas::new(800, 60).unwrap();
+            c.clear(Rgba::BLACK);
+            self.w.draw(&mut c, MS(t), &self.font, None);
+            c
+        }
+    }
+
+    fn px(c: &Canvas, x: f32, y: f32) -> [u8; 4] {
+        let i = ((y as u32 * c.width() + x as u32) * 4) as usize;
+        c.data()[i..i + 4].try_into().unwrap()
+    }
+
+    /// How many pixels of colour `rgb` along a line.
+    fn count(c: &Canvas, line: impl Iterator<Item = (u32, u32)>, rgb: [u8; 3]) -> u32 {
+        line.filter(|&(x, y)| px(c, x as f32, y as f32)[..3] == rgb)
+            .count() as u32
+    }
+
+    fn placed(w: &Workspaces, id: i64, t: u64) -> Placed {
+        let (placed, _) = w.place(MS(t));
+        placed.into_iter().find(|p| w.caps[p.i].id == id).unwrap()
+    }
+
+    const WHITE: [u8; 3] = [0xff, 0xff, 0xff];
+    const MINT: [u8; 3] = [0x00, 0xff, 0xb7];
 
     #[test]
     fn view_keeps_what_is_drawn_only() {
@@ -642,55 +937,126 @@ pub mod tests {
         let ids: Vec<_> = v.workspaces.iter().map(|w| w.id).collect();
         assert_eq!(ids, [1, 2, 4, 5], "not consecutive, as Hyprland has them");
         assert_eq!(v.active, Some(2));
-        let two: Vec<_> = v.workspaces[1].windows.iter().map(|w| w.class.as_str()).collect();
-        assert_eq!(two, ["kitty", "firefox"]);
-        assert!(v.workspaces[0].windows.is_empty());
-        assert_eq!(v.focused.as_deref(), Some("a1"));
-        // A title is not part of it.
         let mut t = s.clone();
         t.windows[0].title = "vim".into();
-        assert_eq!(WsView::from_state(&t, WsShow::Existing), v);
-        // "all": 1 to 10, plus the rest.
-        let mut big = s.clone();
-        big.workspaces.insert(12, "12".into());
-        let all = WsView::from_state(&big, WsShow::All);
-        let ids: Vec<_> = all.workspaces.iter().map(|w| w.id).collect();
-        assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
-        // A focus on a window that isn't known is no focus.
-        let mut gone = s;
-        gone.focused = Some("ffff".into());
-        assert_eq!(WsView::from_state(&gone, WsShow::Existing).focused, None);
+        assert_eq!(WsView::from_state(&t, WsShow::Existing), v, "titles are not part of it");
+        assert_eq!(WsView::from_state(&s, WsShow::All).workspaces.len(), 10);
     }
 
     #[test]
-    fn the_active_pill_is_wider_and_holds_its_icons() {
-        let (mut w, font, mut icons) = widget(600.0, style());
-        let v = WsView::from_state(&state(), WsShow::Existing);
-        assert!(w.set_view(v.clone(), MS(0), &font, &mut icons, false));
-        let p = &w.plan.pills;
-        assert_eq!(p.iter().map(|p| p.id).collect::<Vec<_>>(), [1, 2, 4, 5]);
-        assert!(p[1].w > p[0].w + 2.0 * 36.0, "{p:?}");
-        assert_eq!(p[0].w, p[2].w, "the others compact and alike");
-        assert_eq!(w.plan.icons.len(), 2);
-        assert_eq!((w.plan.more_icons, w.plan.more_ws), (0, 0));
-        // Whole pixels, left to right, PILL_GAP apart.
-        for pair in p.windows(2) {
-            assert_eq!(pair[1].x, pair[0].x + pair[0].w + PILL_GAP);
-            assert_eq!(pair[0].w, pair[0].w.round());
-        }
-        // Hits: a pill, a window icon in the active one.
-        let r = w.rect;
-        let y = r.y + 20.0;
-        assert_eq!(w.hit(r.x + p[0].x + 5.0, y), Some(Hit::Workspace(1)));
-        assert_eq!(w.hit(r.x + p[3].x + 5.0, y), Some(Hit::Workspace(5)));
-        let firefox = r.x + p[1].x + w.plan.icons[1].2 + 10.0;
-        assert_eq!(w.hit(firefox, y), Some(Hit::Window("b2".into())));
-        // The number at the active pill's left is the workspace.
-        assert_eq!(w.hit(r.x + p[1].x + 4.0, y), Some(Hit::Workspace(2)));
-        assert_eq!(w.hit(r.x + r.w - 2.0, y), None, "past the pills");
-        assert_eq!(w.hit(r.x + 5.0, r.y - 1.0), None);
-        // The same view again: nothing to do.
-        assert!(!w.set_view(v, MS(10), &font, &mut icons, true));
+    fn inactive_is_a_white_bar_active_the_same_turned_mint() {
+        let mut r = Rig::new(WsStrip::None, &state());
+        let c = r.frame(0);
+        let row = |y| (0..800).map(move |x| (x, y));
+        let col = |x: f32| (0..60).map(move |y| (x as u32, y));
+        // Three inactive bars 28 wide, 16 high, white; the active one 16 x 28, mint.
+        assert_eq!(count(&c, row(30), WHITE), 3 * 28);
+        assert_eq!(count(&c, col(placed(&r.w, 1, 0).cx()), WHITE), 16);
+        assert_eq!(count(&c, row(30), MINT), 16);
+        assert_eq!(count(&c, col(placed(&r.w, 2, 0).cx()), MINT), 28);
+        // 14:8 like the island; gap 6 between them.
+        assert_eq!(28.0 / 16.0, 14.0 / 8.0);
+        let (p1, p2, p4) = (placed(&r.w, 1, 0), placed(&r.w, 2, 0), placed(&r.w, 4, 0));
+        assert_eq!(p2.x, p1.x + 28.0 + 6.0);
+        assert_eq!(p4.x, p2.x + 16.0 + 6.0);
+        assert_eq!(r.w.next_change(MS(0)), None, "at rest: no frames");
+    }
+
+    #[test]
+    fn switching_turns_the_capsules_in_150_ms() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::None, &s);
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        assert!(r.set(&to4, 1000));
+        // Half way in time, well past half way in shape and colour (OutCubic).
+        let a4 = r.w.caps[2].act.value(MS(1075));
+        assert!(a4 > 0.8 && a4 < 1.0, "{a4}");
+        let c = r.frame(1075);
+        let p = px(&c, placed(&r.w, 4, 1075).cx(), 30.0);
+        assert!(p[0] > 0 && p[0] < 0xff, "colour in between: {p:?}");
+        assert_eq!(r.w.next_change(MS(1149)), Some(MS(1149)));
+        assert_eq!(r.w.next_change(MS(1150)), None);
+        // The last frame is the rest; the same state again restarts nothing.
+        let mut rest = Rig::new(WsStrip::None, &to4);
+        assert!(r.frame(1150).data() == rest.frame(0).data());
+        assert!(!r.set(&to4, 1200));
+    }
+
+    #[test]
+    fn the_active_strip_opens_and_pushes_the_others() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::Active, &s);
+        // Two icons: pad + 30 + 10 + 30 + pad = 90.
+        let p2 = placed(&r.w, 2, 0);
+        assert_eq!(p2.strip_w, 90.0);
+        assert_eq!(p2.strip_x, p2.x + 16.0 + 4.0);
+        assert_eq!(placed(&r.w, 4, 0).x, p2.x + 16.0 + 90.0 + 4.0 + 6.0, "pushed");
+        // Its background, and an icon (kitty's letter) on it.
+        let c = r.frame(0);
+        assert_eq!(px(&c, p2.strip_x + 45.0, 6.0)[..3], [0x1a, 0x1d, 0x1c]);
+        assert_ne!(px(&c, p2.strip_x + 25.0, 30.0)[..3], [0x1a, 0x1d, 0x1c]);
+        // To 4: 2's strip (90) closes and 4's (50) opens over 190 ms; 5 moves
+        // back along with them.
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        let x5 = |t| placed(&r.w, 5, t).x;
+        assert!(x5(1000) > x5(1095) && x5(1095) > x5(1190));
+        assert_eq!(x5(1000) - x5(1190), 40.0);
+        assert_eq!(placed(&r.w, 2, 1190).strip_w, 0.0);
+        assert_eq!(placed(&r.w, 4, 1190).strip_w, 50.0);
+        // Half open: its icon clipped (black past its round end).
+        let p4 = placed(&r.w, 4, 1020);
+        assert!(p4.strip_w > 5.0 && p4.strip_w < 40.0, "{}", p4.strip_w);
+        let c = r.frame(1020);
+        assert_eq!(px(&c, p4.strip_x + p4.strip_w + 1.0, 30.0), [0, 0, 0, 0xff]);
+        let mut rest = Rig::new(WsStrip::Active, &to4);
+        assert!(r.frame(1190).data() == rest.frame(0).data());
+    }
+
+    #[test]
+    fn strip_none_never_opens_and_pressed_opens_under_the_finger() {
+        let r = Rig::new(WsStrip::None, &state());
+        assert!(r.w.caps.iter().all(|c| c.strip.value(MS(0)) == 0.0));
+        let mut r = Rig::new(WsStrip::Pressed, &state());
+        assert!(r.w.caps.iter().all(|c| c.strip.value(MS(0)) == 0.0));
+        assert!(r.w.set_touch(Some((4, true)), MS(100)));
+        assert_eq!(placed(&r.w, 4, 290).strip_w, 50.0);
+        // Pressed: the capsule grows to 1.15 in 150 ms.
+        assert_eq!(r.w.caps[2].press.value(MS(250)), PRESS_SCALE);
+        assert!(!r.w.set_touch(Some((4, true)), MS(260)), "no change, no restart");
+        // On its strip (not its capsule): open, not scaled.
+        r.w.set_touch(Some((4, false)), MS(300));
+        assert_eq!(r.w.caps[2].press.value(MS(450)), 1.0);
+        assert_eq!(placed(&r.w, 4, 450).strip_w, 50.0);
+        r.w.set_touch(None, MS(500));
+        assert_eq!(placed(&r.w, 4, 690).strip_w, 0.0);
+        assert_eq!(r.w.next_change(MS(690)), None);
+    }
+
+    #[test]
+    fn touch_zones_are_wider_than_the_capsules() {
+        let r = Rig::new(WsStrip::Active, &state());
+        let y = 30.0;
+        let (c1, c2) = (placed(&r.w, 1, 0).cx(), placed(&r.w, 2, 0).cx());
+        // 28 drawn, 36 touchable: 17 px from the centre is still it (the last one,
+        // with nothing to its right), 19 is nothing.
+        let c5 = placed(&r.w, 5, 0).cx();
+        assert_eq!(r.w.hit(c5 + 17.0, y, MS(0)), Some(Hit::Workspace(5)));
+        assert_eq!(r.w.hit(c5 + 19.0, y, MS(0)), None);
+        assert_eq!(r.w.hit(c1, 4.5, MS(0)), Some(Hit::Workspace(1)), "the row's height");
+        // The active one is 16 wide: 12 px off (4 past its edge) is still it.
+        assert_eq!(r.w.hit(c2 - 12.0, y, MS(0)), Some(Hit::Workspace(2)));
+        // Where zones overlap: the nearest capsule.
+        assert_eq!(r.w.hit((c1 + c2) / 2.0 - 1.0, y, MS(0)), Some(Hit::Workspace(1)));
+        assert_eq!(r.w.hit((c1 + c2) / 2.0 + 1.0, y, MS(0)), Some(Hit::Workspace(2)));
+        // Icons in the strip.
+        let sx = placed(&r.w, 2, 0).strip_x;
+        assert_eq!(r.w.hit(sx + 25.0, y, MS(0)), Some(Hit::Window("a1".into())));
+        assert_eq!(r.w.hit(sx + 65.0, y, MS(0)), Some(Hit::Window("b2".into())));
+        assert_eq!(r.w.workspace_of(&Hit::Window("b2".into())), Some(2));
+        assert_eq!(r.w.hit(r.w.rect.x + 590.0, y, MS(0)), None);
     }
 
     #[test]
@@ -699,103 +1065,109 @@ pub mod tests {
         for i in 0..9 {
             s.windows.push(win(&format!("e{i}"), &format!("app{i}"), 2));
         }
-        // max_icons (6 of 11): "+5".
-        let (mut w, font, mut icons) = widget(1000.0, style());
+        let r = Rig::new(WsStrip::Active, &s);
+        assert_eq!((r.w.shown, r.w.hidden), (6, 0));
+        // In a narrow item: fewer icons, then fewer workspaces; the active stays.
+        let font = Font::find(&[]);
+        let mut icons = IconResolver::new(None, 36);
+        let rect = Rect::new(0.0, 4.0, 150.0, 52.0);
+        let mut w = Workspaces::new("ws", rect, WsShow::Existing, style(WsStrip::Active));
         w.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        assert_eq!((w.plan.icons.len(), w.plan.more_icons), (6, 5));
-        // Narrower: fewer icons, still everything inside the item.
-        let (mut w, font, mut icons) = widget(300.0, style());
-        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        let shown = w.plan.icons.len();
-        assert!(shown < 6 && w.plan.more_icons == 11 - shown, "{shown}");
-        let last = w.plan.pills.last().unwrap();
-        assert!(last.x + last.w <= 300.0);
-        // Very narrow: workspaces furthest from the active one go too.
-        let (mut w, font, mut icons) = widget(150.0, style());
-        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        let ids: Vec<_> = w.plan.pills.iter().map(|p| p.id).collect();
-        assert!(ids.contains(&2) && w.plan.more_ws == 4 - ids.len(), "{ids:?}");
-        assert!(!ids.contains(&5) || ids.contains(&1), "5 is the furthest: {ids:?}");
-        assert!(w.plan.more_ws_x + 20.0 <= 150.0 + 1.0);
-    }
-
-    fn draw(w: &Workspaces, t: Duration, font: &Font) -> Canvas {
-        let mut c = Canvas::new(800, 60).unwrap();
-        c.clear(Rgba::BLACK);
-        w.draw(&mut c, t, font, None);
-        c
+        assert!(w.shown < 6);
+        let (_, end) = w.place(MS(0));
+        assert!(end <= 150.0, "{end}");
+        assert!(w.caps.iter().any(|c| c.id == 2));
     }
 
     #[test]
-    fn switching_workspaces_makes_the_icons_emerge_in_turn() {
-        let (mut w, font, mut icons) = widget(600.0, style());
-        let mut s = state();
-        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        assert_eq!(w.next_change(MS(0)), None, "at rest: no frames");
-        // To 4, with three windows.
-        s.windows.push(win("f5", "zen", 4));
-        s.windows.push(win("g6", "mpv", 4));
-        s.active_workspace = Some(4);
-        assert!(w.set_view(WsView::from_state(&s, WsShow::Existing), MS(1000), &font, &mut icons, true));
-        assert_eq!(w.next_change(MS(1000)), Some(MS(1000)));
-        let k = |w: &Workspaces, j: usize, t| w.icons[j].k.value(MS(t));
-        // Staggered: each starts 40 ms after the previous one.
-        assert_eq!(k(&w, 0, 1000), 0.0);
-        assert!(k(&w, 0, 1040) > 0.0 && k(&w, 1, 1040) == 0.0);
-        assert!(k(&w, 1, 1080) > 0.0 && k(&w, 2, 1080) == 0.0);
-        assert!(k(&w, 0, 1100) > k(&w, 1, 1100) && k(&w, 1, 1100) > k(&w, 2, 1100));
-        // The same view mid-way: nothing restarts.
-        let mid = k(&w, 0, 1100);
-        assert!(!w.set_view(WsView::from_state(&s, WsShow::Existing), MS(1100), &font, &mut icons, true));
-        assert_eq!(k(&w, 0, 1100), mid);
-        // Done after 220 ms + 2 x 40: no more frames, and it looks exactly as if it
-        // had been built that way.
-        assert_eq!(w.next_change(MS(1299)), Some(MS(1299)));
-        assert_eq!(w.next_change(MS(1300)), None);
-        let (mut rest, ..) = widget(600.0, style());
-        rest.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        assert!(draw(&w, MS(1300), &font).data() == draw(&rest, MS(0), &font).data());
-        assert!(draw(&w, MS(1100), &font).data() != draw(&rest, MS(0), &font).data());
+    fn the_first_list_is_never_born() {
+        let s = state();
+        let font = Font::find(&[]);
+        let mut icons = IconResolver::new(None, 36);
+        let rect = Rect::new(100.0, 4.0, 600.0, 52.0);
+        let mut w = Workspaces::new("ws", rect, WsShow::Existing, style(WsStrip::Active));
+        // An empty first answer, then the real list (as Quickshell sees it): no births.
+        w.set_view(WsView::default(), MS(0), &font, &mut icons, true);
+        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(100), &font, &mut icons, true);
+        assert!(w.caps.iter().all(|c| c.spawn.is_none()));
+        assert_eq!(w.next_change(MS(100)), None);
+        // What comes after is.
+        let mut more = s.clone();
+        more.workspaces.insert(3, "3".into());
+        w.set_view(WsView::from_state(&more, WsShow::Existing), MS(200), &font, &mut icons, true);
+        assert!(w.caps.iter().any(|c| c.id == 3 && c.spawn.is_some()));
+    }
+
+    /// A new workspace 3 (inactive), born from 2 (its left neighbour).
+    #[test]
+    fn a_new_workspace_is_born_from_its_neighbour() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::None, &s);
+        let before = r.frame(0);
+        let mut more = s.clone();
+        more.workspaces.insert(3, "3".into());
+        r.set(&more, 1000);
+        let three = r.w.caps.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(three.spawn.unwrap().neighbor, Some(2));
+        // First frame: exactly as before; last: exactly the new rest.
+        assert!(r.frame(1000).data() == before.data());
+        assert!(r.frame(1190).data() != before.data());
+        let (x4a, x4b) = (placed(&r.w, 4, 1100).x, placed(&r.w, 4, 1300).x);
+        assert!(x4a < x4b, "the slot opens, pushing 4 along");
+        let mut rest = Rig::new(WsStrip::None, &more);
+        assert!(r.frame(1380).data() == rest.frame(0).data());
+        assert_eq!(r.w.next_change(MS(1380)), None);
+    }
+
+    /// Workspace 2 (active) closes and the focus goes to 1: 1 absorbs its colour
+    /// and shape.
+    #[test]
+    fn a_closing_workspace_merges_into_its_neighbour() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::None, &s);
+        let before = r.frame(0);
+        let mut less = s.clone();
+        less.workspaces.remove(&2);
+        less.windows.retain(|w| w.workspace != 2);
+        less.active_workspace = Some(1);
+        less.focused = None;
+        r.set(&less, 1000);
+        let two = r.w.caps.iter().find(|c| c.id == 2).unwrap();
+        assert_eq!(two.spawn.unwrap().neighbor, Some(1));
+        assert!(r.frame(1000).data() == before.data(), "first frame: as it was");
+        // Early on, 1 is still a white bar; near the end, mint and upright.
+        let c = r.frame(1050);
+        assert_eq!(px(&c, placed(&r.w, 1, 1050).x + 14.0, 30.0)[..3], WHITE);
+        let c = r.frame(1330);
+        let p1 = placed(&r.w, 1, 1330);
+        let x1 = p1.cx();
+        let p = px(&c, x1, 30.0);
+        assert!(p[0] < 0x30 && p[1] == 0xff, "absorbed the mint: {p:?}");
+        let tall = (0..60).filter(|&y| px(&c, x1, y as f32)[1] > 0x80).count();
+        assert!(tall >= 26, "upright: {tall}");
+        // Last frame: the new rest, and it is gone.
+        let mut rest = Rig::new(WsStrip::None, &less);
+        assert!(r.frame(1360).data() == rest.frame(0).data());
+        assert!(r.w.caps.iter().all(|c| c.id != 2));
+        assert_eq!(r.w.next_change(MS(1360)), None);
     }
 
     #[test]
-    fn windows_grow_in_and_shrink_away_the_rest_easing_into_place() {
-        let (mut w, font, mut icons) = widget(600.0, style());
-        let mut s = state();
-        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        // kitty (first) closes: it shrinks, firefox slides to its place.
-        s.windows.remove(0);
-        s.focused = None;
-        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(1000), &font, &mut icons, true);
-        let kitty = w.icons.iter().find(|i| i.addr == "a1").unwrap();
-        assert!(kitty.leaving && kitty.k.value(MS(1100)) < 1.0 && kitty.k.value(MS(1100)) > 0.0);
-        let ff = w.icons.iter().find(|i| i.addr == "b2").unwrap();
-        let (from, to) = (ff.x.value(MS(1000)), ff.x.value(MS(1220)));
-        assert!(from > to && ff.x.value(MS(1100)) < from && ff.x.value(MS(1100)) > to);
-        w.advance(MS(1220));
-        assert_eq!(w.icons.len(), 1, "gone once shrunk");
-        // A new window grows in.
-        s.windows.push(win("h7", "foot", 2));
-        w.set_view(WsView::from_state(&s, WsShow::Existing), MS(2000), &font, &mut icons, true);
-        let foot = w.icons.iter().find(|i| i.addr == "h7").unwrap();
-        assert_eq!(foot.k.value(MS(2000)), 0.0);
-        assert!(foot.k.value(MS(2100)) > 0.0);
-        assert_eq!(w.next_change(MS(2221)), None);
-        let (mut rest, ..) = widget(600.0, style());
-        rest.set_view(WsView::from_state(&s, WsShow::Existing), MS(0), &font, &mut icons, false);
-        assert!(draw(&w, MS(2221), &font).data() == draw(&rest, MS(0), &font).data());
+    fn the_first_one_is_born_from_its_right() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::None, &s);
+        let mut zero = s.clone();
+        zero.workspaces.insert(0, "0".into());
+        r.set(&zero, 1000);
+        let c = r.w.caps.iter().find(|c| c.id == 0).unwrap();
+        assert_eq!(c.spawn.unwrap().neighbor, Some(1));
     }
 
     #[test]
     fn letters_and_colours_for_unknown_classes() {
         assert_eq!(initial("org.mozilla.firefox"), 'F');
-        assert_eq!(initial("kitty"), 'K');
         assert_eq!(initial(""), '?');
         assert_eq!(class_colour("kitty"), class_colour("Kitty"));
         assert_ne!(class_colour("kitty"), class_colour("firefox"));
-        let mut st = style();
-        st.class_icons.insert("kitty".into(), "/nonexistent/x.svg".into());
-        let mut icons = IconResolver::new(None, 36);
-        assert!(matches!(WinGlyph::resolve("Kitty", &st, &mut icons), WinGlyph::Letter('K', _)));
     }
 }

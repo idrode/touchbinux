@@ -408,7 +408,7 @@ impl Workspaces {
         let r = self.rect;
         let px = number_px(r.h);
         let style = &self.style;
-        let mut active_x = None;
+        let mut active = None;
         for p in &self.pills {
             let x = (r.x + p.x.value(t)).round();
             let w = p.w.value(t).round();
@@ -417,15 +417,15 @@ impl Workspaces {
             }
             let target = self.plan.pills.iter().find(|q| q.id == p.id).map_or(w, |q| q.w);
             let box_ = Rect::new(x, r.y, w, r.h);
-            let active = Some(p.id) == self.view.active;
-            if active {
+            let is_active = Some(p.id) == self.view.active;
+            if is_active {
                 style.frame.fill(canvas, box_, style.active);
-                active_x = Some(x);
+                active = Some((x, w));
             } else {
                 style.frame.draw_background(canvas, box_);
             }
             let empty = self.view.entry(p.id).is_none_or(|e| e.windows.is_empty());
-            let colour = if empty && !active { DIM_TEXT } else { style.text };
+            let colour = if empty && !is_active { DIM_TEXT } else { style.text };
             let text = p.id.to_string();
             let slot = slot_w(p.id, r.h, font).min(w);
             let tx = x + ((slot - font.measure(&text, px)) / 2.0).round();
@@ -436,13 +436,19 @@ impl Workspaces {
                 style.frame.fill(canvas, box_, DEFAULT_PRESSED);
             }
         }
-        if let Some(px0) = active_x {
+        if let Some((px0, w)) = active {
             self.draw_icons(canvas, t, font, px0, pressed);
             if self.plan.more_icons > 0 {
+                // Only once the pill has grown to hold it, fading in over the last
+                // few px.
                 let s = format!("+{}", self.plan.more_icons);
                 let x = px0 + self.plan.more_icons_x;
-                let baseline = font.centered_baseline(r.y + r.h / 2.0, px * 0.85);
-                canvas.draw_text(font, &s, x, baseline, px * 0.85, style.text);
+                let room = px0 + w - PAD - (x + font.measure(&s, px * 0.85));
+                let alpha = ((room + PAD) / PAD).clamp(0.0, 1.0);
+                if alpha > 0.0 {
+                    let baseline = font.centered_baseline(r.y + r.h / 2.0, px * 0.85);
+                    canvas.draw_text(font, &s, x, baseline, px * 0.85, fade(style.text, alpha));
+                }
             }
         }
         if self.plan.more_ws > 0 {
@@ -579,7 +585,7 @@ fn plan(view: &WsView, rect: Rect, font: &Font, style: &Style) -> Plan {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::hypr::Window;
 

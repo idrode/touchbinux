@@ -130,6 +130,34 @@ struct Button {
     text: Option<usize>,
     /// Index in `Scene::animated` of its icon, told about taps (`Animated::on_tap`).
     anim: Option<usize>,
+    /// Its `drag_children`, pulled out by dragging it to the right.
+    pull: Option<Pull>,
+}
+
+/// A button's `drag_children` row.
+#[derive(Clone, Copy)]
+struct Pull {
+    /// Index in `Scene::menus`.
+    menu: usize,
+    /// How far right the finger must go for the row to stay out (`drag_px`).
+    px: f32,
+}
+
+/// Further than this from where it came down, a finger on a button with
+/// `drag_children` is no longer a tap: a drag to the right, or nothing.
+const TAP_SLOP: f32 = 8.0;
+
+/// What a finger that came down on a button with `drag_children` turned out to be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PullState {
+    /// Still within `TAP_SLOP`: a tap if it lifts now (highlighted meanwhile).
+    Tap,
+    /// Going right: the row follows it, out by (distance / drag_px).
+    Pulling,
+    /// Went past drag_px: the row is out and stays out when it lifts.
+    Out,
+    /// Moved some other way (up, down, left, too diagonal): does nothing.
+    Cancelled,
 }
 
 /// Horizontal slider showing an integer 0-100.
@@ -270,6 +298,9 @@ enum Capture {
     MenuTap(usize, bool),
     /// On a part of an unfolded expandable; whether the finger is still on that part.
     Menu(usize, Part, bool),
+    /// On a button with `drag_children`: where the finger came down, and what it
+    /// is doing.
+    Pull(usize, (f32, f32), PullState),
     /// A touch outside an unfolded item: it folds, and the touch does nothing else.
     Blocked,
 }
@@ -343,10 +374,7 @@ impl Scene {
 
     pub fn draw(&self, canvas: &mut Canvas, t: Duration, font: &Font, live: &Live) -> Result<()> {
         canvas.copy_from(&self.background)?;
-        let pressed = match self.capture {
-            Capture::Button(i, true) => Some(&self.buttons[i]),
-            _ => None,
-        };
+        let pressed = self.pressed_button().map(|i| &self.buttons[i]);
         // A pressed_background replaces the item's background, under its content: its
         // pre-composed pressed look (static part) goes in now.
         if let Some(b) = pressed
@@ -377,7 +405,7 @@ impl Scene {
         }
         // Everything of the pressed item is drawn by now (background, highlight, icon,
         // live content): scale it as a whole.
-        if let Capture::Button(i, true) = self.capture {
+        if let Some(i) = self.pressed_button() {
             let b = &self.buttons[i];
             if b.frame.pressed_scale != 1.0 {
                 canvas.scale_region(b.rect, b.frame.pressed_scale, Rgba::BLACK);
@@ -410,6 +438,14 @@ impl Scene {
             for r in rects.filter(|r| overlaps(*r, open)) {
                 canvas.fill_rect(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, veil);
             }
+            // A row pulled out of a button also hides at once what it has covered
+            // so far, like a drawer: its children never show over a veiled item.
+            if let Unfolded::Menu(i) = u
+                && self.menus[i].is_pulled()
+            {
+                let r = self.menus[i].current_rect(t);
+                canvas.fill_rect(r.x, 0.0, r.w, canvas.height() as f32, Rgba::BLACK);
+            }
             match u {
                 Unfolded::Slider(i) => self.expanders[i].draw(canvas, t, font, live),
                 Unfolded::Menu(i) => {
@@ -430,6 +466,14 @@ impl Scene {
             canvas.fill_circle(x, y, 10.0, RED.with_alpha(0xc0));
         }
         Ok(())
+    }
+
+    /// The button drawn pressed: under the finger, as long as it is still a tap.
+    fn pressed_button(&self) -> Option<usize> {
+        match self.capture {
+            Capture::Button(i, true) | Capture::Pull(i, _, PullState::Tap) => Some(i),
+            _ => None,
+        }
     }
 
     /// Earliest time any item changes, or `None` if the scene is static.
@@ -532,6 +576,40 @@ impl Scene {
         Some(Capture::MenuTap(i, true))
     }
 
+    /// The finger on button `i` (down at `from`) moved to `(x, y)`: decides whether
+    /// it is a tap, a pull to the right or nothing, and pulls the row out with it.
+    fn pull_move(
+        &mut self,
+        i: usize,
+        from: (f32, f32),
+        state: PullState,
+        (x, y): (f32, f32),
+    ) -> PullState {
+        let Some(pull) = self.buttons[i].pull else {
+            return PullState::Cancelled;
+        };
+        let (dx, dy) = (x - from.0, y - from.1);
+        let state = match state {
+            PullState::Tap if dx.hypot(dy) <= TAP_SLOP => return PullState::Tap,
+            // Mostly sideways (within ~27 degrees) and to the right, or nothing.
+            PullState::Tap if dx > 0.0 && dx >= 2.0 * dy.abs() => PullState::Pulling,
+            PullState::Tap => return PullState::Cancelled,
+            s => s,
+        };
+        if state != PullState::Pulling {
+            return state;
+        }
+        let fold = &mut self.menus[pull.menu].fold;
+        let k = dx / pull.px;
+        if k >= 1.0 {
+            fold.pull_to(1.0);
+            PullState::Out
+        } else {
+            fold.pull_to(k);
+            PullState::Pulling
+        }
+    }
+
     /// Shortest wall-clock period any widget follows (see `Widget::wall_period`).
     pub fn wall_period(&self) -> Option<u64> {
         self.widgets
@@ -566,7 +644,13 @@ impl Scene {
                     changed = true;
                     c
                 } else if let Some(i) = self.buttons.iter().position(|b| contains(b.rect, x, y)) {
-                    Capture::Button(i, true)
+                    match self.buttons[i].pull {
+                        Some(p) => {
+                            self.menus[p.menu].fold.touch_down();
+                            Capture::Pull(i, (x, y), PullState::Tap)
+                        }
+                        None => Capture::Button(i, true),
+                    }
                 } else if let Some(i) = self.sliders.iter().position(|s| contains(s.rect, x, y)) {
                     let s = &mut self.sliders[i];
                     s.dragging = true;
@@ -582,6 +666,11 @@ impl Scene {
             (Phase::Move, Capture::Button(i, _)) => {
                 // Leaving the button un-highlights it; coming back re-highlights it.
                 self.capture = Capture::Button(i, contains(self.buttons[i].rect, x, y));
+            }
+            (Phase::Move, Capture::Pull(i, from, state)) => {
+                let next = self.pull_move(i, from, state, (x, y));
+                changed |= next == PullState::Pulling;
+                self.capture = Capture::Pull(i, from, next);
             }
             (Phase::Move, Capture::Slider(i)) => {
                 let s = &mut self.sliders[i];
@@ -630,6 +719,25 @@ impl Scene {
                                 changed |= self.animated[a].1.on_tap(t);
                             }
                         }
+                    }
+                    Capture::Pull(i, _, state) => {
+                        let b = &self.buttons[i];
+                        let tap = phase == Phase::Up && contains(b.rect, x, y);
+                        if state == PullState::Tap && tap {
+                            out.push(UiEvent::Tap(b.id.clone()));
+                            if let Some(a) = b.anim {
+                                self.animated[a].1.on_tap(t);
+                            }
+                        }
+                        if let Some(p) = b.pull {
+                            let fold = &mut self.menus[p.menu].fold;
+                            // Short of drag_px (or cancelled): back in, animated.
+                            if state != PullState::Out || phase == Phase::Cancel {
+                                fold.collapse(t);
+                            }
+                            fold.touch_up(t);
+                        }
+                        changed = true;
                     }
                     Capture::Slider(i) => {
                         self.sliders[i].dragging = false;
@@ -765,6 +873,16 @@ impl Scene {
                 (Some(j), part) => Capture::Menu(j, part, inside),
                 (None, _) => Capture::None,
             },
+            // The new button may have no row (config changed): then it is a
+            // plain press, cancelled.
+            Capture::Pull(i, from, state) => {
+                let id = &old.buttons[i].id;
+                match self.buttons.iter().position(|b| &b.id == id) {
+                    Some(j) if self.buttons[j].pull.is_some() => Capture::Pull(j, from, state),
+                    Some(j) => Capture::Button(j, false),
+                    None => Capture::None,
+                }
+            }
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
@@ -913,6 +1031,7 @@ impl Scene {
             frame,
             anim,
             text: None,
+            pull: None,
         });
     }
 
@@ -965,6 +1084,7 @@ impl Scene {
             frame,
             anim: None,
             text: None,
+            pull: None,
         });
     }
 
@@ -1384,6 +1504,23 @@ pub fn bar(
                     spec.style.text = c;
                 }
                 scene.add_button(rect, font, spec);
+                if item.drags() {
+                    // Its row, under the button's id, in the button's box style.
+                    let children = children(item, &frame, rect.h, icons, font, size)?;
+                    let face = Box::new(Still(Glyph::Drawn(|_, _, _, _| {}, Rgba::WHITE)));
+                    let mut spec = menu_spec(item, area, frame, face, false);
+                    spec.pulled = true;
+                    scene
+                        .menus
+                        .push(Expandable::new(id, rect, spec, children, font));
+                    let pull = Pull {
+                        menu: scene.menus.len() - 1,
+                        px: item.drag_px(),
+                    };
+                    if let Some(b) = scene.buttons.last_mut() {
+                        b.pull = Some(pull);
+                    }
+                }
             }
             ItemKind::Clock => {
                 let clock = Clock::new(item.clock_format()).with_color(frame.text);
@@ -1515,6 +1652,7 @@ pub fn bar(
                     frame,
                     anim: None,
                     text: Some(scene.texts.len() - 1),
+                    pull: None,
                 });
             }
             ItemKind::Spacer => {}
@@ -1615,6 +1753,7 @@ fn menu_spec(
         picks,
         seek: None,
         rec: None,
+        pulled: false,
     }
 }
 
@@ -3592,5 +3731,264 @@ mod tests {
         shot(&mut s, &live, 2340, "anim-340ms");
         live.battery = None;
         shot(&mut s, &live, 3000, "missing");
+    }
+
+    /// The launcher (a circle, 52 px in a 58 px row) whose drag pulls out three
+    /// apps; a button after it, which the row covers when out.
+    const LAUNCHER: &str = r##"
+        [[layers]]
+        id = "main"
+        margin = 1
+        [[layers.items]]
+        type = "button"
+        id = "launcher"
+        label = "L"
+        shape = "circle"
+        size = 52
+        background = "#3050a0"
+        action = { type = "key", key = "KEY_F13" }
+        [[layers.items.drag_children]]
+        label = "nvim"
+        action = { type = "socket" }
+        [[layers.items.drag_children]]
+        label = "yazi"
+        action = { type = "socket" }
+        [[layers.items.drag_children]]
+        label = "htop"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "spacer"
+    "##;
+
+    /// Down on the launcher's centre at `t0` ms, moves by each offset every 10 ms,
+    /// then `end` there at `t0` + 100 ms.
+    fn drag(s: &mut Scene, font: &Font, t0: u64, moves: &[(f32, f32)], end: Phase) -> Vec<UiEvent> {
+        let (x, y) = mid(s.buttons[0].rect);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (x, y), MS(t0), font, &mut out);
+        let mut at = (x, y);
+        for (n, (dx, dy)) in moves.iter().enumerate() {
+            at = (x + dx, y + dy);
+            s.handle_touch(Phase::Move, at, MS(t0 + 10 + n as u64 * 10), font, &mut out);
+        }
+        s.handle_touch(end, at, MS(t0 + 100), font, &mut out);
+        out
+    }
+
+    fn pull(s: &Scene, t: Duration) -> f32 {
+        s.menus[0].fold.progress(t)
+    }
+
+    #[test]
+    fn a_tap_on_a_dragging_button_still_runs_its_action() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, LAUNCHER);
+        let live = live();
+        s.advance(MS(0), &live);
+        assert_eq!(s.next_change(MS(0)), None, "idle bar schedules nothing");
+        // A still tap, and one that wobbles within 8 px: the button's action.
+        assert_eq!(drag(&mut s, &font, 1000, &[], Phase::Up), vec![UiEvent::Tap("launcher".into())]);
+        let wobble = [(3.0, 2.0), (-4.0, 5.0), (6.0, -5.0)];
+        assert_eq!(drag(&mut s, &font, 1000, &wobble, Phase::Up), vec![UiEvent::Tap("launcher".into())]);
+        assert_eq!(pull(&s, MS(1100)), 0.0);
+        assert_eq!(s.next_change(MS(1100)), None, "no frames after a tap");
+        // Pressed while it is still a tap.
+        let mut out = Vec::new();
+        let c = mid(s.buttons[0].rect);
+        s.handle_touch(Phase::Down, c, MS(2000), &font, &mut out);
+        assert_eq!(s.pressed_button(), Some(0));
+        // A cancelled touch (tracking lost) runs nothing.
+        s.handle_touch(Phase::Cancel, c, MS(2010), &font, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(s.pressed_button(), None);
+    }
+
+    #[test]
+    fn dragging_right_pulls_the_row_out_and_a_child_runs() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, LAUNCHER);
+        let live = live();
+        s.advance(MS(0), &live);
+        let (x, y) = mid(s.buttons[0].rect);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (x, y), MS(1000), &font, &mut out);
+        // Past 8 px to the right: it follows the finger, 12/24 of the way out.
+        assert!(s.handle_touch(Phase::Move, (x + 12.0, y + 1.0), MS(1010), &font, &mut out));
+        assert_eq!(pull(&s, MS(1010)), 0.5);
+        assert_eq!(s.pressed_button(), None, "a drag is not a press");
+        // Back a bit, then further: still proportional, no animation of its own.
+        s.handle_touch(Phase::Move, (x + 6.0, y), MS(1020), &font, &mut out);
+        assert_eq!(pull(&s, MS(1020)), 0.25);
+        s.handle_touch(Phase::Move, (x + 18.0, y), MS(1030), &font, &mut out);
+        assert_eq!(pull(&s, MS(1030)), 0.75);
+        assert_eq!(s.next_change(MS(1030)), None, "held still: no frames");
+        // drag_px (24): out, and it stays out when the finger lifts.
+        s.handle_touch(Phase::Move, (x + 24.0, y), MS(1040), &font, &mut out);
+        assert_eq!(pull(&s, MS(1040)), 1.0);
+        s.handle_touch(Phase::Move, (x + 2.0, y), MS(1050), &font, &mut out);
+        assert_eq!(pull(&s, MS(1050)), 1.0, "once out, it stays out");
+        s.handle_touch(Phase::Up, (x + 2.0, y), MS(1100), &font, &mut out);
+        assert!(out.is_empty(), "a drag runs no action: {out:?}");
+        assert!(s.menus[0].fold.is_open());
+        // Out and idle: the only wake-up is the automatic fold.
+        assert_eq!(s.next_change(MS(1200)), Some(MS(4100)));
+        // A child runs its own action and folds the row.
+        let yazi = child_mid(&s, 1);
+        let (_, ev) = tap(&mut s, yazi, MS(2000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("launcher.2".into())]);
+        assert!(!s.menus[0].fold.is_open());
+        s.advance(MS(2300), &live);
+        assert_eq!(s.next_change(MS(2300)), None, "folded: 0 fps");
+        // Folded, the launcher taps again.
+        assert_eq!(drag(&mut s, &font, 2400, &[], Phase::Up), vec![UiEvent::Tap("launcher".into())]);
+        // Out again: a touch elsewhere folds it and does nothing else.
+        drag(&mut s, &font, 2600, &[(30.0, 0.0)], Phase::Up);
+        assert!(s.menus[0].fold.is_open());
+        let (_, ev) = tap(&mut s, (1500.0, 30.0), MS(3000), &font);
+        assert!(ev.is_empty());
+        assert!(!s.menus[0].fold.is_open());
+    }
+
+    #[test]
+    fn a_short_pull_folds_back_animated() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, LAUNCHER);
+        let live = live();
+        s.advance(MS(0), &live);
+        // 15 of 24 px, then let go: no action, the row goes back in over anim_ms.
+        let out = drag(&mut s, &font, 1000, &[(15.0, 0.0)], Phase::Up);
+        assert!(out.is_empty());
+        assert!(!s.menus[0].fold.is_open());
+        let k = pull(&s, MS(1150));
+        assert!(k > 0.0 && k < 0.625, "folding from where it was: {k}");
+        assert_eq!(s.next_change(MS(1150)), Some(MS(1150)), "animating");
+        s.advance(MS(1300), &live);
+        assert_eq!(pull(&s, MS(1300)), 0.0);
+        assert_eq!(s.next_change(MS(1300)), None, "back at rest: 0 fps");
+        // The same, cancelled (palm, tracking lost) instead of lifted.
+        let out = drag(&mut s, &font, 2000, &[(15.0, 0.0)], Phase::Cancel);
+        assert!(out.is_empty());
+        assert!(!s.menus[0].fold.is_open());
+        // Even past drag_px, a cancelled touch doesn't leave it out.
+        let out = drag(&mut s, &font, 3000, &[(40.0, 0.0)], Phase::Cancel);
+        assert!(out.is_empty());
+        assert!(!s.menus[0].fold.is_open());
+    }
+
+    #[test]
+    fn other_moves_cancel_the_touch() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let cases: [(&str, &[(f32, f32)]); 5] = [
+            ("vertical", &[(0.0, 12.0)]),
+            ("upwards", &[(1.0, -10.0)]),
+            ("left", &[(-12.0, 0.0)]),
+            ("diagonal", &[(10.0, 10.0)]),
+            // Decided at the first move past 8 px: going right afterwards is late.
+            ("vertical then right", &[(0.0, 9.0), (40.0, 9.0)]),
+        ];
+        for (what, moves) in cases {
+            let mut s = menu_scene(&font, LAUNCHER);
+            s.advance(MS(0), &live);
+            let mut out = Vec::new();
+            let c = mid(s.buttons[0].rect);
+            s.handle_touch(Phase::Down, c, MS(1000), &font, &mut out);
+            for &(dx, dy) in moves {
+                s.handle_touch(Phase::Move, (c.0 + dx, c.1 + dy), MS(1010), &font, &mut out);
+            }
+            assert_eq!(s.pressed_button(), None, "{what}: no longer pressed");
+            assert_eq!(pull(&s, MS(1010)), 0.0, "{what}: nothing pulled");
+            // Even lifting back on the button runs nothing.
+            s.handle_touch(Phase::Up, c, MS(1100), &font, &mut out);
+            assert!(out.is_empty(), "{what}: {out:?}");
+            assert_eq!(s.next_change(MS(1100)), None, "{what}: 0 fps");
+        }
+        // A shallow diagonal to the right (within ~27 degrees) does pull.
+        let mut s = menu_scene(&font, LAUNCHER);
+        drag(&mut s, &font, 1000, &[(20.0, 6.0), (30.0, 9.0)], Phase::Up);
+        assert!(s.menus[0].fold.is_open());
+    }
+
+    #[test]
+    fn a_circle_keeps_its_shape_and_the_row_comes_out_beside_it() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, LAUNCHER);
+        let live = live();
+        let b = s.buttons[0].rect;
+        assert_eq!((b.w, b.h), (52.0, 52.0));
+        let m = &s.menus[0];
+        let open = m.open_rect;
+        // Beside it, as high, wide enough for the three labels, inside the bar.
+        assert!(open.x >= b.x + b.w, "{open:?} vs {b:?}");
+        assert_eq!((open.y, open.h), (b.y, b.h));
+        let label = font.measure("nvim", (b.h - 8.0) * 0.42);
+        assert!(open.w > 3.0 * label && open.x + open.w <= W as f32, "{open:?}");
+        assert_eq!(m.rect.w, 0.0, "folded, it is nothing");
+        for j in 0..3 {
+            let c = child_mid(&s, j);
+            assert!(c.0 > open.x && c.0 < open.x + open.w);
+        }
+        // The circle is drawn the same, folded, half out and out.
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut circle = |s: &mut Scene, t: Duration| {
+            s.advance(t, &live);
+            s.draw(&mut canvas, t, &font, &live).unwrap();
+            let px = |x: u32, y: u32| pixel(&canvas, x as f32, y as f32);
+            let r = (b.x as u32..(b.x + b.w) as u32).flat_map(|x| (0..H).map(move |y| (x, y)));
+            r.map(|(x, y)| px(x, y)).collect::<Vec<_>>()
+        };
+        let folded = circle(&mut s, MS(0));
+        let (x, y) = mid(b);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (x, y), MS(1000), &font, &mut out);
+        s.handle_touch(Phase::Move, (x + 12.0, y), MS(1010), &font, &mut out);
+        assert!(folded == circle(&mut s, MS(1010)), "half out: the circle changed");
+        s.handle_touch(Phase::Move, (x + 30.0, y), MS(1020), &font, &mut out);
+        s.handle_touch(Phase::Up, (x + 30.0, y), MS(1030), &font, &mut out);
+        assert!(folded == circle(&mut s, MS(1500)), "out: the circle changed");
+        // Out, the row covers the next button (veiled) and shows its children.
+        let btn = s.buttons[1].rect;
+        assert!(overlaps(btn, open));
+    }
+
+    /// Not a check: the launcher closed, half pulled and out, as PNGs in
+    /// $TOUCHBINUX_FRAMES (run with --ignored): as on the real bar (the Arch icon,
+    /// transparent) and with a background (the row is a pill beside the circle).
+    #[test]
+    #[ignore]
+    fn dump_launcher_pull() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let arch = "icon = \"/etc/touchbinux/icons/arch.svg\"\n        color = \"#00ffb7\"";
+        let transparent = LAUNCHER
+            .replace("label = \"L\"", arch)
+            .replace("background = \"#3050a0\"", "background = \"transparent\"");
+        let filled = LAUNCHER.replace("label = \"L\"", arch);
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        for (look, toml) in [("transparent", transparent), ("filled", filled)] {
+            let mut s = menu_scene(&font, &toml);
+            let mut shot = |s: &mut Scene, t: Duration, name: &str| {
+                s.advance(t, &live);
+                s.draw(&mut canvas, t, &font, &live).unwrap();
+                canvas
+                    .save_png(Path::new(&format!("{dir}/pull-{look}-{name}.png")))
+                    .unwrap();
+            };
+            shot(&mut s, MS(0), "a-closed");
+            let (x, y) = mid(s.buttons[0].rect);
+            let mut out = Vec::new();
+            s.handle_touch(Phase::Down, (x, y), MS(1000), &font, &mut out);
+            s.handle_touch(Phase::Move, (x + 12.0, y), MS(1010), &font, &mut out);
+            shot(&mut s, MS(1010), "b-half");
+            s.handle_touch(Phase::Move, (x + 30.0, y), MS(1020), &font, &mut out);
+            s.handle_touch(Phase::Up, (x + 30.0, y), MS(1030), &font, &mut out);
+            shot(&mut s, MS(1030), "c-out");
+        }
     }
 }

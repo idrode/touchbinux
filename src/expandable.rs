@@ -30,6 +30,8 @@ const CHILD_GAP: f32 = 4.0;
 const ICON_LABEL_GAP: f32 = 8.0;
 /// Children's highlight boxes stay this far from the row's top and bottom.
 const CHILD_INSET: f32 = 4.0;
+/// Between a button and the row pulled out of it.
+const PULL_GAP: f32 = 8.0;
 
 /// A static icon that can be drawn faded (children cross-fade in as the row opens).
 pub enum Glyph {
@@ -246,6 +248,10 @@ pub struct Expandable {
     rec_look: Option<RecLook>,
     /// The recording it shows (capture items only), as of the last `advance`.
     recording: Option<Recording>,
+    /// Pulled out of this button (`drag_children`): no icon of its own; folded it
+    /// is nothing, and it grows to the right from beside the button, which stays
+    /// as it is (a circle keeps its shape).
+    pulled_from: Option<Rect>,
 }
 
 /// What `Expandable::new` needs besides its id, rect and children.
@@ -261,6 +267,9 @@ pub struct Spec {
     pub seek: Option<SeekBar>,
     /// A capture item: shows `Live::recording` this way.
     pub rec: Option<RecLook>,
+    /// A button's `drag_children`: `rect` is the button's (see
+    /// `Expandable::pulled_from`).
+    pub pulled: bool,
 }
 
 impl Expandable {
@@ -284,6 +293,7 @@ impl Expandable {
             child_w: None,
             rec_look: spec.rec,
             recording: None,
+            pulled_from: spec.pulled.then_some(rect),
         };
         e.place(font);
         e
@@ -296,11 +306,30 @@ impl Expandable {
         let n = self.children.len() as f32;
         let children = n * (widest + CHILD_GAP);
         let seek = if self.seek.is_some() { SEEK_W } else { 0.0 };
-        let width = self
-            .width
-            .unwrap_or_else(|| (header + CHILD_GAP + children + seek + PADDING).ceil());
+        let natural = match self.pulled_from {
+            // Clear of both round ends.
+            Some(b) => {
+                let clear = (self.frame.corner(b) * 0.5).max(CHILD_GAP);
+                2.0 * clear + children - CHILD_GAP
+            }
+            None => header + CHILD_GAP + children + seek + PADDING,
+        };
+        let width = self.width.unwrap_or_else(|| natural.ceil());
         self.child_w = self.seek.is_some().then_some(widest);
-        self.open_rect = expanded_rect(self.rect, self.area, width);
+        let Some(button) = self.pulled_from else {
+            self.open_rect = expanded_rect(self.rect, self.area, width);
+            return;
+        };
+        // Beside the button, as wide as the row allows; folded, a sliver at its
+        // left end that it grows from.
+        let x = (button.x + button.w + PULL_GAP).round();
+        let room = (self.area.x + self.area.w - x).max(1.0);
+        self.open_rect = Rect {
+            x,
+            w: width.min(room).round(),
+            ..button
+        };
+        self.rect = Rect { w: 0.0, ..self.open_rect };
     }
 
     /// Child `j` in the row `r`.
@@ -328,11 +357,15 @@ impl Expandable {
     }
 
     /// Where children (and the seek bar) go in the row `r`: after the header, clear
-    /// of the row's round end.
+    /// of the row's round end(s).
     fn content(&self, r: Rect) -> (f32, f32) {
-        let x0 = self.header_end(r) + CHILD_GAP;
-        let end = r.x + r.w - (self.frame.corner(r) * 0.5).max(CHILD_GAP);
-        (x0, end)
+        let clear = (self.frame.corner(r) * 0.5).max(CHILD_GAP);
+        let x0 = if self.pulled_from.is_some() {
+            r.x + clear
+        } else {
+            self.header_end(r) + CHILD_GAP
+        };
+        (x0, r.x + r.w - clear)
     }
 
     /// Replaces the children (e.g. the GIFs found in a folder), keeping the active
@@ -353,13 +386,22 @@ impl Expandable {
         self.place(font);
     }
 
-    /// Unfolded, the icon's column at the left, never narrower than a square.
+    /// Unfolded, the icon's column at the left, never narrower than a square; none
+    /// for a pulled row.
     fn header_w(&self, row_h: f32) -> f32 {
+        if self.pulled_from.is_some() {
+            return 0.0;
+        }
         row_h.max(self.face_w + 2.0 * CHILD_GAP)
     }
 
     fn header_end(&self, r: Rect) -> f32 {
         r.x + self.header_w(r.h)
+    }
+
+    /// Whether this is a button's `drag_children` row.
+    pub fn is_pulled(&self) -> bool {
+        self.pulled_from.is_some()
     }
 
     /// Keeps the state of the item it replaces (scene rebuilt on reload): how far
@@ -495,6 +537,9 @@ impl Expandable {
         live: &Live,
     ) {
         let k = self.fold.progress(t);
+        if self.pulled_from.is_some() && k <= 0.0 {
+            return; // folded into its button, which draws itself
+        }
         let r = self.current_rect(t);
         self.frame.draw_background(canvas, r);
         if let (Some(look), Some(rec)) = (self.rec_look, self.recording) {
@@ -506,6 +551,19 @@ impl Expandable {
         // left, as a header. The icon slides between the two; the label fades out in
         // the first half, the children fade in over the second.
         let side = icon_side(r.h);
+        let text = self.frame.text.unwrap_or(TEXT);
+        if self.pulled_from.is_some() {
+            // No icon or label of its own. The children, laid out as when it is
+            // out, slide with its right end and show as they come out from beside
+            // the button (never over it).
+            let open = self.open_rect;
+            let shifted = Rect {
+                x: r.x + r.w - open.w,
+                ..open
+            };
+            self.draw_children(canvas, shifted, t, font, pressed, live, (1.0, Some(r.x)));
+            return;
+        }
         let px = r.h * 0.42;
         let show_label = !self.label.is_empty() && self.frame.shape != Shape::Circle;
         let (tw, gap) = if show_label {
@@ -528,7 +586,6 @@ impl Expandable {
         );
         self.face.draw(canvas, icon, t);
 
-        let text = self.frame.text.unwrap_or(TEXT);
         let folded = 1.0 - 2.0 * k;
         if show_label && folded > 0.0 {
             let baseline = font.centered_baseline(r.y + r.h / 2.0, px);
@@ -555,14 +612,43 @@ impl Expandable {
             r.h - 2.0 * sep,
             fade(DIM, unfolded * 0.6),
         );
+        self.draw_children(canvas, r, t, font, pressed, live, (unfolded, None));
+    }
+
+    /// The children (and the seek bar) in the row `r`, at opacity `unfolded`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_children(
+        &self,
+        canvas: &mut Canvas,
+        r: Rect,
+        t: Duration,
+        font: &Font,
+        pressed: Option<usize>,
+        live: &Live,
+        (unfolded, left): (f32, Option<f32>),
+    ) {
+        let side = icon_side(r.h);
+        let text = self.frame.text.unwrap_or(TEXT);
         for (j, child) in self.children.iter().enumerate() {
             let slot = self.child_rect(r, j);
+            // Hidden left of `left`; it fades in until it is as far from it as the
+            // first child is from the row's start when out.
+            let shown = match left {
+                Some(x) => {
+                    let margin = self.child_rect(r, 0).x - r.x;
+                    unfolded * ((slot.x - x) / margin.max(1.0)).clamp(0.0, 1.0)
+                }
+                None => unfolded,
+            };
+            if shown <= 0.0 {
+                continue;
+            }
             let pressed = pressed == Some(j) && child.enabled;
-            let alpha = if child.enabled { unfolded } else { unfolded * DISABLED_ALPHA };
+            let alpha = if child.enabled { shown } else { shown * DISABLED_ALPHA };
             let Some(f) = child.frame else {
                 let corner = self.frame.corner(slot);
                 if child.active {
-                    let c = fade(self.active_color, unfolded);
+                    let c = fade(self.active_color, shown);
                     canvas.fill_rounded_rect(slot.x, slot.y, slot.w, slot.h, corner, c);
                 }
                 if pressed {
@@ -719,6 +805,7 @@ mod tests {
             picks: false,
             seek: seek.then(|| SeekBar::new(None, None, true, None)),
             rec: None,
+            pulled: false,
         };
         let children = (0..n)
             .map(|j| Child::new(j.to_string(), None, "ab".into()))

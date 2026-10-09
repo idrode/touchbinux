@@ -74,6 +74,13 @@ impl Fold {
         self.collapse_at = None;
     }
 
+    /// Held at `k` (0..=1, clamped) by a finger pulling it out (a button's
+    /// `drag_children`): no animation, no automatic fold.
+    pub fn pull_to(&mut self, k: f32) {
+        self.progress = Tween::still(k.clamp(0.0, 1.0));
+        self.collapse_at = None;
+    }
+
     /// A finger came down on it: no automatic fold until it lifts.
     pub fn touch_down(&mut self) {
         self.held = true;

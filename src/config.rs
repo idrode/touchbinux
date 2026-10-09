@@ -70,6 +70,8 @@ const WS_ICON_SIZE: std::ops::RangeInclusive<f32> = 8.0..=64.0;
 /// workspaces: a capsule's axes, and the gaps and padding, px.
 const WS_BAR: std::ops::RangeInclusive<f32> = 2.0..=60.0;
 const WS_SPACING: std::ops::RangeInclusive<f32> = 0.0..=40.0;
+/// workspaces: border widths, px.
+const WS_BORDER: std::ops::RangeInclusive<f32> = 0.0..=6.0;
 /// `show = "all"`: workspaces 1 to this.
 pub const WS_ALL: i64 = 10;
 /// `drag_px` of a button with `drag_children`.
@@ -358,6 +360,21 @@ pub struct ItemConfig {
     /// workspaces: the strip's height, px (default: the row's), centred in it.
     #[serde(default)]
     pub strip_height: Option<f32>,
+    /// workspaces: borders inside the strip's and the capsules' outlines (colour
+    /// and width; none by default), the active capsule's colour, and a tint for
+    /// the strip's icons.
+    #[serde(default)]
+    pub strip_border_color: Option<Color>,
+    #[serde(default)]
+    pub strip_border_width: Option<f32>,
+    #[serde(default)]
+    pub bar_border_color: Option<Color>,
+    #[serde(default)]
+    pub bar_border_width: Option<f32>,
+    #[serde(default)]
+    pub active_border_color: Option<Color>,
+    #[serde(default)]
+    pub icon_tint: Option<Color>,
     #[serde(default)]
     pub strip: Option<WsStrip>,
     /// workspaces: "existing" (default) or "all".
@@ -734,6 +751,12 @@ impl ItemConfig {
                 "icon_gap",
                 "strip_pad",
                 "strip_height",
+                "strip_border_color",
+                "strip_border_width",
+                "bar_border_color",
+                "bar_border_width",
+                "active_border_color",
+                "icon_tint",
                 "strip",
                 "class_icons",
                 "show",
@@ -778,6 +801,12 @@ impl ItemConfig {
             ("icon_gap", self.icon_gap.is_some()),
             ("strip_pad", self.strip_pad.is_some()),
             ("strip_height", self.strip_height.is_some()),
+            ("strip_border_color", self.strip_border_color.is_some()),
+            ("strip_border_width", self.strip_border_width.is_some()),
+            ("bar_border_color", self.bar_border_color.is_some()),
+            ("bar_border_width", self.bar_border_width.is_some()),
+            ("active_border_color", self.active_border_color.is_some()),
+            ("icon_tint", self.icon_tint.is_some()),
             ("strip", self.strip.is_some()),
             ("show", self.show.is_some()),
             ("overview_action", self.overview_action.is_some()),
@@ -987,13 +1016,59 @@ impl ItemConfig {
                 bail!("{what}: {field} must be in {WS_SPACING:?} px");
             }
         }
+        for (field, w) in [
+            ("strip_border_width", self.strip_border_width),
+            ("bar_border_width", self.bar_border_width),
+        ] {
+            if w.is_some_and(|w| !WS_BORDER.contains(&w)) {
+                bail!("{what}: {field} must be in {WS_BORDER:?} px");
+            }
+        }
+        let width = |w: Option<f32>| w.unwrap_or(0.0) > 0.0;
+        for (colour, set, needs) in [
+            ("strip_border_color", self.strip_border_color.is_some(), "strip_border_width"),
+            ("bar_border_color", self.bar_border_color.is_some(), "bar_border_width"),
+            ("active_border_color", self.active_border_color.is_some(), "bar_border_width"),
+        ] {
+            let w = if needs == "strip_border_width" {
+                self.strip_border_width
+            } else {
+                self.bar_border_width
+            };
+            if set && !width(w) {
+                bail!("{what}: {colour} needs {needs} > 0 (there is no border without it)");
+            }
+        }
+        if width(self.strip_border_width) && self.strip_border_color.is_none() {
+            bail!("{what}: strip_border_width needs strip_border_color");
+        }
+        if width(self.bar_border_width) && self.bar_border_color.is_none() {
+            bail!("{what}: bar_border_width needs bar_border_color");
+        }
+        if let Some(w) = self.strip_border_width.filter(|w| *w > 0.0) {
+            let pad = self.strip_pad.unwrap_or(crate::workspaces::DEFAULT_STRIP_PAD);
+            if pad < w {
+                bail!("{what}: strip_pad ({pad}) must be at least strip_border_width ({w}): the icons would cover the border");
+            }
+        }
+        if let Some(w) = self.bar_border_width.filter(|w| *w > 0.0) {
+            let (_, short) = self.ws_bar();
+            if 2.0 * w >= short {
+                bail!("{what}: bar_border_width ({w}) leaves nothing inside bar_short ({short})");
+            }
+        }
         if self.strip_height.is_some_and(|h| !WS_BAR.contains(&h)) {
             bail!("{what}: strip_height must be in {WS_BAR:?} px");
         }
         if let (Some(h), Some(icon)) = (self.strip_height, self.icon_size.or(Some(crate::workspaces::DEFAULT_ICON)))
-            && icon > h
         {
-            bail!("{what}: icon_size ({icon}) must fit in strip_height ({h})");
+            let bw = self.strip_border_width.unwrap_or(0.0);
+            if icon > h {
+                bail!("{what}: icon_size ({icon}) must fit in strip_height ({h})");
+            }
+            if icon + 2.0 * bw > h {
+                bail!("{what}: icon_size ({icon}) and twice strip_border_width ({bw}) must fit in strip_height ({h})");
+            }
         }
         if self.max_icons.is_some_and(|n| !MAX_ICONS.contains(&n)) {
             bail!("{what}: max_icons must be in {MAX_ICONS:?}");
@@ -1484,6 +1559,12 @@ impl Config {
                 icon_gap: None,
                 strip_pad: None,
                 strip_height: None,
+                strip_border_color: None,
+                strip_border_width: None,
+                bar_border_color: None,
+                bar_border_width: None,
+                active_border_color: None,
+                icon_tint: None,
                 strip: None,
                 class_icons: None,
                 show: None,
@@ -2304,6 +2385,40 @@ mod tests {
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow='all'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nstrip='all'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ngap=3").is_err());
+    }
+
+    #[test]
+    fn workspaces_borders_and_tint() {
+        let ws = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\n{body}");
+        let ok = ws("strip_border_color = '#ffffff80'\nstrip_border_width = 2\n\
+                     bar_border_color = '#000000'\nbar_border_width = 1.5\n\
+                     active_border_color = '#00ffb7'\nicon_tint = '#ffffff'");
+        let c = parse(&ok).unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.strip_border_width, Some(2.0));
+        assert!(matches!(item.active_border_color, Some(Color(Rgba(0, 0xff, 0xb7, 0xff)))));
+        assert!(parse(&ws("strip_border_width = 0")).is_ok(), "0: no border");
+        let bad = [
+            ("strip_border_color = 'red'\nstrip_border_width = 2", "bad colour"),
+            ("strip_border_color = '#fff'\nstrip_border_width = 2", "bad colour"),
+            ("icon_tint = '#12345'", "bad colour"),
+            ("strip_border_color = '#ffffff'\nstrip_border_width = 7", "strip_border_width must be in 0.0..=6.0"),
+            ("bar_border_color = '#ffffff'\nbar_border_width = -1", "bar_border_width must be in 0.0..=6.0"),
+            ("strip_border_color = '#ffffff'", "strip_border_color needs strip_border_width > 0"),
+            ("strip_border_color = '#ffffff'\nstrip_border_width = 0", "strip_border_color needs strip_border_width > 0"),
+            ("bar_border_color = '#ffffff'", "bar_border_color needs bar_border_width > 0"),
+            ("active_border_color = '#ffffff'", "active_border_color needs bar_border_width > 0"),
+            ("strip_border_width = 2", "strip_border_width needs strip_border_color"),
+            ("bar_border_width = 2", "bar_border_width needs bar_border_color"),
+            ("bar_border_color = '#ffffff'\nbar_border_width = 6\nbar_short = 12", "leaves nothing inside bar_short"),
+            ("strip_border_color = '#ffffff'\nstrip_border_width = 4\nstrip_pad = 3", "strip_pad (3) must be at least strip_border_width (4)"),
+            ("strip_border_color = '#ffffff'\nstrip_border_width = 4\nicon_size = 30\nstrip_height = 36", "icon_size (30) and twice strip_border_width (4) must fit in strip_height (36)"),
+        ];
+        for (body, why) in bad {
+            let err = format!("{:#}", parse(&ws(body)).unwrap_err());
+            assert!(err.contains(why), "{body}: {err}");
+        }
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nicon_tint='#ffffff'").is_err());
     }
 
     #[test]

@@ -1200,11 +1200,20 @@ aparece.
 | `icon_gap` | `10` | 0-40 px | entre iconos |
 | `strip_pad` | `10` | 0-40 px | relleno en los extremos de la tira |
 | `strip_height` | alto de la fila | 2-60 px | alto de la tira, centrada en la fila (p. ej. `40` con iconos de 30: 5 px de margen arriba y abajo). No menos que `icon_size` ni más que la fila. Sus iconos se pueden tocar en toda la altura de la fila |
+| `strip_border_color`, `strip_border_width` | sin borde, `0` | 0-6 px | borde de la tira, **por dentro** de su contorno (el tamaño exterior no cambia; respeta `strip_height`). Se abre y se cierra con ella, y los iconos nunca lo tapan. `strip_pad` debe ser al menos el grosor, e `icon_size` + 2 × grosor caber en la tira |
+| `bar_border_color`, `bar_border_width` | sin borde, `0` | 0-6 px | borde de las cápsulas, por dentro (el contorno es el mismo). Sigue el giro y el nacimiento y cierre. Con grosor no menos de la mitad de `bar_short` no queda interior: error |
+| `active_border_color` | `bar_border_color` | | borde de la activa; el color se mezcla durante el giro |
+| `icon_tint` | sin tinte | | pinta los iconos de la tira de un solo color (`"#rrggbb"`); las iniciales, el círculo de ese color |
 | `max_icons` | `6` | 1-20 | iconos como mucho en una tira; las demás ventanas, "+N" |
 | `class_icons` | — | | icono por clase de ventana, antes que el tema (ver abajo) |
 | `show` | `"existing"` | `"existing"`, `"all"` | `existing`: los que tiene Hyprland (los crea y destruye al usarlos, así que pueden ser 1, 2, 4, 5); `all`: del 1 al 10 aunque estén vacíos, y cualquier otro que exista |
 | `overview_action` | — | | una [acción](#acciones) para el **arrastre horizontal** (ver abajo) |
 | `drag_px` | `24` | 8-120 | solo con `overview_action`: recorrido del arrastre |
+
+Un `*_border_color` sin `*_border_width` mayor que 0 (o al revés), un color mal
+escrito o un grosor fuera de 0-6 son errores de configuración con su motivo. Con
+un fondo de tira translúcido, el borde se ve a través de él (el fondo se pinta
+encima del borde).
 
 Las opciones de las antiguas píldoras con número (`text_color`, `anim_ms`, `shape`,
 `radius`, `background`) ya no existen y son un error de configuración.

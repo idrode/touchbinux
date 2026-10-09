@@ -248,6 +248,12 @@ format = "%H:%M"
 # icon_gap = 10
 # strip_pad = 10
 # strip_height = 40                # default: the row's height; centred in it
+# strip_border_color = "#00ffb7"   # borders inside the outlines (none by default);
+# strip_border_width = 2           #   0-6 px, a colour needs a width and vice versa
+# bar_border_color = "#808080"
+# bar_border_width = 2
+# active_border_color = "#ffffff"  # default: bar_border_color
+# icon_tint = "#ffffff"            # the strip's icons in one colour
 # max_icons = 6
 # show = "existing"                # or "all": 1 to 10 even if empty
 # class_icons = { "kitty" = "utilities-terminal" }

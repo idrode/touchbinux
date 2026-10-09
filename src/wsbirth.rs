@@ -41,6 +41,10 @@ pub struct Birth {
     pub child_hh: f32,
     pub neighbor_color: Rgba,
     pub child_color: Rgba,
+    /// 0: the shapes' outline. A border of width `w` is this frame drawn in the
+    /// border's colours, then again with `inset` = `w` in the fill colours: every
+    /// half axis and the neck `w` thinner, the same centres.
+    pub inset: f32,
 }
 
 fn clamp01(t: f32) -> f32 {
@@ -141,6 +145,27 @@ fn capsule_half(p: &mut Path, cy: f32, x: f32, hw: f32, hh: f32, side: f32) {
 pub fn capsule(canvas: &mut Canvas, x: f32, cy: f32, hw: f32, hh: f32, color: Rgba) {
     let r = hw.min(hh);
     canvas.fill_rounded_rect(x - hw, cy - hh, 2.0 * hw, 2.0 * hh, r, color);
+}
+
+/// A capsule with an optional border (colour, width) inside its outline: the
+/// outline in the border's colour, then the fill `width` in from it. The outline
+/// is the same as without a border.
+pub fn bordered_capsule(
+    canvas: &mut Canvas,
+    (x, cy): (f32, f32),
+    (hw, hh): (f32, f32),
+    fill: Rgba,
+    border: Option<(Rgba, f32)>,
+) {
+    match border {
+        Some((colour, w)) if w > 0.0 => {
+            capsule(canvas, x, cy, hw, hh, colour);
+            if hw > w && hh > w {
+                capsule(canvas, x, cy, hw - w, hh - w, fill);
+            }
+        }
+        _ => capsule(canvas, x, cy, hw, hh, fill),
+    }
 }
 
 /// Two lobes joined by a neck `h` half-thick at its middle; each lobe in its own
@@ -252,8 +277,12 @@ pub fn draw(canvas: &mut Canvas, b: &Birth) {
     // Child: a round drop while liquid; settling, to its final shape.
     let g = if p < brk { 0.0 } else { clamp01(ease_out_back(t3)) };
     let (hwc, hhc) = (lerp(rc, b.child_hw, g), lerp(rc, b.child_hh, g));
+    // Inside a border: everything `inset` thinner (a lobe gone that thin, not drawn).
+    let i = b.inset;
+    let (hwa, hha, hwc, hhc, h) = (hwa - i, hha - i, hwc - i, hhc - i, h - i);
+    let (show_a, show_c) = (hwa.min(hha) > 0.0, hwc.min(hhc) > 0.0);
     let cy = b.cy;
-    if p < brk && h > 0.01 {
+    if p < brk && h > 0.01 && show_a && show_c {
         let a = (xa, hwa, hha, b.neighbor_color);
         let c = (xc, hwc, hhc, b.child_color);
         if dist >= 0.0 {
@@ -264,10 +293,19 @@ pub fn draw(canvas: &mut Canvas, b: &Birth) {
     } else {
         // Just snapped, each lobe drags a pointed tail towards the snap point that
         // is pulled in over the first 30 % of the settling.
-        let tail = 1.0 - ease_out_quad(clamp01(t3 / 0.3));
+        // Inside a border, a neck thinner than it is all border: no tails there.
+        let tail = if p < brk && i > 0.0 {
+            0.0
+        } else {
+            1.0 - ease_out_quad(clamp01(t3 / 0.3))
+        };
         let xm = (xa + xc) / 2.0;
-        lobe(canvas, cy, xa, hwa, hha, b.neighbor_color, lerp(xa, xm, tail));
-        lobe(canvas, cy, xc, hwc, hhc, b.child_color, lerp(xc, xm, tail));
+        if show_a {
+            lobe(canvas, cy, xa, hwa, hha, b.neighbor_color, lerp(xa, xm, tail));
+        }
+        if show_c {
+            lobe(canvas, cy, xc, hwc, hhc, b.child_color, lerp(xc, xm, tail));
+        }
     }
 }
 
@@ -290,6 +328,7 @@ mod tests {
             child_hh: 14.0,
             neighbor_color: WHITE,
             child_color: MINT,
+            inset: 0.0,
         }
     }
 

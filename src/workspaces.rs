@@ -12,7 +12,7 @@
 
 use crate::{
     anim::{Tween, ease_in_out},
-    canvas::{Canvas, Font, Image, Rect, Rgba},
+    canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
     config::{WS_ALL, WsShow, WsStrip},
     frame::DEFAULT_PRESSED,
     hypr::HyprState,
@@ -125,6 +125,12 @@ pub struct Style {
     pub pad: f32,
     /// The strip's height (`None`: the row's).
     pub strip_h: Option<f32>,
+    /// The strip's border inside its outline: colour and width.
+    pub strip_border: Option<(Rgba, f32)>,
+    /// The capsules' border: inactive and active colours, width.
+    pub bar_border: Option<(Rgba, Rgba, f32)>,
+    /// Paints the strip's icons in one colour.
+    pub icon_tint: Option<Rgba>,
     pub strip: WsStrip,
     pub max_icons: usize,
     /// Icon names by lowercase class, asked before the icon theme.
@@ -134,6 +140,8 @@ pub struct Style {
 /// A window's icon: from the theme, or a coloured circle with the class's initial.
 pub enum WinGlyph {
     Image(Rc<Image>),
+    /// An icon's shape in one colour (`icon_tint`).
+    Mask(Rc<AlphaMask>, Rgba),
     Letter(char, Rgba),
 }
 
@@ -150,9 +158,11 @@ impl WinGlyph {
             Some(AppIcon::Raster(img)) => Some(img),
             None => None,
         };
-        match image {
-            Some(img) => WinGlyph::Image(img),
-            None => WinGlyph::Letter(initial(class), class_colour(class)),
+        match (image, style.icon_tint) {
+            (Some(img), None) => WinGlyph::Image(img),
+            (Some(img), Some(tint)) => WinGlyph::Mask(Rc::new(img.to_mask()), tint),
+            // Tinted, the circle takes the tint (the letter stays white).
+            (None, tint) => WinGlyph::Letter(initial(class), tint.unwrap_or_else(|| class_colour(class))),
         }
     }
 
@@ -163,6 +173,11 @@ impl WinGlyph {
                 let x = (cx - img.width() as f32 / 2.0).round() as i32;
                 let y = (cy - img.height() as f32 / 2.0).round() as i32;
                 canvas.draw_image(img, x, y);
+            }
+            WinGlyph::Mask(mask, colour) => {
+                let x = (cx - mask.width() as f32 / 2.0).round() as i32;
+                let y = (cy - mask.height() as f32 / 2.0).round() as i32;
+                canvas.draw_mask(mask, x, y, *colour);
             }
             WinGlyph::Letter(c, colour) => {
                 canvas.fill_circle(cx, cy, cell.w * 0.45, *colour);
@@ -703,7 +718,8 @@ impl Workspaces {
             let c = &self.caps[p.i];
             let (a, k) = (c.act.value(t), c.press.value(t));
             let colour = s.inactive.lerp(s.active, a);
-            wsbirth::capsule(canvas, p.cx(), cy, p.w * k / 2.0, p.h * k / 2.0, colour);
+            let size = (p.w * k / 2.0, p.h * k / 2.0);
+            wsbirth::bordered_capsule(canvas, (p.cx(), cy), size, colour, self.border(a));
         }
         for (p, sp, k, nb) in births {
             let c = &self.caps[p.i];
@@ -720,13 +736,13 @@ impl Workspaces {
             let Some(nb) = nb else {
                 // Nobody to come out of: it grows in place.
                 let g = ease_in_out(k);
-                wsbirth::capsule(canvas, to_x, cy, chw * g / 2.0, chh * g / 2.0, child_colour);
+                let size = (chw * g / 2.0, chh * g / 2.0);
+                let border = self.border(if child_active { 1.0 } else { 0.0 });
+                wsbirth::bordered_capsule(canvas, (to_x, cy), size, child_colour, border);
                 continue;
             };
             let mix = self.absorbed(self.caps[nb.i].id, sp, k);
-            wsbirth::draw(
-                canvas,
-                &Birth {
+            let birth = Birth {
                     progress: k,
                     // Its place follows the drawn shape (see `looks`); QML used
                     // its rest width, which made a bar drawn horizontal in a
@@ -740,8 +756,22 @@ impl Workspaces {
                     child_hh: chh / 2.0,
                     neighbor_color: s.inactive.lerp(s.active, mix),
                     child_color: child_colour,
-                },
-            );
+                    inset: 0.0,
+            };
+            // With a border: the shapes in the border's colours, then their
+            // inside in the fill colours (the rest's capsules, at both ends).
+            match s.bar_border {
+                Some((off, on, w)) => {
+                    let outline = Birth {
+                        neighbor_color: off.lerp(on, mix),
+                        child_color: if child_active { on } else { off },
+                        ..birth
+                    };
+                    wsbirth::draw(canvas, &outline);
+                    wsbirth::draw(canvas, &Birth { inset: w, ..birth });
+                }
+                None => wsbirth::draw(canvas, &birth),
+            }
         }
         if self.hidden > 0 {
             let text = format!("+{}", self.hidden);
@@ -749,6 +779,11 @@ impl Workspaces {
             let baseline = font.centered_baseline(cy, px);
             canvas.draw_text(font, &text, end + s.gap, baseline, px, s.inactive);
         }
+    }
+
+    /// The capsules' border at activeness `a` (0..1), if they have one.
+    fn border(&self, a: f32) -> Option<(Rgba, f32)> {
+        self.style.bar_border.map(|(off, on, w)| (off.lerp(on, a), w))
     }
 
     /// A strip: its pill, its icons (and "+N") clipped to it while it opens or
@@ -761,7 +796,23 @@ impl Workspaces {
         let (x, w, h) = (p.strip_x, p.strip_w, s.strip_h.unwrap_or(r.h));
         let cy = r.y + r.h / 2.0;
         let top = cy - h / 2.0;
-        canvas.fill_rounded_rect(x, top, w, h, h / 2.0, s.strip_bg);
+        match s.strip_border {
+            // The border inside the outline (which stays the same): the outline
+            // in its colour, the background `bw` in from it; a strip not yet wider
+            // than both borders is all border.
+            Some((colour, bw)) => {
+                canvas.fill_rounded_rect(x, top, w, h, h / 2.0, colour);
+                if w > 2.0 * bw {
+                    let (iw, ih) = (w - 2.0 * bw, h - 2.0 * bw);
+                    canvas.fill_rounded_rect(x + bw, top + bw, iw, ih, ih / 2.0, s.strip_bg);
+                }
+            }
+            None => canvas.fill_rounded_rect(x, top, w, h, h / 2.0, s.strip_bg),
+        }
+        let bw = s.strip_border.map_or(0.0, |(_, bw)| bw);
+        if w <= 2.0 * bw {
+            return; // all border yet: nothing shows inside
+        }
         let step = s.icon + s.icon_gap;
         let mut right = x + w;
         let iy = (cy - s.icon / 2.0).round();
@@ -801,21 +852,101 @@ impl Workspaces {
             }
         }
         // Clip: what sticks out past the strip's round ends is painted over with the
-        // bar's black (nothing else is drawn there before the capsules).
+        // bar's black (nothing else is drawn there before the capsules); with a
+        // border, what reaches into it first with the border's colour. At rest
+        // nothing does (config keeps the icons clear of the border).
         if right > x + w || w < 2.0 * s.pad + s.icon {
-            let rr = (h / 2.0).min(w / 2.0);
             let right = right.min(r.x + r.w);
-            let (cl, cr) = (x + rr, x + w - rr);
-            if right > cr {
-                let mut mask = vec![(cr, top), (right, top), (right, top + h), (cr, top + h)];
-                mask.extend(arc(cr, cy, rr, PI / 2.0, -PI / 2.0));
-                canvas.fill_polygon(&mask, Rgba::BLACK);
+            let rows = (top, top + h);
+            if right > x + w / 2.0 {
+                canvas.fill_polygon(&outside_end(x + w, Some(right), (top, h), w, rows), Rgba::BLACK);
             }
-            let mut mask = vec![(cl, top + h), (x, top + h), (x, top), (cl, top)];
-            mask.extend(arc(cl, cy, rr, -PI / 2.0, -1.5 * PI));
-            canvas.fill_polygon(&mask, Rgba::BLACK);
+            canvas.fill_polygon(&outside_end(x, None, (top, h), w, rows), Rgba::BLACK);
+        }
+        // The border over anything reaching into it at the round ends (a square
+        // icon's corner, or icons sliding under a closing end), exactly between
+        // the outline and its inside.
+        if let Some((colour, bw)) = s.strip_border {
+            let outer = (x, w, top, h);
+            let inner = (x + bw, w - 2.0 * bw, top + bw, h - 2.0 * bw);
+            for right_end in [false, true] {
+                canvas.fill_polygon(&end_band(outer, inner, right_end), colour);
+            }
         }
     }
+}
+
+/// What lies beyond one round end of a strip (`w` wide, `(top, h)`; radius
+/// min(w, h) / 2) at x `edge`, within the rows `(y0, y1)` (at least the strip's):
+/// its corners are quarter circles joined by a vertical side (a half circle when it
+/// is no wider than high). `far`: the right end, covered from there to `far`;
+/// `None`: the left end, covered back to `edge` (left of the strip nothing is
+/// drawn).
+fn outside_end(
+    edge: f32,
+    far: Option<f32>,
+    (top, h): (f32, f32),
+    w: f32,
+    (y0, y1): (f32, f32),
+) -> Vec<(f32, f32)> {
+    let rr = (w / 2.0).min(h / 2.0);
+    let (t, b) = (top + rr, top + h - rr);
+    let mut pts;
+    match far {
+        Some(far) => {
+            let c = edge - rr;
+            pts = vec![(c, y0), (far, y0), (far, y1), (c, y1), (c, top + h)];
+            pts.extend(arc(c, b, rr, PI / 2.0, 0.0));
+            pts.extend(arc(c, t, rr, 0.0, -PI / 2.0));
+        }
+        None => {
+            let c = edge + rr;
+            pts = vec![(c, y1), (edge, y1), (edge, y0), (c, y0), (c, top)];
+            pts.extend(arc(c, t, rr, -PI / 2.0, -PI));
+            pts.extend(arc(c, b, rr, -PI, -1.5 * PI));
+        }
+    }
+    pts
+}
+
+/// One end of a pill (`x`, `w`, `top`, `h`; radius min(w, h) / 2), from `from`
+/// (a vertical line short of its corners) along its top, around the end and back
+/// along its bottom.
+fn end_outline((x, w, top, h): (f32, f32, f32, f32), right_end: bool, from: f32) -> Vec<(f32, f32)> {
+    let rr = (w / 2.0).min(h / 2.0);
+    let (t, b) = (top + rr, top + h - rr);
+    let mut pts = vec![(from, top)];
+    if right_end {
+        let c = x + w - rr;
+        pts.extend(arc(c, t, rr, -PI / 2.0, 0.0));
+        pts.extend(arc(c, b, rr, 0.0, PI / 2.0));
+    } else {
+        let c = x + rr;
+        pts.extend(arc(c, t, rr, -PI / 2.0, -PI));
+        pts.extend(arc(c, b, rr, -PI, -1.5 * PI));
+    }
+    pts.push((from, top + h));
+    pts
+}
+
+/// The border band at one end of a pill: between its outline (`outer`) and its
+/// inside (`inner`), from where both ends' corners start.
+fn end_band(
+    outer: (f32, f32, f32, f32),
+    inner: (f32, f32, f32, f32),
+    right_end: bool,
+) -> Vec<(f32, f32)> {
+    let corner = |(x, w, _, h): (f32, f32, f32, f32)| {
+        let rr = (w / 2.0).min(h / 2.0);
+        if right_end { x + w - rr } else { x + rr }
+    };
+    let (co, ci) = (corner(outer), corner(inner));
+    let from = if right_end { co.min(ci) } else { co.max(ci) };
+    let mut pts = end_outline(outer, right_end, from);
+    let mut back = end_outline(inner, right_end, from);
+    back.reverse();
+    pts.extend(back);
+    pts
 }
 
 /// Points of a circular arc from `a0` to `a1` (either way round).
@@ -877,6 +1008,9 @@ pub mod tests {
             icon_gap: DEFAULT_ICON_GAP,
             pad: DEFAULT_STRIP_PAD,
             strip_h: None,
+            strip_border: None,
+            bar_border: None,
+            icon_tint: None,
             strip,
             max_icons: 6,
             class_icons: BTreeMap::new(),
@@ -892,11 +1026,15 @@ pub mod tests {
     impl Rig {
         /// At x 100 in a 600 x 52 row, showing `s` at rest.
         pub fn new(strip: WsStrip, s: &HyprState) -> Rig {
+            Rig::with(style(strip), s)
+        }
+
+        pub fn with(style: Style, s: &HyprState) -> Rig {
             let font = Font::find(&[]);
             let rect = Rect::new(100.0, 4.0, 600.0, 52.0);
             // No home: every class falls back to its letter.
             let mut icons = IconResolver::new(None, 36);
-            let mut w = Workspaces::new("ws", rect, WsShow::Existing, style(strip));
+            let mut w = Workspaces::new("ws", rect, WsShow::Existing, style);
             let v = WsView::from_state(s, WsShow::Existing);
             w.set_view(v, MS(0), &font, &mut icons, false);
             Rig { w, font, icons }
@@ -1042,6 +1180,197 @@ pub mod tests {
         assert_ne!(px(&c, p2.strip_x + 25.0, 30.0)[..3], bg, "kitty's icon");
         // Its icons are touched over the whole row's height, as before.
         assert_eq!(r.w.hit(p2.strip_x + 25.0, 5.0, MS(0)), Some(Hit::Window("a1".into())));
+    }
+
+    const RED: Rgba = Rgba(0xff, 0x00, 0x00, 0xff);
+    const BLUE: Rgba = Rgba(0x00, 0x00, 0xff, 0xff);
+
+    /// Which pixels are painted at all (the outlines), whatever their colour.
+    fn painted(c: &Canvas) -> Vec<bool> {
+        c.data().chunks(4).map(|p| p[..3] != [0, 0, 0]).collect()
+    }
+
+    #[test]
+    fn the_strip_border_is_inside_its_outline() {
+        let s = state();
+        let plain = Rig::new(WsStrip::Active, &s).frame(0);
+        let mut st = style(WsStrip::Active);
+        st.strip_border = Some((RED, 2.0));
+        st.strip_h = Some(40.0);
+        let mut r = Rig::with(st, &s);
+        let c = r.frame(0);
+        let p2 = placed(&r.w, 2, 0);
+        let x = p2.strip_x + 45.0;
+        // 40 high from y 10: 2 rows of exact red, then the background.
+        assert_eq!(px(&c, x, 9.0), [0, 0, 0, 0xff]);
+        assert_eq!(px(&c, x, 10.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, x, 11.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, x, 12.0)[..3], [0x1a, 0x1d, 0x1c]);
+        assert_eq!(px(&c, x, 48.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, x, 50.0), [0, 0, 0, 0xff]);
+        // And at its round ends.
+        assert_eq!(px(&c, p2.strip_x + 0.5, 30.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, p2.strip_x + p2.strip_w - 1.0, 30.0), [0xff, 0, 0, 0xff]);
+        // The outline is that of the same strip without a border.
+        let mut st = style(WsStrip::Active);
+        st.strip_h = Some(40.0);
+        let same = Rig::with(st, &s).frame(0);
+        assert!(painted(&c) == painted(&same));
+        assert!(painted(&same) != painted(&plain), "(the row-high strip differs)");
+    }
+
+    #[test]
+    fn the_strip_border_opens_with_it() {
+        let s = state();
+        let mut st = style(WsStrip::Active);
+        st.strip_border = Some((RED, 3.0));
+        let mut r = Rig::with(st, &s);
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        // Every frame while 4's strip opens: its left end is border, never a gap
+        // or a flash of background, even a few px wide.
+        let mut widths = Vec::new();
+        for t in (1000..=1190).step_by(10) {
+            let c = r.frame(t);
+            let p = placed(&r.w, 4, t);
+            if p.strip_w < 1.0 {
+                continue;
+            }
+            widths.push(p.strip_w);
+            let red = px(&c, p.strip_x + (p.strip_w / 2.0).min(1.5), 30.0);
+            assert!(red[0] > 0xc0 && red[1] < 0x20, "{t} ms, {} wide: {red:?}", p.strip_w);
+            if p.strip_w > 12.0 {
+                // Under its top border (row 4 + 3), above the icons.
+                let mid = p.strip_x + p.strip_w / 2.0;
+                assert_eq!(px(&c, mid, 5.0), [0xff, 0, 0, 0xff], "{t} ms");
+                assert_eq!(px(&c, mid, 8.0)[..3], [0x1a, 0x1d, 0x1c], "{t} ms");
+            }
+            // 2's strip closing over its icons: its right end, in the border, is
+            // never painted over by them.
+            let q = placed(&r.w, 2, t);
+            if q.strip_w > 8.0 {
+                let end = px(&c, q.strip_x + q.strip_w - 1.5, 30.0);
+                assert!(end[0] > 0xc0 && end[1] < 0x20 && end[2] < 0x20, "{t} ms: {end:?}");
+            }
+        }
+        assert!(widths[0] < 10.0 && widths.windows(2).all(|w| w[0] <= w[1]), "{widths:?}");
+        // At rest it is the same as built that way.
+        let mut st = style(WsStrip::Active);
+        st.strip_border = Some((RED, 3.0));
+        let mut rest = Rig::with(st, &to4);
+        assert!(r.frame(1190).data() == rest.frame(0).data());
+    }
+
+    /// A thick border at rest: a square icon's corner near a round end stays
+    /// under the border, which keeps its colour.
+    #[test]
+    fn icons_never_cover_the_strip_border() {
+        let s = state();
+        let mut st = style(WsStrip::Active);
+        st.strip_border = Some((RED, 6.0));
+        st.strip_h = Some(40.0);
+        // An opaque square (white) instead of every window's icon.
+        let mut r = Rig::with(st, &s);
+        let square = Rc::new(Image::from_premultiplied(30, 30, vec![0xff; 30 * 30 * 4]).unwrap());
+        for g in r.w.glyphs.values_mut() {
+            *g = WinGlyph::Image(square.clone());
+        }
+        let c = r.frame(0);
+        let x = placed(&r.w, 2, 0).strip_x;
+        // (x + 11, 16): in the square's corner, and in the ring (inner radius 14,
+        // outer 20, both centred at x + 20, 30).
+        assert_eq!(px(&c, x + 11.0, 16.0), [0xff, 0, 0, 0xff]);
+        // The square itself, inside the ring.
+        assert_eq!(px(&c, x + 20.0, 30.0), [0xff, 0xff, 0xff, 0xff]);
+    }
+
+    /// Narrower than high (just opening), a strip's ends are straight with round
+    /// corners: the clipping of its icons used to paint over it as if they were
+    /// half circles, and it flickered.
+    #[test]
+    fn a_narrow_strip_is_never_clipped_away() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::Active, &s);
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        for t in (1010..=1190).step_by(5) {
+            let c = r.frame(t);
+            let p = placed(&r.w, 4, t);
+            let mid = p.strip_x + p.strip_w / 2.0;
+            for y in [8.0, 30.0, 52.0] {
+                let col = px(&c, mid, y);
+                assert_ne!(col, [0, 0, 0, 0xff], "{t} ms, {} wide, y {y}", p.strip_w);
+            }
+        }
+    }
+
+    #[test]
+    fn capsule_borders_turn_with_them_and_through_births() {
+        let s = state();
+        let mut st = style(WsStrip::None);
+        st.bar_border = Some((RED, BLUE, 2.0));
+        let mut r = Rig::with(st.clone(), &s);
+        let c = r.frame(0);
+        // Inactive 1 (28 x 16, y 22..38): red border, white inside.
+        let x1 = placed(&r.w, 1, 0).cx();
+        assert_eq!(px(&c, x1, 22.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, x1, 23.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, x1, 24.0)[..3], WHITE);
+        assert_eq!(px(&c, x1, 37.0), [0xff, 0, 0, 0xff]);
+        // Active 2 (16 x 28, y 16..44): the active border colour.
+        let x2 = placed(&r.w, 2, 0).cx();
+        assert_eq!(px(&c, x2, 16.0), [0, 0, 0xff, 0xff]);
+        assert_eq!(px(&c, x2, 18.0)[..3], MINT);
+        // Outlines unchanged.
+        let plain = Rig::new(WsStrip::None, &s).frame(0);
+        assert!(painted(&c) == painted(&plain));
+        // Turning: half way, a colour between red and blue at the top.
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        let c = r.frame(1040);
+        let p4 = placed(&r.w, 4, 1040);
+        let top = 30.0 - p4.h / 2.0;
+        let b = px(&c, p4.cx(), top.ceil());
+        assert!(b[0] > 0 && b[2] > 0, "in between: {b:?}");
+        let mut rest = Rig::with(st.clone(), &to4);
+        assert!(r.frame(1150).data() == rest.frame(0).data());
+        // A birth and a merge, bordered: first and last frames are the rests.
+        let mut more = to4.clone();
+        more.workspaces.insert(3, "3".into());
+        let before = r.frame(2000);
+        r.set(&more, 2000);
+        assert!(r.frame(2000).data() == before.data());
+        let mid = r.frame(2150);
+        assert!(mid.data().chunks(4).any(|p| p == [0xff, 0, 0, 0xff]), "the neighbour's border");
+        let mut rest = Rig::with(st.clone(), &more);
+        assert!(r.frame(2380).data() == rest.frame(0).data());
+        r.set(&to4, 3000);
+        let mut rest = Rig::with(st, &to4);
+        assert!(r.frame(3360).data() == rest.frame(0).data());
+    }
+
+    #[test]
+    fn icon_tint_paints_the_strip_icons() {
+        let s = state();
+        let blue = |c: &Canvas, x0: f32| {
+            let cell = (x0 as u32..x0 as u32 + 30).flat_map(|x| (15..45).map(move |y| (x, y)));
+            cell.filter(|&(x, y)| px(c, x as f32, y as f32) == [0, 0, 0xff, 0xff]).count()
+        };
+        let plain = Rig::new(WsStrip::Active, &s);
+        let p2 = placed(&plain.w, 2, 0);
+        let (kitty, firefox) = (p2.strip_x + 10.0, p2.strip_x + 50.0);
+        let mut plain = plain;
+        let c = plain.frame(0);
+        assert_eq!((blue(&c, kitty), blue(&c, firefox)), (0, 0));
+        let mut st = style(WsStrip::Active);
+        st.icon_tint = Some(BLUE);
+        let c = Rig::with(st, &s).frame(0);
+        // Both icons (a theme icon or an initial's circle) in exact blue.
+        assert!(blue(&c, kitty) > 150, "{}", blue(&c, kitty));
+        assert!(blue(&c, firefox) > 150, "{}", blue(&c, firefox));
     }
 
     #[test]
@@ -1198,5 +1527,44 @@ pub mod tests {
         assert_eq!(initial(""), '?');
         assert_eq!(class_colour("kitty"), class_colour("Kitty"));
         assert_ne!(class_colour("kitty"), class_colour("firefox"));
+    }
+
+    /// Not a check: borders and tint at rest, a strip opening and a birth, cut to
+    /// the item and enlarged 4x, as PNGs in $TOUCHBINUX_FRAMES (run with --ignored).
+    #[test]
+    #[ignore]
+    fn dump_borders() {
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let save = |c: &Canvas, name: &str| {
+            let (x0, w) = (96, 330);
+            let img = image::RgbaImage::from_fn(w * 4, 60 * 4, |x, y| {
+                let i = (((y / 4) * c.width() + x0 + x / 4) * 4) as usize;
+                let p = &c.data()[i..i + 4];
+                image::Rgba([p[0], p[1], p[2], 0xff])
+            });
+            img.save(format!("{dir}/border-{name}.png")).unwrap();
+        };
+        let s = state();
+        let mut st = style(WsStrip::Active);
+        st.strip_border = Some((Rgba(0x00, 0xff, 0xb7, 0xff), 2.0));
+        st.strip_h = Some(40.0);
+        st.bar_border = Some((Rgba(0x80, 0x80, 0x80, 0xff), Rgba(0xff, 0xff, 0xff, 0xff), 2.0));
+        let mut r = Rig::with(st.clone(), &s);
+        save(&r.frame(0), "a-rest");
+        let mut tinted = st.clone();
+        tinted.icon_tint = Some(Rgba(0xff, 0xff, 0xff, 0xff));
+        save(&Rig::with(tinted, &s).frame(0), "b-tint");
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        for ms in [10, 30, 60, 100, 190] {
+            save(&r.frame(1000 + ms), &format!("c-open-{ms:03}ms"));
+        }
+        let mut more = to4.clone();
+        more.workspaces.insert(3, "3".into());
+        r.set(&more, 2000);
+        for ms in [60, 140, 200, 260, 380] {
+            save(&r.frame(2000 + ms), &format!("d-birth-{ms:03}ms"));
+        }
     }
 }

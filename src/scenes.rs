@@ -1827,6 +1827,17 @@ pub fn bar_with(
                 let icon = item.icon_size.unwrap_or(workspaces::DEFAULT_ICON);
                 let (long, short) = item.ws_bar();
                 let strip_h = item.strip_height;
+                // Without strip_height (checked in config), the row's: the icons
+                // clear of the strip's border there too.
+                let bw = item.strip_border_width.unwrap_or(0.0);
+                if strip_h.is_none() && icon + 2.0 * bw > rect.h {
+                    bail!(
+                        "layer {:?}: workspaces {id:?}: icon_size {icon} px and twice strip_border_width \
+                         {bw} px don't fit in the row, which is {} px high",
+                        layer.id,
+                        rect.h
+                    );
+                }
                 let sizes = [("icon_size", icon), ("bar_long", long), ("strip_height", strip_h.unwrap_or(0.0))];
                 for (what, px) in sizes {
                     if px > rect.h {
@@ -1849,6 +1860,15 @@ pub fn bar_with(
                     icon_gap: item.icon_gap.unwrap_or(workspaces::DEFAULT_ICON_GAP),
                     pad: item.strip_pad.unwrap_or(workspaces::DEFAULT_STRIP_PAD),
                     strip_h,
+                    strip_border: item
+                        .strip_border_color
+                        .zip(item.strip_border_width.filter(|w| *w > 0.0))
+                        .map(|(c, w)| (c.0, w)),
+                    bar_border: item
+                        .bar_border_color
+                        .zip(item.bar_border_width.filter(|w| *w > 0.0))
+                        .map(|(c, w)| (c.0, item.active_border_color.unwrap_or(c).0, w)),
+                    icon_tint: item.icon_tint.map(|c| c.0),
                     strip: item.strip.unwrap_or_default(),
                     max_icons: item.max_icons.unwrap_or(DEFAULT_MAX_ICONS),
                     class_icons: item.class_icons(),

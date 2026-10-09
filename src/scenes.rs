@@ -7,12 +7,13 @@ use crate::{
     capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
-        BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE, ItemConfig,
+        BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
+        DEFAULT_MAX_ICONS, ItemConfig,
         ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
-    frame::Frame,
+    frame::{Frame, Radius},
     gif::{Gif, GifPlayer, Play},
     gifpick::PickerFace,
     player::{PlayerFace, SeekBar},
@@ -20,6 +21,7 @@ use crate::{
     icons::{AppIcon, IconResolver},
     layout,
     touch::Phase,
+    workspaces::{self, Hit, Workspaces, WsView},
     widgets::{
         BATTERY_ANIM, BATTERY_COLORS, BATTERY_FULL, BatteryIcon,
         BatteryIcons, BatteryWidget, Clock, DrawCx, FOLDER_ANIM, Folder, FolderState, FolderStyle,
@@ -111,6 +113,12 @@ pub enum UiEvent {
     Pick(String, String),
     /// The player's seek bar was released here (item id, seconds from the start).
     Seek(String, f64),
+    /// A workspaces item's pill (item id, workspace id).
+    Workspace(String, String),
+    /// A window icon in a workspaces item (item id, address `0x...`).
+    FocusWindow(String, String),
+    /// A workspaces item's horizontal drag (item id): its `overview_action`.
+    Overview(String),
 }
 
 /// What the daemon needs to fill a gif_picker in: its id, the box its GIF must fit
@@ -301,6 +309,9 @@ enum Capture {
     /// On a button with `drag_children`: where the finger came down, and what it
     /// is doing.
     Pull(usize, (f32, f32), PullState),
+    /// On a workspaces item (its pill or icon in `Scene::ws_target`): where the
+    /// finger came down, and what it is doing (`Pulling`/`Out`: its overview drag).
+    Ws(usize, (f32, f32), PullState),
     /// A touch outside an unfolded item: it folds, and the touch does nothing else.
     Blocked,
 }
@@ -323,6 +334,12 @@ pub struct Scene {
     expanders: Vec<Expander>,
     /// `expandable` items, unfolding into a row of children (drawn every frame).
     menus: Vec<Expandable>,
+    /// `workspaces` items, with their overview drag's `drag_px` if they have one.
+    workspaces: Vec<(Workspaces, Option<f32>)>,
+    /// What the finger on a workspaces item came down on, and whether it is still
+    /// on it.
+    ws_target: Option<Hit>,
+    ws_on_target: bool,
     buttons: Vec<Button>,
     sliders: Vec<Slider>,
     texts: Vec<TextItem>,
@@ -352,6 +369,9 @@ impl Scene {
             widgets: Vec::new(),
             expanders: Vec::new(),
             menus: Vec::new(),
+            workspaces: Vec::new(),
+            ws_target: None,
+            ws_on_target: false,
             buttons: Vec::new(),
             sliders: Vec::new(),
             texts: Vec::new(),
@@ -403,6 +423,15 @@ impl Scene {
         for (rect, w) in &self.widgets {
             w.draw(canvas, *rect, t, &cx);
         }
+        for (i, (ws, _)) in self.workspaces.iter().enumerate() {
+            let pressed = match self.capture {
+                Capture::Ws(j, _, PullState::Tap) if j == i && self.ws_on_target => {
+                    self.ws_target.as_ref()
+                }
+                _ => None,
+            };
+            ws.draw(canvas, t, font, pressed);
+        }
         // Everything of the pressed item is drawn by now (background, highlight, icon,
         // live content): scale it as a whole.
         if let Some(i) = self.pressed_button() {
@@ -434,7 +463,8 @@ impl Scene {
             let sliders = sliders.filter(|&(j, _)| u != Unfolded::Slider(j)).map(|(_, o)| o.rect);
             let menus = self.menus.iter().enumerate();
             let menus = menus.filter(|&(j, _)| u != Unfolded::Menu(j)).map(|(_, o)| o.rect);
-            let rects = self.buttons.iter().map(|b| b.rect).chain(sliders).chain(menus);
+            let ws = self.workspaces.iter().map(|(w, _)| w.rect);
+            let rects = self.buttons.iter().map(|b| b.rect).chain(sliders).chain(menus).chain(ws);
             for r in rects.filter(|r| overlaps(*r, open)) {
                 canvas.fill_rect(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, veil);
             }
@@ -482,10 +512,12 @@ impl Scene {
         let widgets = self.widgets.iter().map(|(_, w)| w.next_change(t));
         let expanders = self.expanders.iter().map(|e| e.next_change(t));
         let menus = self.menus.iter().map(|m| m.next_change(t));
+        let ws = self.workspaces.iter().map(|(w, _)| w.next_change(t));
         animated
             .chain(widgets)
             .chain(expanders)
             .chain(menus)
+            .chain(ws)
             .flatten()
             .min()
     }
@@ -505,7 +537,34 @@ impl Scene {
         for m in &mut self.menus {
             changed |= m.advance(t, live);
         }
+        for (w, _) in &mut self.workspaces {
+            w.advance(t);
+        }
         changed
+    }
+
+    /// Hyprland's state changed: the workspaces items follow it, animated. Returns
+    /// whether any of them shows something else (a title change, say, is nothing).
+    pub fn set_workspaces(
+        &mut self,
+        state: &HyprState,
+        t: Duration,
+        font: &Font,
+        icons: &mut IconResolver,
+    ) -> bool {
+        let mut changed = false;
+        for (w, _) in &mut self.workspaces {
+            let view = WsView::from_state(state, w.show);
+            changed |= w.set_view(view, t, font, icons, true);
+        }
+        changed
+    }
+
+    /// The workspaces item `id`'s place (`None`: not on the bar, e.g. without
+    /// Hyprland).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn workspaces_rect(&self, id: &str) -> Option<Rect> {
+        self.workspaces.iter().find(|(w, _)| w.id == id).map(|(w, _)| w.rect)
     }
 
     fn unfolded(&self, t: Duration) -> Option<Unfolded> {
@@ -643,6 +702,13 @@ impl Scene {
                 self.capture = if let Some(c) = self.expander_down((x, y), t, font, out) {
                     changed = true;
                     c
+                } else if let Some(i) =
+                    self.workspaces.iter().position(|(w, _)| contains(w.rect, x, y))
+                {
+                    self.ws_target = self.workspaces[i].0.hit(x, y);
+                    self.ws_on_target = self.ws_target.is_some();
+                    changed = true;
+                    Capture::Ws(i, (x, y), PullState::Tap)
                 } else if let Some(i) = self.buttons.iter().position(|b| contains(b.rect, x, y)) {
                     match self.buttons[i].pull {
                         Some(p) => {
@@ -671,6 +737,28 @@ impl Scene {
                 let next = self.pull_move(i, from, state, (x, y));
                 changed |= next == PullState::Pulling;
                 self.capture = Capture::Pull(i, from, next);
+            }
+            (Phase::Move, Capture::Ws(i, from, state)) => {
+                let (w, drag) = &self.workspaces[i];
+                let on = self.ws_target.is_some() && w.hit(x, y) == self.ws_target;
+                let (dx, dy) = (x - from.0, y - from.1);
+                let next = match (*drag, state) {
+                    // No gesture: a press, as on a button (off it, no highlight).
+                    (None, s) => s,
+                    (Some(_), PullState::Tap) if dx.hypot(dy) <= TAP_SLOP => PullState::Tap,
+                    (Some(px), PullState::Tap | PullState::Pulling) if dx.abs() >= 2.0 * dy.abs() => {
+                        if dx.abs() >= px {
+                            PullState::Out
+                        } else {
+                            PullState::Pulling
+                        }
+                    }
+                    (Some(_), PullState::Tap) => PullState::Cancelled,
+                    (_, s) => s,
+                };
+                changed |= on != self.ws_on_target;
+                self.ws_on_target = on;
+                self.capture = Capture::Ws(i, from, next);
             }
             (Phase::Move, Capture::Slider(i)) => {
                 let s = &mut self.sliders[i];
@@ -737,6 +825,25 @@ impl Scene {
                             }
                             fold.touch_up(t);
                         }
+                        changed = true;
+                    }
+                    Capture::Ws(i, _, state) => {
+                        let w = &self.workspaces[i].0;
+                        let target = self.ws_target.take();
+                        let on = target.is_some() && w.hit(x, y) == target;
+                        if phase == Phase::Up {
+                            match (state, target) {
+                                (PullState::Tap, Some(Hit::Workspace(id))) if on => {
+                                    out.push(UiEvent::Workspace(w.id.clone(), id.to_string()));
+                                }
+                                (PullState::Tap, Some(Hit::Window(addr))) if on => {
+                                    out.push(UiEvent::FocusWindow(w.id.clone(), format!("0x{addr}")));
+                                }
+                                (PullState::Out, _) => out.push(UiEvent::Overview(w.id.clone())),
+                                _ => {}
+                            }
+                        }
+                        self.ws_on_target = false;
                         changed = true;
                     }
                     Capture::Slider(i) => {
@@ -882,6 +989,13 @@ impl Scene {
                     Some(j) => Capture::Button(j, false),
                     None => Capture::None,
                 }
+            }
+            Capture::Ws(i, from, state) => {
+                let id = &old.workspaces[i].0.id;
+                self.ws_target = old.ws_target.clone();
+                self.ws_on_target = old.ws_on_target;
+                let j = self.workspaces.iter().position(|(w, _)| &w.id == id);
+                j.map_or(Capture::None, |j| Capture::Ws(j, from, state))
             }
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
@@ -1432,13 +1546,28 @@ pub fn windows(
     Ok(scene)
 }
 
-/// A layer from the config: its items laid out left to right (see `layout`).
+/// `bar_with` without Hyprland (tests).
+#[cfg(test)]
 pub fn bar(
     w: u32,
     h: u32,
     font: &Font,
     layer: &LayerConfig,
     icons: &mut IconResolver,
+) -> Result<Scene> {
+    bar_with(w, h, font, layer, icons, None)
+}
+
+/// A layer from the config: its items laid out left to right (see `layout`).
+/// `hypr`: Hyprland's state while connected; without it, workspaces items are left
+/// out (they take no room).
+pub fn bar_with(
+    w: u32,
+    h: u32,
+    font: &Font,
+    layer: &LayerConfig,
+    icons: &mut IconResolver,
+    hypr: Option<&HyprState>,
 ) -> Result<Scene> {
     let mut scene = Scene::new(w, h)?;
     let m = layer.margin;
@@ -1450,8 +1579,13 @@ pub fn bar(
     );
     // Circles are square: `size` wide, or as wide as the row is tall (config rejects
     // width/stretch on them). Here is where the row's height is known.
-    let mut sizes = Vec::with_capacity(layer.items.len());
-    for item in &layer.items {
+    let items: Vec<&ItemConfig> = layer
+        .items
+        .iter()
+        .filter(|i| i.kind != ItemKind::Workspaces || hypr.is_some())
+        .collect();
+    let mut sizes = Vec::with_capacity(items.len());
+    for &item in &items {
         if let Some(d) = layer.circle_diameter(item)
             && d > area.h + 0.01
         {
@@ -1472,7 +1606,7 @@ pub fn bar(
     }
     let slots = layout::distribute(area.x, area.w, layer.gap, &sizes);
     let mut scaled_gifs = HashMap::new();
-    for (item, (x, iw)) in layer.items.iter().zip(slots) {
+    for (&item, (x, iw)) in items.iter().zip(slots) {
         let Some(id) = item.id() else {
             continue; // spacer
         };
@@ -1655,7 +1789,38 @@ pub fn bar(
                     pull: None,
                 });
             }
-            ItemKind::Workspaces => {} // (next)
+            ItemKind::Workspaces => {
+                let Some(state) = hypr else { continue };
+                let mut frame = frame;
+                // Pills, unless the layer or the item says otherwise.
+                if item.radius.is_none() && layer.item_radius.is_none() {
+                    frame.radius = Radius::Full;
+                }
+                let icon = item.icon_size.unwrap_or(icon_side(rect.h) - 4.0);
+                if icon > rect.h {
+                    bail!(
+                        "layer {:?}: workspaces {id:?}: icon_size {icon} px is larger than the row, \
+                         which is {} px high",
+                        layer.id,
+                        rect.h
+                    );
+                }
+                let style = workspaces::Style {
+                    frame,
+                    active: item.active_color.map_or(workspaces::DEFAULT_ACTIVE, |c| c.0),
+                    text: frame.text.unwrap_or(Rgba::WHITE),
+                    icon,
+                    max_icons: item.max_icons.unwrap_or(DEFAULT_MAX_ICONS),
+                    anim: item.anim().unwrap_or(workspaces::DEFAULT_ANIM),
+                    class_icons: item.class_icons(),
+                };
+                let show = item.show.unwrap_or_default();
+                let mut ws = Workspaces::new(id, rect, show, style);
+                let view = WsView::from_state(state, show);
+                ws.set_view(view, Duration::ZERO, font, icons, false);
+                let drag = item.overview_action.as_ref().map(|_| item.drag_px());
+                scene.workspaces.push((ws, drag));
+            }
             ItemKind::Spacer => {}
         }
     }
@@ -3991,5 +4156,226 @@ mod tests {
             s.handle_touch(Phase::Up, (x + 30.0, y), MS(1030), &font, &mut out);
             shot(&mut s, MS(1030), "c-out");
         }
+    }
+
+    /// [btn] [workspaces 600 px] [after]; with an overview drag if `overview`.
+    fn ws_layer(overview: bool) -> String {
+        let gesture = if overview {
+            "overview_action = { type = \"key\", key = \"KEY_F15\" }\n        drag_px = 30"
+        } else {
+            ""
+        };
+        format!(
+            r##"
+        [[layers]]
+        id = "main"
+        margin = 1
+        [[layers.items]]
+        type = "button"
+        id = "btn"
+        label = "B"
+        action = {{ type = "socket" }}
+        [[layers.items]]
+        type = "workspaces"
+        id = "ws"
+        width = 600
+        {gesture}
+        [[layers.items]]
+        type = "button"
+        id = "after"
+        label = "A"
+        action = {{ type = "socket" }}
+    "##
+        )
+    }
+
+    fn ws_scene(font: &Font, toml: &str, hypr: Option<&HyprState>) -> Scene {
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        bar_with(W, H, font, &layer, &mut icons, hypr).unwrap()
+    }
+
+    /// The centre of workspace `id`'s pill, or of window `addr`'s icon.
+    fn ws_point(s: &Scene, what: &Hit) -> (f32, f32) {
+        let w = &s.workspaces[0].0;
+        let r = w.rect;
+        let y = r.y + r.h / 2.0;
+        let xs: Vec<f32> = (r.x as i32..(r.x + r.w) as i32)
+            .map(|x| x as f32)
+            .filter(|&x| w.hit(x, y).as_ref() == Some(what))
+            .collect();
+        ((xs[0] + xs[xs.len() - 1]) / 2.0, y)
+    }
+
+    fn ws_state() -> HyprState {
+        crate::workspaces::tests::state()
+    }
+
+    #[test]
+    fn without_hyprland_workspaces_take_no_room() {
+        let Some(font) = font() else { return };
+        let none = ws_scene(&font, &ws_layer(false), None);
+        assert!(none.workspaces_rect("ws").is_none());
+        let after = |s: &Scene| s.buttons.iter().find(|b| b.id == "after").unwrap().rect;
+        let btn = none.buttons[0].rect;
+        assert_eq!(after(&none).x, btn.x + btn.w + 12.0, "as if it weren't there");
+        let up = ws_scene(&font, &ws_layer(false), Some(&ws_state()));
+        let r = up.workspaces_rect("ws").unwrap();
+        assert_eq!((r.x, r.w), (btn.x + btn.w + 12.0, 600.0));
+        assert_eq!(after(&up).x, r.x + r.w + 12.0);
+        assert_eq!(up.next_change(MS(0)), None, "at rest: no frames");
+    }
+
+    #[test]
+    fn taps_on_pills_and_icons_send_their_dispatch() {
+        let Some(font) = font() else { return };
+        let mut s = ws_scene(&font, &ws_layer(false), Some(&ws_state()));
+        let four = ws_point(&s, &Hit::Workspace(4));
+        let (_, ev) = tap(&mut s, four, MS(100), &font);
+        assert_eq!(ev, vec![UiEvent::Workspace("ws".into(), "4".into())]);
+        let firefox = ws_point(&s, &Hit::Window("b2".into()));
+        let (_, ev) = tap(&mut s, firefox, MS(200), &font);
+        assert_eq!(ev, vec![UiEvent::FocusWindow("ws".into(), "0xb2".into())]);
+        // Pressed: highlighted while on it; sliding to another pill runs nothing.
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, four, MS(300), &font, &mut out);
+        assert_eq!(s.ws_target, Some(Hit::Workspace(4)));
+        assert!(s.ws_on_target);
+        let five = ws_point(&s, &Hit::Workspace(5));
+        assert!(s.handle_touch(Phase::Move, five, MS(310), &font, &mut out));
+        assert!(!s.ws_on_target);
+        s.handle_touch(Phase::Up, five, MS(320), &font, &mut out);
+        assert!(out.is_empty());
+        // Without overview_action, a horizontal drag is no gesture.
+        let one = ws_point(&s, &Hit::Workspace(1));
+        s.handle_touch(Phase::Down, one, MS(400), &font, &mut out);
+        s.handle_touch(Phase::Move, (one.0 + 200.0, one.1), MS(410), &font, &mut out);
+        s.handle_touch(Phase::Up, (one.0 + 200.0, one.1), MS(420), &font, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        // A cancelled touch sends nothing.
+        s.handle_touch(Phase::Down, four, MS(500), &font, &mut out);
+        s.handle_touch(Phase::Cancel, four, MS(510), &font, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(s.ws_target, None);
+    }
+
+    #[test]
+    fn the_overview_drag_runs_its_action_and_a_tap_does_not() {
+        let Some(font) = font() else { return };
+        let mut s = ws_scene(&font, &ws_layer(true), Some(&ws_state()));
+        let one = ws_point(&s, &Hit::Workspace(1));
+        let drag = |s: &mut Scene, moves: &[(f32, f32)], end: Phase| {
+            let mut out = Vec::new();
+            s.handle_touch(Phase::Down, one, MS(1000), &font, &mut out);
+            let mut at = one;
+            for (dx, dy) in moves {
+                at = (one.0 + dx, one.1 + dy);
+                s.handle_touch(Phase::Move, at, MS(1010), &font, &mut out);
+            }
+            s.handle_touch(end, at, MS(1100), &font, &mut out);
+            out
+        };
+        // A tap (even wobbling within 8 px) is still a tap.
+        assert_eq!(drag(&mut s, &[], Phase::Up), vec![UiEvent::Workspace("ws".into(), "1".into())]);
+        assert_eq!(
+            drag(&mut s, &[(4.0, 3.0)], Phase::Up),
+            vec![UiEvent::Workspace("ws".into(), "1".into())]
+        );
+        // drag_px (30) either way: the overview, and no workspace.
+        assert_eq!(drag(&mut s, &[(12.0, 0.0), (31.0, 2.0)], Phase::Up), vec![UiEvent::Overview("ws".into())]);
+        assert_eq!(drag(&mut s, &[(-35.0, 0.0)], Phase::Up), vec![UiEvent::Overview("ws".into())]);
+        // Short, vertical, diagonal or cancelled: nothing at all.
+        assert!(drag(&mut s, &[(20.0, 0.0)], Phase::Up).is_empty());
+        assert!(drag(&mut s, &[(0.0, 12.0)], Phase::Up).is_empty());
+        assert!(drag(&mut s, &[(12.0, 12.0), (40.0, 12.0)], Phase::Up).is_empty());
+        assert!(drag(&mut s, &[(40.0, 0.0)], Phase::Cancel).is_empty());
+    }
+
+    #[test]
+    fn only_visible_changes_redraw_the_workspaces() {
+        use crate::hypr::{ReadOutcome, fake::FakeHypr};
+        use std::io::Write;
+        let Some(font) = font() else { return };
+        let fake = FakeHypr::new("scene", &ws_state(), "ok");
+        let (mut hypr, mut ev) = fake.connect(crate::hyprctl::ConfigProvider::Lua);
+        let mut s = ws_scene(&font, &ws_layer(false), Some(&hypr.state));
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let mut event = |hypr: &mut crate::hypr::Hypr, line: &str| {
+            ev.write_all(format!("{line}\n").as_bytes()).unwrap();
+            assert!(matches!(hypr.read(), ReadOutcome::Changed), "{line}");
+        };
+        // A title: Hyprland's state changes, what is drawn doesn't.
+        event(&mut hypr, "windowtitlev2>>a1,nvim ~/notes");
+        assert!(!s.set_workspaces(&hypr.state, MS(100), &font, &mut icons));
+        assert_eq!(s.next_change(MS(100)), None);
+        // Another workspace: it redraws and animates, then rests.
+        event(&mut hypr, "workspacev2>>4,4");
+        assert!(s.set_workspaces(&hypr.state, MS(200), &font, &mut icons));
+        assert_eq!(s.next_change(MS(200)), Some(MS(200)));
+        s.advance(MS(600), &live());
+        assert_eq!(s.next_change(MS(600)), None);
+        // Focus, a window opening: redraw. The same again: nothing.
+        event(&mut hypr, "activewindowv2>>c3");
+        assert!(s.set_workspaces(&hypr.state, MS(700), &font, &mut icons));
+        event(&mut hypr, "openwindow>>e5,4,foot,~");
+        assert!(s.set_workspaces(&hypr.state, MS(800), &font, &mut icons));
+        assert!(!s.set_workspaces(&hypr.state, MS(900), &font, &mut icons));
+    }
+
+    /// Not a check: one workspace; four (1, 3, 4, 7); many windows with "+N"; and
+    /// icons half emerged, as PNGs in $TOUCHBINUX_FRAMES (run with --ignored).
+    #[test]
+    #[ignore]
+    fn dump_workspaces() {
+        use crate::workspaces::tests::win;
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let mut icons = IconResolver::new(home.as_deref(), icon_size(H));
+        let cfg: Config = toml::from_str(&ws_layer(false)).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let live = live();
+        let mut canvas = Canvas::new(W, H).unwrap();
+        let mut shot = |s: &mut Scene, t: Duration, name: &str| {
+            s.advance(t, &live);
+            s.draw(&mut canvas, t, &font, &live).unwrap();
+            canvas.save_png(Path::new(&format!("{dir}/ws-{name}.png"))).unwrap();
+        };
+        let mut st = HyprState {
+            workspaces: [(1, "1".to_string())].into(),
+            active_workspace: Some(1),
+            windows: vec![win("a1", "kitty", 1), win("b2", "zen", 1)],
+            focused: Some("a1".into()),
+        };
+        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&st)).unwrap();
+        shot(&mut s, MS(0), "a-one");
+        st.workspaces = [1, 3, 4, 7].map(|i| (i, i.to_string())).into();
+        st.windows.extend([win("c3", "org.gnome.Nautilus", 3), win("d4", "mpv", 4), win("e5", "Unknownapp", 7)]);
+        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&st)).unwrap();
+        shot(&mut s, MS(0), "b-four");
+        let mut many = st.clone();
+        for (i, c) in ["firefox", "foot", "gimp", "inkscape", "thunderbird", "Signal", "obsidian", "code"]
+            .iter()
+            .enumerate()
+        {
+            many.windows.push(win(&format!("f{i}"), c, 1));
+        }
+        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&many)).unwrap();
+        shot(&mut s, MS(0), "c-many");
+        // Switching to 1 from 3: half way through the emerging.
+        let mut from = many.clone();
+        from.active_workspace = Some(3);
+        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&from)).unwrap();
+        s.set_workspaces(&many, MS(1000), &font, &mut icons);
+        shot(&mut s, MS(1110), "d-emerging");
+        shot(&mut s, MS(1500), "e-emerged");
+        // Unknown classes: coloured initials.
+        let mut seven = st.clone();
+        seven.active_workspace = Some(7);
+        seven.windows.extend([win("g7", "Weirdtool", 7), win("h8", "zzz.qq", 7)]);
+        seven.focused = Some("e5".into());
+        let mut s = bar_with(W, H, &font, &layer, &mut icons, Some(&seven)).unwrap();
+        shot(&mut s, MS(0), "f-letters");
     }
 }

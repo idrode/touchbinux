@@ -591,7 +591,8 @@ impl App {
             "windows" => scenes::windows(w, h, font, &self.hypr.state, &mut self.icons, &shared),
             "bar" => match self.config.default_layer() {
                 Some(layer) => {
-                    let mut scene = scenes::bar(w, h, font, &layer, &mut self.icons)?;
+                    let hypr = self.hypr.connected().then_some(&self.hypr.state);
+                    let mut scene = scenes::bar_with(w, h, font, &layer, &mut self.icons, hypr)?;
                     // `text` items show what clients have already set.
                     for (key, value) in &self.store {
                         scene.set_text(key, &value_text(value));
@@ -851,7 +852,22 @@ impl App {
             }
             return;
         };
-        match &action {
+        self.run_action(&action);
+    }
+
+    /// A workspaces item's drag: its `overview_action`.
+    fn on_overview(&mut self, item: &str) {
+        let items = self.config.layers.iter().flat_map(|l| &l.items);
+        let action = items
+            .filter(|i| i.kind == ItemKind::Workspaces && i.id() == Some(item))
+            .find_map(|i| i.overview_action.clone());
+        if let Some(a) = action {
+            self.run_action(&a);
+        }
+    }
+
+    fn run_action(&mut self, action: &Action) {
+        match action {
             Action::Command { argv, detach: true, .. } => {
                 if let Err(e) = self.runner.spawn_detached(argv) {
                     eprintln!("action: {e:#}");
@@ -1188,6 +1204,9 @@ fn ui_event_json(ev: &UiEvent) -> Value {
         UiEvent::ToggleMute(id) => json!({"type": "mute", "id": id}),
         UiEvent::Pick(id, value) => json!({"type": "pick", "id": id, "value": value}),
         UiEvent::Seek(id, secs) => json!({"type": "seek", "id": id, "value": secs}),
+        UiEvent::Workspace(id, ws) => json!({"type": "workspace", "id": id, "value": ws}),
+        UiEvent::FocusWindow(id, addr) => json!({"type": "focuswindow", "id": id, "value": addr}),
+        UiEvent::Overview(id) => json!({"type": "overview", "id": id}),
     }
 }
 
@@ -1504,11 +1523,26 @@ fn run(
                                     m.seek(*secs);
                                 }
                             }
+                            UiEvent::Workspace(_, ws) => {
+                                if let Err(e) = app.hypr.dispatch_workspace(ws) {
+                                    eprintln!("workspaces: {e:#}");
+                                }
+                            }
+                            UiEvent::FocusWindow(_, addr) => {
+                                if let Err(e) = app.hypr.dispatch_focus_window(addr) {
+                                    eprintln!("workspaces: {e:#}");
+                                }
+                            }
+                            UiEvent::Overview(item) => app.on_overview(item),
                         }
                     }
                 }
                 TOKEN_HYPR => match app.hypr.read() {
                     ReadOutcome::Changed => {
+                        // Workspaces items redraw only if what they show changed.
+                        let t = Instant::now() - start;
+                        let (st, font) = (&app.hypr.state, &app.font);
+                        dirty |= app.scene.set_workspaces(st, t, font, &mut app.icons);
                         let st = &app.hypr.state;
                         let focused = st
                             .focused_window()

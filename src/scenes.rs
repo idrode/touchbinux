@@ -1826,7 +1826,9 @@ pub fn bar_with(
                 let Some(state) = hypr else { continue };
                 let icon = item.icon_size.unwrap_or(workspaces::DEFAULT_ICON);
                 let (long, short) = item.ws_bar();
-                for (what, px) in [("icon_size", icon), ("bar_long", long)] {
+                let strip_h = item.strip_height;
+                let sizes = [("icon_size", icon), ("bar_long", long), ("strip_height", strip_h.unwrap_or(0.0))];
+                for (what, px) in sizes {
                     if px > rect.h {
                         bail!(
                             "layer {:?}: workspaces {id:?}: {what} {px} px is larger than the row, \
@@ -1846,6 +1848,7 @@ pub fn bar_with(
                     icon,
                     icon_gap: item.icon_gap.unwrap_or(workspaces::DEFAULT_ICON_GAP),
                     pad: item.strip_pad.unwrap_or(workspaces::DEFAULT_STRIP_PAD),
+                    strip_h,
                     strip: item.strip.unwrap_or_default(),
                     max_icons: item.max_icons.unwrap_or(DEFAULT_MAX_ICONS),
                     class_icons: item.class_icons(),

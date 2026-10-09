@@ -355,6 +355,9 @@ pub struct ItemConfig {
     pub icon_gap: Option<f32>,
     #[serde(default)]
     pub strip_pad: Option<f32>,
+    /// workspaces: the strip's height, px (default: the row's), centred in it.
+    #[serde(default)]
+    pub strip_height: Option<f32>,
     #[serde(default)]
     pub strip: Option<WsStrip>,
     /// workspaces: "existing" (default) or "all".
@@ -730,6 +733,7 @@ impl ItemConfig {
                 "icon_size",
                 "icon_gap",
                 "strip_pad",
+                "strip_height",
                 "strip",
                 "class_icons",
                 "show",
@@ -773,6 +777,7 @@ impl ItemConfig {
             ("strip_background", self.strip_background.is_some()),
             ("icon_gap", self.icon_gap.is_some()),
             ("strip_pad", self.strip_pad.is_some()),
+            ("strip_height", self.strip_height.is_some()),
             ("strip", self.strip.is_some()),
             ("show", self.show.is_some()),
             ("overview_action", self.overview_action.is_some()),
@@ -981,6 +986,14 @@ impl ItemConfig {
             if v.is_some_and(|v| !WS_SPACING.contains(&v)) {
                 bail!("{what}: {field} must be in {WS_SPACING:?} px");
             }
+        }
+        if self.strip_height.is_some_and(|h| !WS_BAR.contains(&h)) {
+            bail!("{what}: strip_height must be in {WS_BAR:?} px");
+        }
+        if let (Some(h), Some(icon)) = (self.strip_height, self.icon_size.or(Some(crate::workspaces::DEFAULT_ICON)))
+            && icon > h
+        {
+            bail!("{what}: icon_size ({icon}) must fit in strip_height ({h})");
         }
         if self.max_icons.is_some_and(|n| !MAX_ICONS.contains(&n)) {
             bail!("{what}: max_icons must be in {MAX_ICONS:?}");
@@ -1470,6 +1483,7 @@ impl Config {
                 strip_background: None,
                 icon_gap: None,
                 strip_pad: None,
+                strip_height: None,
                 strip: None,
                 class_icons: None,
                 show: None,
@@ -2195,6 +2209,7 @@ mod tests {
             icon_size = 30
             icon_gap = 10
             strip_pad = 10
+            strip_height = 40
             strip = "pressed"
             show = "all"
             class_icons = { "Kitty" = "utilities-terminal", "zen" = "/usr/share/icons/zen.svg" }
@@ -2248,6 +2263,10 @@ mod tests {
             "gap = 41",
             "icon_gap = 50",
             "strip_pad = -2",
+            "strip_height = 1",
+            "strip_height = 61",
+            "strip_height = 20",
+            "icon_size = 30\nstrip_height = 29",
             "inactive_color = 'white'",
             "strip_background = '#12'",
             "size = 40",

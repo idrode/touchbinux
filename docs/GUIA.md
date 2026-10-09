@@ -1199,6 +1199,7 @@ aparece.
 | `icon_size` | `30` | 8-64 px | lado de los iconos de ventana (no más que la fila) |
 | `icon_gap` | `10` | 0-40 px | entre iconos |
 | `strip_pad` | `10` | 0-40 px | relleno en los extremos de la tira |
+| `strip_height` | alto de la fila | 2-60 px | alto de la tira, centrada en la fila (p. ej. `40` con iconos de 30: 5 px de margen arriba y abajo). No menos que `icon_size` ni más que la fila. Sus iconos se pueden tocar en toda la altura de la fila |
 | `max_icons` | `6` | 1-20 | iconos como mucho en una tira; las demás ventanas, "+N" |
 | `class_icons` | — | | icono por clase de ventana, antes que el tema (ver abajo) |
 | `show` | `"existing"` | `"existing"`, `"all"` | `existing`: los que tiene Hyprland (los crea y destruye al usarlos, así que pueden ser 1, 2, 4, 5); `all`: del 1 al 10 aunque estén vacíos, y cualquier otro que exista |

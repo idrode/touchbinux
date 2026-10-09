@@ -247,6 +247,7 @@ format = "%H:%M"
 # icon_size = 30
 # icon_gap = 10
 # strip_pad = 10
+# strip_height = 40                # default: the row's height; centred in it
 # max_icons = 6
 # show = "existing"                # or "all": 1 to 10 even if empty
 # class_icons = { "kitty" = "utilities-terminal" }

@@ -123,6 +123,8 @@ pub struct Style {
     pub icon: f32,
     pub icon_gap: f32,
     pub pad: f32,
+    /// The strip's height (`None`: the row's).
+    pub strip_h: Option<f32>,
     pub strip: WsStrip,
     pub max_icons: usize,
     /// Icon names by lowercase class, asked before the icon theme.
@@ -755,9 +757,11 @@ impl Workspaces {
         let s = &self.style;
         let c = &self.caps[p.i];
         let r = self.rect;
-        let (x, w, h) = (p.strip_x, p.strip_w, r.h);
-        let cy = r.y + h / 2.0;
-        canvas.fill_rounded_rect(x, r.y, w, h, h / 2.0, s.strip_bg);
+        // Centred in the row, `strip_height` high (default: the row's height).
+        let (x, w, h) = (p.strip_x, p.strip_w, s.strip_h.unwrap_or(r.h));
+        let cy = r.y + r.h / 2.0;
+        let top = cy - h / 2.0;
+        canvas.fill_rounded_rect(x, top, w, h, h / 2.0, s.strip_bg);
         let step = s.icon + s.icon_gap;
         let mut right = x + w;
         let iy = (cy - s.icon / 2.0).round();
@@ -803,11 +807,11 @@ impl Workspaces {
             let right = right.min(r.x + r.w);
             let (cl, cr) = (x + rr, x + w - rr);
             if right > cr {
-                let mut mask = vec![(cr, r.y), (right, r.y), (right, r.y + h), (cr, r.y + h)];
+                let mut mask = vec![(cr, top), (right, top), (right, top + h), (cr, top + h)];
                 mask.extend(arc(cr, cy, rr, PI / 2.0, -PI / 2.0));
                 canvas.fill_polygon(&mask, Rgba::BLACK);
             }
-            let mut mask = vec![(cl, r.y + h), (x, r.y + h), (x, r.y), (cl, r.y)];
+            let mut mask = vec![(cl, top + h), (x, top + h), (x, top), (cl, top)];
             mask.extend(arc(cl, cy, rr, -PI / 2.0, -1.5 * PI));
             canvas.fill_polygon(&mask, Rgba::BLACK);
         }
@@ -872,6 +876,7 @@ pub mod tests {
             icon: DEFAULT_ICON,
             icon_gap: DEFAULT_ICON_GAP,
             pad: DEFAULT_STRIP_PAD,
+            strip_h: None,
             strip,
             max_icons: 6,
             class_icons: BTreeMap::new(),
@@ -1013,6 +1018,30 @@ pub mod tests {
         assert_eq!(px(&c, p4.strip_x + p4.strip_w + 1.0, 30.0), [0, 0, 0, 0xff]);
         let mut rest = Rig::new(WsStrip::Active, &to4);
         assert!(r.frame(1190).data() == rest.frame(0).data());
+    }
+
+    #[test]
+    fn strip_height_centres_a_lower_strip_in_the_row() {
+        let s = state();
+        // Default: as high as the row (52 px, y 4 to 56).
+        let mut r = Rig::new(WsStrip::Active, &s);
+        let p2 = placed(&r.w, 2, 0);
+        let x = p2.strip_x + 45.0;
+        let c = r.frame(0);
+        let bg = [0x1a, 0x1d, 0x1c];
+        let rows = |c: &Canvas| (0..60).filter(|&y| px(c, x, y as f32)[..3] == bg).count();
+        assert_eq!(rows(&c), 52);
+        // 40 px: 6 px of black above and below it, icons still inside.
+        r.w.style.strip_h = Some(40.0);
+        let c = r.frame(0);
+        assert_eq!(rows(&c), 40);
+        assert_eq!(px(&c, x, 9.0), [0, 0, 0, 0xff]);
+        assert_eq!(px(&c, x, 10.0)[..3], bg);
+        assert_eq!(px(&c, x, 49.0)[..3], bg);
+        assert_eq!(px(&c, x, 50.0), [0, 0, 0, 0xff]);
+        assert_ne!(px(&c, p2.strip_x + 25.0, 30.0)[..3], bg, "kitty's icon");
+        // Its icons are touched over the whole row's height, as before.
+        assert_eq!(r.w.hit(p2.strip_x + 25.0, 5.0, MS(0)), Some(Hit::Window("a1".into())));
     }
 
     #[test]

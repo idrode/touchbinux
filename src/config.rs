@@ -1077,6 +1077,14 @@ impl LayerConfig {
                     item.id().unwrap_or("")
                 );
             }
+            if item.kind == ItemKind::Workspaces && self.is_circle(item) {
+                bail!(
+                    "layer {:?}: workspaces {:?}: pills can't be circles; give it \
+                     shape = \"rounded\" (and radius = \"full\") to override item_shape",
+                    self.id,
+                    item.id().unwrap_or("")
+                );
+            }
             if self.is_circle(item) && (item.width.is_some() || item.stretch.is_some())
             {
                 bail!(
@@ -2154,6 +2162,10 @@ mod tests {
         let err = format!("{:#}", parse(&ws("max_icons = 0")).unwrap_err());
         assert!(err.contains("max_icons must be in 1..=20"), "{err}");
         assert!(parse(&ws("overview_action = { type = 'socket' }\ndrag_px = 8")).is_ok());
+        // A layer of circles doesn't make it one.
+        let circles = "[[layers]]\nid='m'\nitem_shape='circle'\n[[layers.items]]\ntype='workspaces'";
+        assert!(parse(circles).is_err());
+        assert!(parse(&format!("{circles}\nshape='rounded'")).is_ok());
         // And the options are only for workspaces.
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nmax_icons=3").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow='all'").is_err());
@@ -2626,6 +2638,25 @@ mod tests {
                 panic!("example depends on a command: {argv:?}");
             }
         }
+    }
+
+    /// The workspaces item commented out in the example is valid once uncommented.
+    #[test]
+    fn example_workspaces_is_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let start = text.find("# [[layers.items]]\n# type = \"workspaces\"").unwrap();
+        let block = &text[start..start + text[start..].find("\n\n").unwrap()];
+        let body: String = block
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = parse(&format!("[[layers]]\nid='m'\n{body}")).unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.kind, ItemKind::Workspaces);
+        assert_eq!(item.size(), Size::Fixed(520.0));
+        assert!(item.overview_action.is_some());
     }
 
     /// The launcher commented out in the example is valid once uncommented.

@@ -3298,6 +3298,24 @@ mod tests {
         assert!(item.overview_action.is_some());
     }
 
+    /// The status item commented out in the example is valid once uncommented.
+    #[test]
+    fn example_status_is_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let start = text.find("# [[layers.items]]\n# id = \"status\"").unwrap();
+        let block = &text[start..start + text[start..].find("\n\n").unwrap()];
+        let body: String = block
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = parse(&format!("[[layers]]\nid='m'\n{body}")).unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.kind, ItemKind::Status);
+        assert_eq!(item.status_shot_watch(), Some("~/Pictures/Screenshots"));
+    }
+
     /// The launcher commented out in the example is valid once uncommented.
     #[test]
     fn example_launcher_is_valid() {

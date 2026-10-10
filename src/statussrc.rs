@@ -494,6 +494,23 @@ mod tests {
         fs::remove_dir_all(&parent).unwrap();
     }
 
+    /// Not a check: what one /proc scan costs here (run with --ignored --nocapture,
+    /// in release for the daemon's figure).
+    #[test]
+    #[ignore]
+    fn scan_cost() {
+        let me = nix::unistd::Uid::current().as_raw();
+        let names = ["wf-recorder", "wl-screenrec", "gpu-screen-reco"];
+        let n = 200;
+        let t0 = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(find(me, &names));
+        }
+        let each = t0.elapsed() / n;
+        let procs = fs::read_dir("/proc").unwrap().filter(|e| e.as_ref().is_ok_and(|e| e.file_name().to_str().is_some_and(|s| s.parse::<u32>().is_ok()))).count();
+        eprintln!("scan: {each:?} per scan over {procs} processes; every 2 s that is {:.3} % of a core", each.as_secs_f64() / 2.0 * 100.0);
+    }
+
     /// A process of ours named like a recorder: found with its real age, followed
     /// by pidfd, its end noticed; then scanning again.
     #[test]

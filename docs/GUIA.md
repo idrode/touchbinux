@@ -1328,6 +1328,88 @@ class_icons = { "kitty" = "utilities-terminal", "zen" = "zen-browser" }
 overview_action = { type = "key", key = "KEY_F15" }   # p. ej. un bind de Hyprland
 ```
 
+#### `status`
+
+Muestra lo que está pasando, **sin lanzar nada nunca**: por ahora una **grabación
+de pantalla** (punto rojo y tiempo) y una **captura** recién hecha (una cámara). No
+tiene acción, ni fondo, ni botón: tocarlo no hace nada (ni siquiera se avisa por el
+socket). Pensado para crecer (notificaciones, mensajes...) con más estados por el
+mismo mensaje del socket.
+
+| Campo | Por defecto | Rango | Qué hace |
+|---|---|---|---|
+| `id` | `"status"` | | |
+| `width` | `120` | (0, 4000] px | su hueco (ancho fijo; no admite `stretch`) |
+| `idle` | `"reserve"` | `"reserve"`, `"hidden"` | sin nada que mostrar: guarda su hueco vacío, o no ocupa nada (los demás se juntan) |
+| `rec_color` | `"#ff0000"` | | el punto de grabación |
+| `shot_color` | `"#00ffb7"` | | la cámara de la captura |
+| `text_color` | `"#ffffff"` (o el `item_text_color` de la capa) | | el tiempo |
+| `shot_watch` | `"~/Pictures/Screenshots"` | ruta absoluta o `~/...` | carpeta cuyos archivos nuevos son capturas. `~` es el home de `run_as`, nunca el de root. `""`: no vigila nada |
+| `rec_processes` | `["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]` | hasta 8 nombres | procesos que graban. `[]`: no los busca |
+| `rec_poll_ms` | `2000` | 250-60000 | cada cuánto busca esos procesos mientras no hay ninguno |
+| `rec_done_ms` | `4000` | 0-60000 | cuánto se ve la duración final al acabar una grabación (0: nada) |
+| `shot_ms` | `2000` | 0-30000 | cuánto se ve la cámara tras una captura (0: nunca) |
+
+Con solo `type = "status"` funciona con todos los valores por defecto.
+
+**De dónde sabe lo que pasa** (sin sondear nada en reposo, salvo lo que se indica):
+
+1. **El socket**, si tus scripts avisan (opcional): `{"type":"status","id":"rec",
+   "state":"start"}`, `... "state":"stop"}` y `{"type":"status","id":"shot"}`. En
+   cuanto llega un aviso de grabación, el socket manda: deja de buscar procesos
+   (hasta recargar la configuración). Otros `id` o `state` responden un error con
+   el motivo.
+2. **La carpeta de capturas** (`shot_watch`), con inotify: un archivo que se cierra
+   tras escribirse (como hace `grim`) o que se mueve dentro es una captura. Se
+   ignoran los ocultos (`.algo`) y los temporales (`~`, `.tmp`, `.part`,
+   `.partial`, `.swp`, `.crdownload`...). Si la carpeta aún no existe, espera a que
+   aparezca en su carpeta madre (como el `mkdir -p` del script). Una captura
+   avisada por el socket y vista en la carpeta cuenta una vez.
+3. **Los procesos** (`rec_processes`): busca en `/proc`, cada `rec_poll_ms`, los
+   procesos del usuario de `run_as` con esos nombres (se comparan los 15 primeros
+   caracteres, que es lo que guarda el kernel: `gpu-screen-reco`). En cuanto
+   encuentra uno deja de buscar y lo sigue con un **pidfd**, que avisa al instante
+   cuando termina, sin sondear. El tiempo sale de la hora de arranque del proceso,
+   así que es correcto aunque el daemon se reinicie a mitad de grabación. Sin
+   `run_as` (ni `sudo`) no busca nada.
+
+**Cómo se ve**
+
+- **Grabando**: punto `rec_color` que se apaga y se enciende suave una vez por
+  segundo, y el tiempo `mm:ss` (`h:mm:ss` desde una hora). Se redibuja solo durante
+  los dos fundidos del punto (0,3 s de cada segundo, a 30 fps) y al cambiar el
+  segundo: unos 10 fotogramas por segundo.
+- **Grabación terminada**: el punto quieto y la duración final durante
+  `rec_done_ms`, con un fundido de salida de 0,35 s. Quieto: 0 fps.
+- **Captura**: una cámara `shot_color` que aparece con un pequeño salto de escala
+  (0,25 s), se queda quieta y se desvanece al final de `shot_ms`.
+- **Las dos a la vez**: manda la grabación; la captura es un destello de 0,7 s
+  encima.
+- **Reposo**: nada, 0 fps, sin temporizadores (solo la búsqueda de procesos, si la
+  hay: unos 0,4 ms cada 2 s).
+- Con `idle = "hidden"`, al empezar a mostrar algo la fila se recoloca para hacerle
+  sitio, y al acabar el fundido se cierra el hueco. La recolocación es **de
+  golpe**: lo que se anima es el contenido del elemento. Deslizar a los vecinos
+  obligaría a repintar toda la capa fija de la barra en cada fotograma.
+
+```toml
+[[layers.items]]
+id = "status"
+type = "status"
+width = 120
+idle = "reserve"            # reserve | hidden
+rec_color = "#ff0000"
+shot_color = "#00ffb7"
+shot_watch = "~/Pictures/Screenshots"
+rec_processes = ["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]
+rec_done_ms = 4000
+shot_ms = 2000
+```
+
+Para verlo sin grabar ni capturar nada: `touchbinux bar --config <archivo> --png
+<salida.png> --status rec` (o `rec_done`, `shot`, `rec_shot`). Con el daemon en
+marcha, los mensajes del socket de arriba lo muestran en la barra de verdad.
+
 #### `spacer`
 
 Espacio vacío. Solo `width` o `stretch` (por defecto `stretch = 1`).
@@ -1469,6 +1551,8 @@ el código (`src/widgets.rs`).
 | `workspaces`: cambio de activo / pulsación; tira; nacimiento; cierre | — | 150 ms; 190 ms; 380 ms; 360 ms |
 | Barras del `player` | — | ~30 fps solo reproduciendo |
 | `capture` grabando (punto y cronómetro) | — | 2 fps solo grabando |
+| `status` grabando (fundidos del punto, el segundo) | — | ~10 fps solo grabando |
+| `status`: captura (salto; fundido); fin de grabación (fundido) | `shot_ms`, `rec_done_ms` | 250 ms; 350 ms; 350 ms |
 
 Mientras algo se anima o se arrastra, ~30 fps; después, 0 fps.
 
@@ -1566,22 +1650,39 @@ y con la configuración clásica (*no probado*): `bind = , XF86Tools, exec, rofi
 Alternativa sin tecla: copiar el comando del atajo a una acción `command` o
 `hyprctl exec`.
 
+### Avisar al `status` desde tus scripts
+
+Opcional: sin avisos, `status` ve las grabaciones por sus procesos y las capturas
+por su carpeta. Con avisos, la grabación aparece y desaparece al instante, sin
+búsqueda de procesos. Una línea al final de cada caso del script:
+
+```sh
+echo '{"type":"status","id":"rec","state":"start"}' | socat - UNIX-CONNECT:/run/touchbinux.sock 2>/dev/null || true
+```
+
+(`"stop"` al parar, `{"type":"status","id":"shot"}` tras una captura.) El `|| true`
+deja el script funcionando aunque touchbinux no esté en marcha.
+
 ### Mostrar datos de un script por el socket
 
 El daemon escucha en `/run/touchbinux.sock`: **JSON por líneas** (un objeto por
 línea, terminado en `\n`). Solo pueden conectarse root y el usuario de `run_as`.
 
-**Entrada** (cliente → daemon), un único tipo:
+**Entrada** (cliente → daemon), dos tipos:
 
 ```json
 {"type":"set","key":"weather","value":"18 °C"}
+{"type":"status","id":"rec","state":"start"}
 ```
+
+`status` es para los elementos [`status`](#status): `id` `"rec"` con `state`
+`"start"` o `"stop"`, o `id` `"shot"` (sin `state`, o `"done"`).
 
 `key`: 1-64 bytes (máximo 256 claves distintas). `value`: cualquier JSON. Un `set`
 correcto no responde nada. Uno incorrecto responde, por ejemplo:
 
 ```json
-{"message":"invalid message: unknown variant `nope`, expected `set` at line 1 column 14","type":"error"}
+{"message":"invalid message: unknown variant `nope`, expected `set` or `status` at line 1 column 14","type":"error"}
 ```
 
 **Salida** (daemon → todos los clientes conectados):
@@ -1788,6 +1889,8 @@ una suspensión real.
 | `mpv.rs` | cliente del socket IPC de mpv: estado por `observe_property`, seek |
 | `player.rs` | `player`: icono (barras simuladas, trait `Levels`), barra de posición |
 | `capture.rs` | `capture`: modos e iconos, seguimiento de `wf-recorder`, indicador de grabación |
+| `status.rs` | `status`: estado compartido (grabación, captura), lo que muestra cada elemento en cada instante y su dibujo |
+| `statussrc.rs` | `status`: vigilancia de la carpeta de capturas (inotify) y de los procesos que graban (`/proc` y pidfd) |
 | `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, círculos y píldora o cápsulas, tiras de iconos; nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
 | `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |

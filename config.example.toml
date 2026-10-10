@@ -267,6 +267,24 @@ format = "%H:%M"
 # overview_action = { type = "key", key = "KEY_F15" }   # a horizontal drag runs it
 # drag_px = 24                     # only with overview_action
 
+# What is going on, never starting anything: a screen recording (red dot and
+# time) and a screenshot just taken (a camera). Learns it from the socket
+# ({"type":"status","id":"rec","state":"start"|"stop"}, {"type":"status","id":"shot"}),
+# from new files in shot_watch (inotify) and from recorder processes (looked for
+# every rec_poll_ms, then followed by pidfd). Touching it does nothing.
+# [[layers.items]]
+# id = "status"
+# type = "status"
+# width = 120
+# idle = "reserve"                 # or "hidden": no room while there is nothing
+# rec_color = "#ff0000"
+# shot_color = "#00ffb7"
+# shot_watch = "~/Pictures/Screenshots"   # ~ is run_as's home; "" watches nothing
+# rec_processes = ["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]   # [] none
+# rec_poll_ms = 2000
+# rec_done_ms = 4000               # the final time after a recording
+# shot_ms = 2000
+
 # mpv's state (it reads it from mpv's IPC socket; it never starts or controls mpv):
 # sound bars while playing, a still pause/play glyph otherwise (0 fps). Tapped, it
 # unfolds into its children and a seek bar: drag it, mpv jumps when you let go.

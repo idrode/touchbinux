@@ -10,6 +10,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 drm = "0.14"
 evdev = "0.13.2"
 fontdue = "0.9"
+libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["gif", "png"] }
 nix = { version = "0.31", features = ["event", "time", "signal", "resource", "socket", "fs", "user", "inotify", "poll", "process"] }
 resvg = { version = "0.48", default-features = false }

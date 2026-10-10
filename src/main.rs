@@ -24,6 +24,7 @@ mod scenes;
 mod state;
 mod stats;
 mod status;
+mod statussrc;
 mod touch;
 mod user;
 mod widgets;

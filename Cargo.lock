@@ -895,6 +895,7 @@ dependencies = [
  "evdev",
  "fontdue",
  "image",
+ "libc",
  "nix 0.31.3",
  "resvg",
  "serde",

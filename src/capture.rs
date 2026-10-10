@@ -455,7 +455,7 @@ fn alive(p: Proc, owner: Option<u32>) -> bool {
 }
 
 /// A process's state letter and start time (ticks since boot) from /proc stat.
-fn stat(pid: i32) -> Option<(char, u64)> {
+pub fn stat(pid: i32) -> Option<(char, u64)> {
     let s = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parse_stat(&s)
 }
@@ -470,7 +470,7 @@ fn parse_stat(s: &str) -> Option<(char, u64)> {
 }
 
 /// How long ago a process started, from its start time in ticks since boot.
-fn proc_age(start: u64) -> Option<f64> {
+pub fn proc_age(start: u64) -> Option<f64> {
     let uptime = fs::read_to_string("/proc/uptime").ok()?;
     let up: f64 = uptime.split_whitespace().next()?.parse().ok()?;
     Some((up - start as f64 / USER_HZ).max(0.0))

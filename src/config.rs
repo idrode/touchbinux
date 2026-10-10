@@ -65,6 +65,11 @@ pub const DEFAULT_WS_WIDTH: f32 = 400.0;
 pub const DEFAULT_MAX_ICONS: usize = 6;
 pub const DEFAULT_BAR_LONG: f32 = 28.0;
 pub const DEFAULT_BAR_SHORT: f32 = 16.0;
+/// workspaces, style = "dots": a dot's diameter and the active pill's length, px.
+pub const DEFAULT_DOT_SIZE: f32 = 26.0;
+pub const DEFAULT_ACTIVE_WIDTH: f32 = 64.0;
+const DOT_SIZE: std::ops::RangeInclusive<f32> = 12.0..=48.0;
+const MAX_ACTIVE_WIDTH: f32 = 200.0;
 const MAX_ICONS: std::ops::RangeInclusive<usize> = 1..=20;
 const WS_ICON_SIZE: std::ops::RangeInclusive<f32> = 8.0..=64.0;
 /// workspaces: a capsule's axes, and the gaps and padding, px.
@@ -161,6 +166,27 @@ pub enum WsStrip {
     Pressed,
     All,
     None,
+}
+
+/// workspaces: how the capsules look.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WsStyle {
+    /// Inactive: a dot; active: a pill.
+    #[default]
+    Dots,
+    /// Inactive: a horizontal bar; active: the same turned upright (`bar_long`,
+    /// `bar_short`).
+    Capsule,
+}
+
+/// workspaces, style = "dots": which way the active pill lies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WsOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
 }
 
 /// workspaces: which capsules it shows.
@@ -341,7 +367,18 @@ pub struct ItemConfig {
     /// workspaces: inactive capsules' colour.
     #[serde(default)]
     pub inactive_color: Option<Color>,
-    /// workspaces: a capsule's long and short axes, px.
+    /// workspaces: "dots" (default) or "capsule".
+    #[serde(default)]
+    pub style: Option<WsStyle>,
+    /// workspaces, style = "dots": a dot's diameter (the pill's thickness), the
+    /// active pill's length and which way it lies, px.
+    #[serde(default)]
+    pub dot_size: Option<f32>,
+    #[serde(default)]
+    pub active_width: Option<f32>,
+    #[serde(default)]
+    pub active_orientation: Option<WsOrientation>,
+    /// workspaces, style = "capsule": a capsule's long and short axes, px.
     #[serde(default)]
     pub bar_long: Option<f32>,
     #[serde(default)]
@@ -743,6 +780,10 @@ impl ItemConfig {
                 "max_icons",
                 "active_color",
                 "inactive_color",
+                "style",
+                "dot_size",
+                "active_width",
+                "active_orientation",
                 "bar_long",
                 "bar_short",
                 "gap",
@@ -794,6 +835,10 @@ impl ItemConfig {
             ("icon_size", self.icon_size.is_some()),
             ("class_icons", self.class_icons.is_some()),
             ("inactive_color", self.inactive_color.is_some()),
+            ("style", self.style.is_some()),
+            ("dot_size", self.dot_size.is_some()),
+            ("active_width", self.active_width.is_some()),
+            ("active_orientation", self.active_orientation.is_some()),
             ("bar_long", self.bar_long.is_some()),
             ("bar_short", self.bar_short.is_some()),
             ("gap", self.gap.is_some()),
@@ -1002,14 +1047,48 @@ impl ItemConfig {
         if self.stretch.is_some() {
             bail!("{what}: use `width` (the most it takes), not `stretch`");
         }
-        for (field, v) in [("bar_long", self.bar_long), ("bar_short", self.bar_short)] {
-            if v.is_some_and(|v| !WS_BAR.contains(&v)) {
-                bail!("{what}: {field} must be in {WS_BAR:?} px");
+        let style = self.style.unwrap_or_default();
+        // Each style's sizes are an error with the other.
+        let sizes = [
+            ("bar_long", self.bar_long.is_some(), WsStyle::Capsule),
+            ("bar_short", self.bar_short.is_some(), WsStyle::Capsule),
+            ("dot_size", self.dot_size.is_some(), WsStyle::Dots),
+            ("active_width", self.active_width.is_some(), WsStyle::Dots),
+            ("active_orientation", self.active_orientation.is_some(), WsStyle::Dots),
+        ];
+        for (field, set, only) in sizes {
+            if set && only != style {
+                let only = if only == WsStyle::Dots { "dots" } else { "capsule" };
+                bail!("{what}: `{field}` only applies with style = \"{only}\" (the default is \"dots\")");
             }
         }
-        let (long, short) = self.ws_bar();
-        if short >= long {
-            bail!("{what}: bar_short ({short}) must be less than bar_long ({long})");
+        match style {
+            WsStyle::Capsule => {
+                for (field, v) in [("bar_long", self.bar_long), ("bar_short", self.bar_short)] {
+                    if v.is_some_and(|v| !WS_BAR.contains(&v)) {
+                        bail!("{what}: {field} must be in {WS_BAR:?} px");
+                    }
+                }
+                let (long, short) = self.ws_bar();
+                if short >= long {
+                    bail!("{what}: bar_short ({short}) must be less than bar_long ({long})");
+                }
+            }
+            WsStyle::Dots => {
+                if self.dot_size.is_some_and(|d| !DOT_SIZE.contains(&d)) {
+                    bail!("{what}: dot_size must be in {DOT_SIZE:?} px");
+                }
+                let d = self.dot_size.unwrap_or(DEFAULT_DOT_SIZE);
+                let aw = self.active_width.unwrap_or(DEFAULT_ACTIVE_WIDTH);
+                if !(d..=MAX_ACTIVE_WIDTH).contains(&aw) {
+                    bail!("{what}: active_width must be in {d:?}..={MAX_ACTIVE_WIDTH:?} px (dot_size to {MAX_ACTIVE_WIDTH})");
+                }
+                // The row is never higher than the bar; the scene checks its own.
+                let high = *WS_BAR.end();
+                if self.active_orientation == Some(WsOrientation::Vertical) && aw > high {
+                    bail!("{what}: active_width ({aw}) doesn't fit in the row with active_orientation = \"vertical\" (at most {high} px)");
+                }
+            }
         }
         for (field, v) in [("gap", self.gap), ("icon_gap", self.icon_gap), ("strip_pad", self.strip_pad)] {
             if v.is_some_and(|v| !WS_SPACING.contains(&v)) {
@@ -1052,9 +1131,12 @@ impl ItemConfig {
             }
         }
         if let Some(w) = self.bar_border_width.filter(|w| *w > 0.0) {
-            let (_, short) = self.ws_bar();
-            if 2.0 * w >= short {
-                bail!("{what}: bar_border_width ({w}) leaves nothing inside bar_short ({short})");
+            let (field, thin) = match style {
+                WsStyle::Capsule => ("bar_short", self.ws_bar().1),
+                WsStyle::Dots => ("dot_size", self.dot_size.unwrap_or(DEFAULT_DOT_SIZE)),
+            };
+            if 2.0 * w >= thin {
+                bail!("{what}: bar_border_width ({w}) leaves nothing inside {field} ({thin})");
             }
         }
         if self.strip_height.is_some_and(|h| !WS_BAR.contains(&h)) {
@@ -1104,6 +1186,26 @@ impl ItemConfig {
             self.bar_long.unwrap_or(DEFAULT_BAR_LONG),
             self.bar_short.unwrap_or(DEFAULT_BAR_SHORT),
         )
+    }
+
+    /// workspaces: a capsule's (width, height), inactive and active, for its
+    /// style.
+    pub fn ws_sizes(&self) -> ((f32, f32), (f32, f32)) {
+        match self.style.unwrap_or_default() {
+            WsStyle::Capsule => {
+                let (long, short) = self.ws_bar();
+                ((long, short), (short, long))
+            }
+            WsStyle::Dots => {
+                let d = self.dot_size.unwrap_or(DEFAULT_DOT_SIZE);
+                let aw = self.active_width.unwrap_or(DEFAULT_ACTIVE_WIDTH);
+                let on = match self.active_orientation.unwrap_or_default() {
+                    WsOrientation::Horizontal => (aw, d),
+                    WsOrientation::Vertical => (d, aw),
+                };
+                ((d, d), on)
+            }
+        }
     }
 
     /// workspaces: `class_icons` with lowercase classes.
@@ -1552,6 +1654,10 @@ impl Config {
                 max_icons: None,
                 icon_size: None,
                 inactive_color: None,
+                style: None,
+                dot_size: None,
+                active_width: None,
+                active_orientation: None,
                 bar_long: None,
                 bar_short: None,
                 gap: None,
@@ -2283,6 +2389,7 @@ mod tests {
             max_icons = 4
             active_color = "#00ffb7"
             inactive_color = "#ffffff"
+            style = "capsule"
             bar_long = 30
             bar_short = 18
             gap = 8
@@ -2335,11 +2442,11 @@ mod tests {
             "background = '#333333'",
             "shape = 'circle'",
             // Capsule sizes: in range, and long longer than short.
-            "bar_long = 1",
-            "bar_long = 61",
-            "bar_short = 0",
-            "bar_long = 16\nbar_short = 16",
-            "bar_long = 10",
+            "style = 'capsule'\nbar_long = 1",
+            "style = 'capsule'\nbar_long = 61",
+            "style = 'capsule'\nbar_short = 0",
+            "style = 'capsule'\nbar_long = 16\nbar_short = 16",
+            "style = 'capsule'\nbar_long = 10",
             "gap = -1",
             "gap = 41",
             "icon_gap = 50",
@@ -2374,7 +2481,7 @@ mod tests {
         let err = format!("{:#}", parse(&ws("max_icons = 0")).unwrap_err());
         assert!(err.contains("max_icons must be in 1..=20"), "{err}");
         assert!(parse(&ws("overview_action = { type = 'socket' }\ndrag_px = 8")).is_ok());
-        let err = format!("{:#}", parse(&ws("bar_long = 16\nbar_short = 16")).unwrap_err());
+        let err = format!("{:#}", parse(&ws("style = 'capsule'\nbar_long = 16\nbar_short = 16")).unwrap_err());
         assert!(err.contains("bar_short (16) must be less than bar_long (16)"), "{err}");
         // A layer of circles doesn't make it one (it has no box).
         let circles = "[[layers]]\nid='m'\nitem_shape='circle'\n[[layers.items]]\ntype='workspaces'";
@@ -2385,6 +2492,50 @@ mod tests {
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow='all'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nstrip='all'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ngap=3").is_err());
+    }
+
+    #[test]
+    fn workspaces_dots_and_capsules() {
+        let ws = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\n{body}");
+        let item = |body: &str| parse(&ws(body)).unwrap().layers[0].items[0].clone();
+        // Dots by default: 26 px dots, a 64 x 26 pill.
+        let d = item("");
+        assert_eq!(d.style, None);
+        assert_eq!(d.ws_sizes(), ((26.0, 26.0), (64.0, 26.0)));
+        let v = item("dot_size = 20\nactive_width = 40\nactive_orientation = 'vertical'");
+        assert_eq!(v.ws_sizes(), ((20.0, 20.0), (20.0, 40.0)));
+        assert_eq!(item("dot_size = 30\nactive_width = 30").ws_sizes().1, (30.0, 30.0));
+        assert_eq!(item("style = 'dots'\nactive_width = 200").ws_sizes().1, (200.0, 26.0));
+        // Capsules as they were.
+        let c = item("style = 'capsule'");
+        assert_eq!(c.ws_sizes(), ((28.0, 16.0), (16.0, 28.0)));
+        let c = item("style = 'capsule'\nbar_long = 30\nbar_short = 18");
+        assert_eq!(c.ws_sizes(), ((30.0, 18.0), (18.0, 30.0)));
+        let bad = [
+            ("style = 'round'", "unknown variant"),
+            ("dot_size = 11", "dot_size must be in 12.0..=48.0"),
+            ("dot_size = 49", "dot_size must be in 12.0..=48.0"),
+            ("active_width = 25", "active_width must be in 26.0..=200.0"),
+            ("dot_size = 40\nactive_width = 39", "active_width must be in 40.0..=200.0"),
+            ("active_width = 201", "active_width must be in 26.0..=200.0"),
+            ("active_orientation = 'diagonal'", "unknown variant"),
+            // Upright, the default 64 px pill doesn't fit in the bar.
+            ("active_orientation = 'vertical'", "active_width (64) doesn't fit in the row"),
+            ("active_orientation = 'vertical'\nactive_width = 61", "active_width (61) doesn't fit"),
+            // Each style's sizes only with it.
+            ("bar_long = 28", "`bar_long` only applies with style = \"capsule\""),
+            ("style = 'dots'\nbar_short = 16", "`bar_short` only applies with style = \"capsule\""),
+            ("style = 'capsule'\ndot_size = 26", "`dot_size` only applies with style = \"dots\""),
+            ("style = 'capsule'\nactive_width = 64", "`active_width` only applies with style = \"dots\""),
+            ("style = 'capsule'\nactive_orientation = 'vertical'", "`active_orientation` only applies"),
+        ];
+        for (body, why) in bad {
+            let err = format!("{:#}", parse(&ws(body)).unwrap_err());
+            assert!(err.contains(why), "{body}: {err}");
+        }
+        assert!(parse(&ws("active_orientation = 'vertical'\nactive_width = 60")).is_ok());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nstyle='dots'").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ndot_size=20").is_err());
     }
 
     #[test]
@@ -2410,7 +2561,8 @@ mod tests {
             ("active_border_color = '#ffffff'", "active_border_color needs bar_border_width > 0"),
             ("strip_border_width = 2", "strip_border_width needs strip_border_color"),
             ("bar_border_width = 2", "bar_border_width needs bar_border_color"),
-            ("bar_border_color = '#ffffff'\nbar_border_width = 6\nbar_short = 12", "leaves nothing inside bar_short"),
+            ("bar_border_color = '#ffffff'\nbar_border_width = 6\nstyle = 'capsule'\nbar_short = 12", "leaves nothing inside bar_short"),
+            ("bar_border_color = '#ffffff'\nbar_border_width = 6\ndot_size = 12", "leaves nothing inside dot_size (12)"),
             ("strip_border_color = '#ffffff'\nstrip_border_width = 4\nstrip_pad = 3", "strip_pad (3) must be at least strip_border_width (4)"),
             ("strip_border_color = '#ffffff'\nstrip_border_width = 4\nicon_size = 30\nstrip_height = 36", "icon_size (30) and twice strip_border_width (4) must fit in strip_height (36)"),
         ];

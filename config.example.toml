@@ -228,8 +228,9 @@ format = "%H:%M"
 # active_color = "#00ffb750"       # behind the chosen GIF's thumbnail
 
 # Hyprland's workspaces as capsules (needs Hyprland: without it, the item isn't
-# drawn and takes no room). Inactive: a horizontal bar; active: the same capsule
-# turned upright, in active_color. Beside a capsule a strip of its windows' icons
+# drawn and takes no room). style = "dots" (default): inactive, a dot; active, a
+# pill dot_size high and active_width long, in active_color. style = "capsule":
+# inactive, a horizontal bar; active, the same turned upright. Beside a capsule a strip of its windows' icons
 # opens (strip = "active": the active one's; "pressed": under the finger; "all";
 # "none"). New workspaces are born out of their neighbour, closed ones merge back.
 # Tap a capsule to go to that workspace, an icon to focus that window (sent on
@@ -239,9 +240,15 @@ format = "%H:%M"
 # width = 520                      # the most it takes; what doesn't fit is "+N"
 # active_color = "#00ffb7"
 # inactive_color = "#ffffff"
-# bar_long = 28                    # capsule axes, px (14:8 like the island)
-# bar_short = 16
-# gap = 6                          # between capsules
+# style = "dots"
+# dot_size = 26                    # a dot's diameter and the pill's height, 12-48 px
+# active_width = 64                # the active pill's length, dot_size-200 px
+# active_orientation = "horizontal" # or "vertical": dot_size wide, active_width
+# #                                  high (then it must fit in the row)
+# # style = "capsule"              # the bars instead (no dot_size, active_width
+# # bar_long = 28                  #   nor active_orientation then): axes, px
+# # bar_short = 16                 #   (14:8 like the island)
+# gap = 8                          # between capsules (default 6 with capsules)
 # strip = "active"
 # strip_background = "#1a1d1c"
 # icon_size = 30

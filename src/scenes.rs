@@ -8,7 +8,7 @@ use crate::{
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
         BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
-        DEFAULT_MAX_ICONS, ItemConfig,
+        DEFAULT_MAX_ICONS, ItemConfig, WsStyle,
         ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
@@ -1825,7 +1825,14 @@ pub fn bar_with(
             ItemKind::Workspaces => {
                 let Some(state) = hypr else { continue };
                 let icon = item.icon_size.unwrap_or(workspaces::DEFAULT_ICON);
-                let (long, short) = item.ws_bar();
+                let (off, on) = item.ws_sizes();
+                let look = item.style.unwrap_or_default();
+                // The tallest shape, by the option that sets it.
+                let (tallest, high) = match look {
+                    WsStyle::Capsule => ("bar_long", on.1),
+                    WsStyle::Dots if on.1 > off.1 => ("active_width", on.1),
+                    WsStyle::Dots => ("dot_size", off.1),
+                };
                 let strip_h = item.strip_height;
                 // Without strip_height (checked in config), the row's: the icons
                 // clear of the strip's border there too.
@@ -1838,7 +1845,7 @@ pub fn bar_with(
                         rect.h
                     );
                 }
-                let sizes = [("icon_size", icon), ("bar_long", long), ("strip_height", strip_h.unwrap_or(0.0))];
+                let sizes = [("icon_size", icon), (tallest, high), ("strip_height", strip_h.unwrap_or(0.0))];
                 for (what, px) in sizes {
                     if px > rect.h {
                         bail!(
@@ -1852,9 +1859,12 @@ pub fn bar_with(
                 let style = workspaces::Style {
                     active: item.active_color.map_or(workspaces::DEFAULT_ACTIVE, |c| c.0),
                     inactive: item.inactive_color.map_or(workspaces::DEFAULT_INACTIVE, |c| c.0),
-                    off: (long, short),
-                    on: (short, long),
-                    gap: item.gap.unwrap_or(workspaces::DEFAULT_GAP),
+                    off,
+                    on,
+                    gap: item.gap.unwrap_or(match look {
+                        WsStyle::Capsule => workspaces::DEFAULT_GAP,
+                        WsStyle::Dots => workspaces::DEFAULT_DOT_GAP,
+                    }),
                     strip_bg: item.strip_background.map_or(workspaces::DEFAULT_STRIP_BG, |c| c.0),
                     icon,
                     icon_gap: item.icon_gap.unwrap_or(workspaces::DEFAULT_ICON_GAP),
@@ -4378,6 +4388,34 @@ mod tests {
 
     fn ws_state() -> HyprState {
         crate::workspaces::tests::state()
+    }
+
+    /// Upright, the active pill must fit in the row (58 px here: margin 1); the
+    /// bar's 60 px is all config can check.
+    #[test]
+    fn an_upright_pill_fits_the_row() {
+        let Some(font) = font() else { return };
+        let layer = |body: &str| {
+            let toml = ws_layer(false).replace("width = 600", &format!("width = 600\n        {body}"));
+            let cfg: Config = toml::from_str(&toml).unwrap();
+            cfg.default_layer().unwrap().into_owned()
+        };
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let tall = layer("active_orientation = \"vertical\"\n        active_width = 59");
+        let err = bar_with(W, H, &font, &tall, &mut icons, Some(&ws_state())).err().unwrap();
+        let err = format!("{err:#}");
+        assert!(err.contains("active_width 59 px is larger than the row, which is 58 px high"), "{err}");
+        let fits = layer("active_orientation = \"vertical\"\n        active_width = 58");
+        let s = bar_with(W, H, &font, &fits, &mut icons, Some(&ws_state())).unwrap();
+        assert_eq!(s.next_change(MS(0)), None);
+        // Lying down it can be as long as it likes; a dot as high as the row.
+        assert!(bar_with(W, H, &font, &layer("active_width = 200"), &mut icons, Some(&ws_state())).is_ok());
+        let big = layer("dot_size = 48\n        icon_size = 30");
+        assert!(bar_with(W, H, &font, &big, &mut icons, Some(&ws_state())).is_ok());
+        // And capsules by bar_long, as before.
+        let capsule = layer("style = \"capsule\"\n        bar_long = 59\n        bar_short = 20");
+        let err = bar_with(W, H, &font, &capsule, &mut icons, Some(&ws_state())).err().unwrap();
+        assert!(format!("{err:#}").contains("bar_long 59 px is larger than the row"), "{err:#}");
     }
 
     #[test]

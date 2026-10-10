@@ -30,7 +30,9 @@ use std::{
 pub const DEFAULT_ACTIVE: Rgba = Rgba(0x00, 0xff, 0xb7, 0xff);
 pub const DEFAULT_INACTIVE: Rgba = Rgba(0xff, 0xff, 0xff, 0xff);
 pub const DEFAULT_STRIP_BG: Rgba = Rgba(0x1a, 0x1d, 0x1c, 0xff);
+/// Between capsules: style = "capsule", and "dots".
 pub const DEFAULT_GAP: f32 = 6.0;
+pub const DEFAULT_DOT_GAP: f32 = 8.0;
 pub const DEFAULT_ICON: f32 = 30.0;
 pub const DEFAULT_ICON_GAP: f32 = 10.0;
 pub const DEFAULT_STRIP_PAD: f32 = 10.0;

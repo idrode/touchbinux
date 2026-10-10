@@ -23,6 +23,7 @@ mod runner;
 mod scenes;
 mod state;
 mod stats;
+mod status;
 mod touch;
 mod user;
 mod widgets;

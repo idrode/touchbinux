@@ -1852,8 +1852,8 @@ pub fn bar_with(
                 let style = workspaces::Style {
                     active: item.active_color.map_or(workspaces::DEFAULT_ACTIVE, |c| c.0),
                     inactive: item.inactive_color.map_or(workspaces::DEFAULT_INACTIVE, |c| c.0),
-                    long,
-                    short,
+                    off: (long, short),
+                    on: (short, long),
                     gap: item.gap.unwrap_or(workspaces::DEFAULT_GAP),
                     strip_bg: item.strip_background.map_or(workspaces::DEFAULT_STRIP_BG, |c| c.0),
                     icon,

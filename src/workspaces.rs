@@ -114,9 +114,9 @@ impl WsView {
 pub struct Style {
     pub active: Rgba,
     pub inactive: Rgba,
-    /// A capsule's long and short axes.
-    pub long: f32,
-    pub short: f32,
+    /// A capsule's (width, height): inactive, and active.
+    pub off: (f32, f32),
+    pub on: (f32, f32),
     pub gap: f32,
     pub strip_bg: Rgba,
     /// Window icons' side, the gap between them and the strip's end padding.
@@ -135,6 +135,13 @@ pub struct Style {
     pub max_icons: usize,
     /// Icon names by lowercase class, asked before the icon theme.
     pub class_icons: BTreeMap<String, String>,
+}
+
+impl Style {
+    /// A capsule's (width, height) at activeness `a` (0..1).
+    fn size(&self, a: f32) -> (f32, f32) {
+        (lerp(self.off.0, self.on.0, a), lerp(self.off.1, self.on.1, a))
+    }
 }
 
 /// A window's icon: from the theme, or a coloured circle with the class's initial.
@@ -375,7 +382,7 @@ impl Workspaces {
             let mut w = 0.0;
             let mut widest: f32 = 0.0;
             for e in view.workspaces.iter().filter(|e| ids.contains(&e.id)) {
-                w += if view.active == Some(e.id) { s.short } else { s.long };
+                w += if view.active == Some(e.id) { s.on.0 } else { s.off.0 };
                 let strip = self.strip_width(e.windows.len(), shown, font);
                 let strip = strip + strip.min(STRIP_GAP);
                 match s.strip {
@@ -620,7 +627,7 @@ impl Workspaces {
             let slot = c.spawn.map_or(1.0, |sp| slot_t(sp.progress(t)));
             x += s.gap * slot * before;
             let a = looks.get(&i).copied().unwrap_or_else(|| c.act.value(t));
-            let (w, h) = (lerp(s.long, s.short, a), lerp(s.short, s.long, a));
+            let (w, h) = s.size(a);
             let strip_w = c.strip.value(t).max(0.0);
             out.push(Placed {
                 i,
@@ -724,11 +731,7 @@ impl Workspaces {
         for (p, sp, k, nb) in births {
             let c = &self.caps[p.i];
             let child_active = sp.dying || self.is_active(c.id);
-            let (chw, chh) = if child_active {
-                (s.short, s.long)
-            } else {
-                (s.long, s.short)
-            };
+            let (chw, chh) = if child_active { s.on } else { s.off };
             let child_colour = if child_active { s.active } else { s.inactive };
             // Its place follows its drawn shape too (`looks`): QML's rest width
             // had a merging bar drawn upright stick out of a horizontal one's place.
@@ -742,6 +745,7 @@ impl Workspaces {
                 continue;
             };
             let mix = self.absorbed(self.caps[nb.i].id, sp, k);
+            let (nbw, nbh) = s.size(mix);
             let birth = Birth {
                     progress: k,
                     // Its place follows the drawn shape (see `looks`); QML used
@@ -750,8 +754,8 @@ impl Workspaces {
                     from_x: nb.cx(),
                     to_x,
                     cy,
-                    neighbor_hw: lerp(s.long, s.short, mix) / 2.0,
-                    neighbor_hh: lerp(s.short, s.long, mix) / 2.0,
+                    neighbor_hw: nbw / 2.0,
+                    neighbor_hh: nbh / 2.0,
                     child_hw: chw / 2.0,
                     child_hh: chh / 2.0,
                     neighbor_color: s.inactive.lerp(s.active, mix),
@@ -1000,8 +1004,8 @@ pub mod tests {
         Style {
             active: DEFAULT_ACTIVE,
             inactive: DEFAULT_INACTIVE,
-            long: 28.0,
-            short: 16.0,
+            off: (28.0, 16.0),
+            on: (16.0, 28.0),
             gap: DEFAULT_GAP,
             strip_bg: DEFAULT_STRIP_BG,
             icon: DEFAULT_ICON,
@@ -1519,6 +1523,54 @@ pub mod tests {
         r.set(&zero, 1000);
         let c = r.w.caps.iter().find(|c| c.id == 0).unwrap();
         assert_eq!(c.spawn.unwrap().neighbor, Some(1));
+    }
+
+    /// FNV-1a over every frame of a run of the capsules: rest, a switch, a press,
+    /// a birth and a merge (no strips: no text, the same on any machine).
+    fn capsule_run_hash(st: Style) -> u64 {
+        let s = state();
+        let mut r = Rig::with(st, &s);
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        let mut eat = |c: &Canvas| {
+            for b in c.data() {
+                h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        eat(&r.frame(0));
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        for t in [1000, 1020, 1040, 1075, 1150] {
+            eat(&r.frame(t));
+        }
+        r.w.set_touch(Some((4, true)), MS(1200));
+        for t in [1260, 1350] {
+            eat(&r.frame(t));
+        }
+        r.w.set_touch(None, MS(1400));
+        eat(&r.frame(1600));
+        let mut born = to4.clone();
+        born.workspaces.insert(3, "3".into());
+        born.active_workspace = Some(3);
+        r.set(&born, 2000);
+        for t in (2000..=2380).step_by(38) {
+            eat(&r.frame(t));
+        }
+        r.set(&to4, 3000);
+        for t in (3000..=3360).step_by(36) {
+            eat(&r.frame(t));
+        }
+        h
+    }
+
+    /// The capsules draw exactly what they drew before the dots existed: these
+    /// hashes were taken from that code (e088e73), plain and bordered.
+    #[test]
+    fn capsules_draw_as_before_dots() {
+        assert_eq!(capsule_run_hash(style(WsStrip::None)), 0xdb37_e98a_8603_04a0);
+        let mut st = style(WsStrip::None);
+        st.bar_border = Some((RED, BLUE, 2.0));
+        assert_eq!(capsule_run_hash(st), 0xdf1f_fcf5_3d44_0aa7);
     }
 
     #[test]

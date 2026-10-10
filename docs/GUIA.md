@@ -1177,10 +1177,20 @@ Por el socket, cada modo elegido se avisa con su `id`
 
 #### `workspaces`
 
-Los workspaces de Hyprland como **cápsulas**, con el aspecto y el comportamiento de
-la isla de Quickshell (`Workspaces.qml` y `WorkspaceBirthCanvas.qml`). Sin números:
-un workspace inactivo es una **barra horizontal** blanca; el activo, **la misma
-cápsula girada 90°** (vertical) en menta. Al lado de una cápsula puede abrirse una
+Los workspaces de Hyprland como **cápsulas**, con el comportamiento de la isla de
+Quickshell (`Workspaces.qml` y `WorkspaceBirthCanvas.qml`). Sin números, en dos
+estilos (`style`):
+
+- **`"dots"`** (por defecto): un workspace inactivo es un **círculo** blanco de
+  `dot_size` px; el activo, una **píldora** menta de `active_width` × `dot_size`
+  (radio completo), tumbada o, con `active_orientation = "vertical"`, de pie
+  (`dot_size` × `active_width`).
+- **`"capsule"`**: el aspecto anterior, el de la isla. Un inactivo es una **barra
+  horizontal** blanca; el activo, **la misma cápsula girada 90°** (vertical) en
+  menta (`bar_long`, `bar_short`). Se dibuja exactamente igual que antes de
+  existir los círculos.
+
+Al lado de una cápsula puede abrirse una
 **tira con los iconos** de sus ventanas, que empuja al resto. **Necesita Hyprland**:
 mientras el daemon no está conectado a él, el elemento no se dibuja ni ocupa sitio
 (los demás se reparten la fila como si no estuviera), sin error; al conectar
@@ -1192,8 +1202,12 @@ aparece.
 | `width` | `400` | (0, 4000] px | lo **máximo** que ocupa: su hueco en la capa. Las cápsulas van a la izquierda; lo que no cabe se recorta con "+N". No admite `stretch` |
 | `active_color` | `"#00ffb7"` | | la cápsula activa |
 | `inactive_color` | `"#ffffff"` | | las demás, y los "+N" |
-| `bar_long`, `bar_short` | `28`, `16` | 2-60 px | ejes de la cápsula (14:8 como en la isla). `bar_short` menor que `bar_long`; `bar_long` no más que la fila |
-| `gap` | `6` | 0-40 px | entre cápsulas |
+| `style` | `"dots"` | `"dots"`, `"capsule"` | círculos y píldora, o las barras de la isla |
+| `dot_size` | `26` | 12-48 px | solo `dots`: diámetro del círculo y alto (grueso) de la píldora. No más que la fila |
+| `active_width` | `64` | `dot_size`-200 px | solo `dots`: largo de la píldora activa |
+| `active_orientation` | `"horizontal"` | `"horizontal"`, `"vertical"` | solo `dots`: en vertical la píldora mide `dot_size` de ancho y `active_width` de alto, que debe caber en la fila (si no, error; con el `active_width` por defecto, 64, no cabe: hay que bajarlo) |
+| `bar_long`, `bar_short` | `28`, `16` | 2-60 px | solo `capsule`: ejes de la cápsula (14:8 como en la isla). `bar_short` menor que `bar_long`; `bar_long` no más que la fila |
+| `gap` | `8` (`dots`), `6` (`capsule`) | 0-40 px | entre cápsulas |
 | `strip` | `"active"` | `"active"`, `"pressed"`, `"all"`, `"none"` | qué tiras se abren: la del activo siempre; la de la cápsula bajo el dedo, mientras se pulsa; todas; ninguna |
 | `strip_background` | `"#1a1d1c"` | | fondo de la tira (radio completo) |
 | `icon_size` | `30` | 8-64 px | lado de los iconos de ventana (no más que la fila) |
@@ -1201,7 +1215,7 @@ aparece.
 | `strip_pad` | `10` | 0-40 px | relleno en los extremos de la tira |
 | `strip_height` | alto de la fila | 2-60 px | alto de la tira, centrada en la fila (p. ej. `40` con iconos de 30: 5 px de margen arriba y abajo). No menos que `icon_size` ni más que la fila. Sus iconos se pueden tocar en toda la altura de la fila |
 | `strip_border_color`, `strip_border_width` | sin borde, `0` | 0-6 px | borde de la tira, **por dentro** de su contorno (el tamaño exterior no cambia; respeta `strip_height`). Se abre y se cierra con ella, y los iconos nunca lo tapan. `strip_pad` debe ser al menos el grosor, e `icon_size` + 2 × grosor caber en la tira |
-| `bar_border_color`, `bar_border_width` | sin borde, `0` | 0-6 px | borde de las cápsulas, por dentro (el contorno es el mismo). Sigue el giro y el nacimiento y cierre. Con grosor no menos de la mitad de `bar_short` no queda interior: error |
+| `bar_border_color`, `bar_border_width` | sin borde, `0` | 0-6 px | borde de las cápsulas, por dentro (el contorno es el mismo: anillo en los círculos, píldora en la activa). Sigue el cambio de forma y el nacimiento y cierre. Con grosor no menos de la mitad de `dot_size` (o de `bar_short`) no queda interior: error |
 | `active_border_color` | `bar_border_color` | | borde de la activa; el color se mezcla durante el giro |
 | `icon_tint` | sin tinte | | pinta los iconos de la tira de un solo color (`"#rrggbb"`); las iniciales, el círculo de ese color |
 | `max_icons` | `6` | 1-20 | iconos como mucho en una tira; las demás ventanas, "+N" |
@@ -1214,6 +1228,15 @@ Un `*_border_color` sin `*_border_width` mayor que 0 (o al revés), un color mal
 escrito o un grosor fuera de 0-6 son errores de configuración con su motivo. Con
 un fondo de tira translúcido, el borde se ve a través de él (el fondo se pinta
 encima del borde).
+
+Las medidas de un estilo con el otro son un error: `bar_long`/`bar_short` sin
+`style = "capsule"`, o `dot_size`/`active_width`/`active_orientation` con él. **Una
+configuración de antes con `bar_long` o `bar_short`** deja de cargar hasta que se
+añada `style = "capsule"` (para conservar las barras) o se quiten (para los
+círculos); el error lo dice.
+
+La tira de iconos empieza 4 px después del borde de la píldora activa (o de la
+cápsula) y, como `strip_height`, va centrada en vertical en la fila.
 
 Las opciones de las antiguas píldoras con número (`text_color`, `anim_ms`, `shape`,
 `radius`, `background`) ya no existen y son un error de configuración.
@@ -1228,7 +1251,8 @@ muestran.
 **Animaciones** (solo mientras ocurren, a 30 fps como mucho; en reposo, 0 fps):
 
 - **Cambio de activo**: anchura, altura y color de las dos cápsulas, 150 ms con
-  *ease out* cúbico; las demás se recolocan a la vez.
+  *ease out* cúbico (con `dots`: el círculo se estira a píldora y la píldora se
+  encoge a círculo); las demás se recolocan a la vez.
 - **Pulsación** (el *hover* de la isla): mientras el dedo está sobre una cápsula,
   escala 1,15 (150 ms, *ease out* cúbico).
 - **Tira**: se abre o se cierra animando su anchura 190 ms (*ease out* cúbico), con
@@ -1244,6 +1268,13 @@ muestran.
   después. Diferencia con la isla: durante la transición el hueco de las dos sigue
   la forma que se dibuja (en la isla, una cápsula dibujada en horizontal en el hueco
   de una vertical se salía de él y tocaba a la de al lado).
+- Con **`dots`**, la vecina y la nueva se dibujan como círculo o píldora según su
+  estado, y tres cosas cambian respecto a la isla (con `capsule` todo sigue como
+  en ella): la gota sale del **extremo** de la píldora vecina, no de su centro (si
+  no, nacería dentro de ella); va hacia el centro de su hueco **según se abre**,
+  no hacia su sitio final (una píldora de 64 px se metería en la de al lado); y una
+  vecina que deja de ser la activa se encoge a círculo en sus 150 ms, en vez de
+  cambiar de golpe.
 - **Al arrancar o al reconectar** con Hyprland, la primera lista de workspaces no se
   anima: solo nace o se cierra lo que aparece o desaparece después.
 
@@ -1286,6 +1317,9 @@ cualquier otra dirección, el toque se cancela. Sin `overview_action` no hay ges
 [[layers.items]]
 type = "workspaces"
 width = 520
+style = "dots"          # o "capsule" (con bar_long/bar_short)
+dot_size = 26
+active_width = 64
 active_color = "#00ffb7"
 inactive_color = "#ffffff"
 strip = "active"
@@ -1749,7 +1783,7 @@ una suspensión real.
 | `mpv.rs` | cliente del socket IPC de mpv: estado por `observe_property`, seek |
 | `player.rs` | `player`: icono (barras simuladas, trait `Levels`), barra de posición |
 | `capture.rs` | `capture`: modos e iconos, seguimiento de `wf-recorder`, indicador de grabación |
-| `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, cápsulas, tiras de iconos; nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
+| `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, círculos y píldora o cápsulas, tiras de iconos; nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
 | `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |

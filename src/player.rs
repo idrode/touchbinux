@@ -432,6 +432,7 @@ mod tests {
             now: chrono::Local::now(),
             player: p,
             recording: None,
+            status: Default::default(),
         }
     }
 

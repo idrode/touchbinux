@@ -36,6 +36,8 @@ pub struct Live {
     pub player: crate::mpv::MpvState,
     /// The session user's screen recording, for capture items.
     pub recording: Option<crate::capture::Recording>,
+    /// Recordings and screenshots, for status items.
+    pub status: crate::status::Status,
 }
 
 pub struct DrawCx<'a> {
@@ -57,6 +59,12 @@ pub trait Widget {
     /// seconds (of real time, so suspend and clock changes are handled).
     fn wall_period(&self) -> Option<u64> {
         None
+    }
+
+    /// Takes in the live state before a frame; returns whether that changed what
+    /// it shows (for widgets that keep a copy, so `next_change` knows it).
+    fn advance(&mut self, _t: Duration, _live: &Live) -> bool {
+        false
     }
 }
 
@@ -1313,6 +1321,7 @@ mod tests {
             now: chrono::Local::now(),
             player: Default::default(),
             recording: None,
+            status: Default::default(),
         };
         // Follows the battery: a change asks for a redraw, the same state doesn't.
         assert!(!b.advance(ms(0), &live(None)), "starts as missing");

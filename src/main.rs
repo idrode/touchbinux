@@ -246,6 +246,7 @@ impl App {
             now: chrono::Local::now(),
             player: self.mpv.as_ref().map(|m| m.state.clone()).unwrap_or_default(),
             recording: self.recorder.recording(),
+            status: Default::default(),
         }
     }
 

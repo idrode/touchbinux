@@ -17,9 +17,16 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use crate::anim::{ease_in_out, ease_out_back};
-use std::time::Duration;
+use crate::{
+    anim::{ease_in_out, ease_out_back},
+    canvas::{Canvas, Font, Rect, Rgba},
+    scenes::PADDING,
+    widgets::{DrawCx, Live, Widget},
+};
+use std::{f32::consts::PI, time::Duration};
 
+pub const DEFAULT_REC_COLOR: Rgba = Rgba(0xff, 0x00, 0x00, 0xff);
+pub const DEFAULT_SHOT_COLOR: Rgba = Rgba(0x00, 0xff, 0xb7, 0xff);
 pub const DEFAULT_REC_DONE: Duration = Duration::from_millis(4000);
 pub const DEFAULT_SHOT: Duration = Duration::from_millis(2000);
 /// The same screenshot told twice (by its script on the socket and by the folder
@@ -303,6 +310,146 @@ pub fn format_elapsed(d: Duration) -> String {
     } else {
         format!("{:02}:{:02}", s / 60, s % 60)
     }
+}
+
+// --- Drawing ------------------------------------------------------------------------
+
+/// A status item's colours.
+#[derive(Clone, Copy, Debug)]
+pub struct Look {
+    /// The recording dot.
+    pub rec: Rgba,
+    /// The screenshot icon.
+    pub shot: Rgba,
+    /// The time.
+    pub text: Rgba,
+}
+
+/// A status item on the bar: no box, no button (a tap on it is nothing), only what
+/// `Live::status` says, drawn with its own timings and colours.
+pub struct StatusWidget {
+    timing: Timing,
+    look: Look,
+    /// The status as of the last `advance`, for `next_change`.
+    last: Status,
+}
+
+impl StatusWidget {
+    pub fn new(timing: Timing, look: Look) -> StatusWidget {
+        StatusWidget {
+            timing,
+            look,
+            last: Status::default(),
+        }
+    }
+}
+
+impl Widget for StatusWidget {
+    fn draw(&self, canvas: &mut Canvas, rect: Rect, t: Duration, cx: &DrawCx) {
+        let view = cx.live.status.view(self.timing, t);
+        match view.rec {
+            RecView::None => {}
+            RecView::Running { elapsed, dot } => {
+                draw_rec(canvas, rect, cx.font, &format_elapsed(elapsed), dot, 1.0, self.look);
+            }
+            RecView::Done { duration, alpha } => {
+                draw_rec(canvas, rect, cx.font, &format_elapsed(duration), 1.0, alpha, self.look);
+            }
+        }
+        if let Some(shot) = view.shot {
+            draw_shot(canvas, rect, shot, self.look.shot);
+        }
+    }
+
+    fn next_change(&self, t: Duration) -> Option<Duration> {
+        self.last.next_change(self.timing, t)
+    }
+
+    fn advance(&mut self, _t: Duration, live: &Live) -> bool {
+        let changed = self.last != live.status;
+        self.last = live.status;
+        changed
+    }
+}
+
+/// `c` with its opacity multiplied by `a`.
+fn faded(c: Rgba, a: f32) -> Rgba {
+    Rgba(c.0, c.1, c.2, (c.3 as f32 * a.clamp(0.0, 1.0)).round() as u8)
+}
+
+/// The dot (opacity `dot`) and the time, centred in `r`, all at opacity `alpha`.
+#[allow(clippy::too_many_arguments)]
+fn draw_rec(canvas: &mut Canvas, r: Rect, font: &Font, text: &str, dot: f32, alpha: f32, look: Look) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let room = (r.w - 2.0 * PADDING).max(1.0);
+    let radius = r.h * 0.13;
+    let gap = r.h * 0.16;
+    // As large as the row allows, smaller in a narrow item (h:mm:ss is wider).
+    let mut px = r.h * 0.42;
+    let mut tw = font.measure(text, px);
+    if 2.0 * radius + gap + tw > room {
+        px *= ((room - 2.0 * radius - gap) / tw).clamp(0.3, 1.0);
+        tw = font.measure(text, px);
+    }
+    let (_, cy) = r.center();
+    let x = (r.x + (r.w - (2.0 * radius + gap + tw)) / 2.0).round();
+    canvas.fill_circle(x + radius, cy, radius, faded(look.rec, dot * alpha));
+    let baseline = font.centered_baseline(cy, px);
+    canvas.draw_text(font, text, x + 2.0 * radius + gap, baseline, px, faded(look.text, alpha));
+}
+
+/// The screenshot icon: a camera in thick rounded strokes (like the battery's),
+/// popping in at `shot.scale`. Over a recording, on a dark disc so it reads.
+fn draw_shot(canvas: &mut Canvas, r: Rect, shot: ShotView, color: Rgba) {
+    if shot.alpha <= 0.0 {
+        return;
+    }
+    let (cx, cy) = r.center();
+    let mut s = (r.h * 0.62).min(r.w - 2.0 * PADDING).max(4.0) * shot.scale;
+    if shot.flash {
+        s *= 0.85;
+        // A dark pill as wide as the camera and a little more, over the time.
+        let back = Rgba(0, 0, 0, 0xe8);
+        let (bw, bh) = (s * 1.45, (s * 1.1).min(r.h));
+        let back_c = faded(back, shot.alpha);
+        canvas.fill_rounded_rect(cx - bw / 2.0, cy - bh / 2.0, bw, bh, bh / 2.0, back_c);
+    }
+    let c = faded(color, shot.alpha);
+    let line = (s * 0.11).max(1.6);
+    // Body: a rounded box, with the viewfinder's hump on top.
+    let (w, h) = (s, s * 0.66);
+    let (x, y) = (cx - w / 2.0, cy - h / 2.0 + s * 0.06);
+    let hump = [
+        (cx - s * 0.2, y),
+        (cx - s * 0.12, y - s * 0.12),
+        (cx + s * 0.12, y - s * 0.12),
+        (cx + s * 0.2, y),
+    ];
+    canvas.stroke_polyline(&rounded_box(x, y, w, h, s * 0.12), true, line, c);
+    canvas.stroke_polyline(&hump, false, line, c);
+    // Lens.
+    canvas.stroke_arc(cx, y + h / 2.0, s * 0.19, 0.0, 2.0 * PI, line, c);
+}
+
+/// The outline of a box with round corners, as points.
+fn rounded_box(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let corners = [
+        (x + w - r, y + r, -PI / 2.0),
+        (x + w - r, y + h - r, 0.0),
+        (x + r, y + h - r, PI / 2.0),
+        (x + r, y + r, PI),
+    ];
+    let mut pts = Vec::new();
+    for (ccx, ccy, a0) in corners {
+        for i in 0..=6 {
+            let a = a0 + PI / 2.0 * i as f32 / 6.0;
+            pts.push((ccx + r * a.cos(), ccy + r * a.sin()));
+        }
+    }
+    pts
 }
 
 #[cfg(test)]

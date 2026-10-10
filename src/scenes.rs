@@ -20,6 +20,7 @@ use crate::{
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
+    status,
     touch::Phase,
     workspaces::{self, Hit, Workspaces, WsView},
     widgets::{
@@ -527,6 +528,9 @@ impl Scene {
         // Icons that follow outside state (e.g. builtin:battery).
         for (_, a) in &mut self.animated {
             changed |= a.advance(t, live);
+        }
+        for (_, w) in &mut self.widgets {
+            changed |= w.advance(t, live);
         }
         for e in &mut self.expanders {
             changed |= e.advance(t, live);
@@ -1235,6 +1239,12 @@ impl Scene {
         });
     }
 
+    /// A widget that only shows something: no background, no button (touching it
+    /// does nothing and reports nothing).
+    pub fn add_display_widget(&mut self, rect: Rect, widget: Box<dyn Widget>) {
+        self.widgets.push((rect, widget));
+    }
+
     pub fn add_slider(&mut self, area: Rect, id: &str, label: &str, value: u8) {
         self.sliders.push(Slider {
             id: id.into(),
@@ -1891,8 +1901,15 @@ pub fn bar_with(
                 let drag = item.overview_action.as_ref().map(|_| item.drag_px());
                 scene.workspaces.push((ws, drag));
             }
-            // Only its place so far (nothing draws it yet).
-            ItemKind::Status => {}
+            ItemKind::Status => {
+                let look = status::Look {
+                    rec: item.rec_color.map_or(status::DEFAULT_REC_COLOR, |c| c.0),
+                    shot: item.shot_color.map_or(status::DEFAULT_SHOT_COLOR, |c| c.0),
+                    text: frame.text.unwrap_or(Rgba::WHITE),
+                };
+                let widget = status::StatusWidget::new(item.status_timing(), look);
+                scene.add_display_widget(rect, Box::new(widget));
+            }
             ItemKind::Spacer => {}
         }
     }
@@ -2175,6 +2192,7 @@ mod tests {
             now: chrono::Local::now(),
             player: Default::default(),
             recording: None,
+            status: Default::default(),
         }
     }
 
@@ -4553,6 +4571,158 @@ mod tests {
         event(&mut hypr, "openwindow>>e5,4,foot,~");
         assert!(s.set_workspaces(&hypr.state, MS(800), &font, &mut icons));
         assert!(!s.set_workspaces(&hypr.state, MS(900), &font, &mut icons));
+    }
+
+    const STATUS_LAYER: &str = r##"
+        [[layers]]
+        id = "main"
+        margin = 1
+        [[layers.items]]
+        type = "button"
+        id = "before"
+        label = "B"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "status"
+        [[layers.items]]
+        type = "button"
+        id = "after"
+        label = "A"
+        action = { type = "socket" }
+    "##;
+
+    fn status_scene(font: &Font, toml: &str) -> Scene {
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        bar(W, H, font, &layer, &mut icons).unwrap()
+    }
+
+    /// Draws `s` at `t` with `st`; returns the canvas.
+    fn status_frame(s: &mut Scene, font: &Font, st: crate::status::Status, t: Duration) -> Canvas {
+        let mut l = live();
+        l.status = st;
+        s.advance(t, &l);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, t, font, &l).unwrap();
+        c
+    }
+
+    /// Pixels of `rgb` (within a little) inside `r`.
+    fn count_in(c: &Canvas, r: Rect, rgb: [u8; 3]) -> usize {
+        let mut n = 0;
+        for y in r.y as u32..(r.y + r.h) as u32 {
+            for x in r.x as u32..(r.x + r.w) as u32 {
+                let p = pixel(c, x as f32, y as f32);
+                if (0..3).all(|i| p[i].abs_diff(rgb[i]) <= 8) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    const RED: [u8; 3] = [0xff, 0, 0];
+    const MINT: [u8; 3] = [0, 0xff, 0xb7];
+    const WHITE: [u8; 3] = [0xff, 0xff, 0xff];
+
+    #[test]
+    fn status_shows_recordings_and_screenshots_and_nothing_at_rest() {
+        use crate::status::{Rec, Status};
+        let Some(font) = font() else { return };
+        let mut s = status_scene(&font, STATUS_LAYER);
+        let r = s.widgets[0].0;
+        assert_eq!(r.w, 120.0, "default width");
+        // At rest: empty (black), no frames, and a tap on it is nothing at all.
+        let c = status_frame(&mut s, &font, Status::default(), MS(1000));
+        let lit = count_in(&c, r, [0, 0, 0]);
+        assert_eq!(lit, (r.w * r.h) as usize, "all black");
+        assert_eq!(s.next_change(MS(1000)), None);
+        let (changed, ev) = tap(&mut s, r.center(), MS(1100), &font);
+        assert!(!changed && ev.is_empty(), "{ev:?}");
+        // Recording for 65 s: the red dot and the white time.
+        let rec = Status { rec: Some(Rec { since: -55.0, ended: None }), shot: None };
+        let c = status_frame(&mut s, &font, rec, MS(10_100));
+        assert!(count_in(&c, r, RED) > 40, "dot");
+        assert!(count_in(&c, r, WHITE) > 40, "time");
+        assert_eq!(s.next_change(MS(10_100)), Some(MS(10_450)), "next: the dot's fade");
+        // Dim half of the second: the dot is darker, the time the same.
+        let dim = status_frame(&mut s, &font, rec, MS(10_700));
+        assert_eq!(count_in(&dim, r, RED), 0);
+        assert_eq!(count_in(&dim, r, WHITE), count_in(&c, r, WHITE));
+        // Done: dot still (red even in the second's dim half), then gone.
+        let done = Status { rec: Some(Rec { since: -55.0, ended: Some(10.0) }), shot: None };
+        let c = status_frame(&mut s, &font, done, MS(10_700));
+        assert!(count_in(&c, r, RED) > 40);
+        assert_eq!(s.next_change(MS(10_700)), Some(MS(13_650)), "still until its fade");
+        let c = status_frame(&mut s, &font, done, MS(14_000));
+        assert_eq!(count_in(&c, r, [0, 0, 0]), (r.w * r.h) as usize);
+        assert_eq!(s.next_change(MS(14_000)), None, "back at rest: no frames");
+        // A screenshot: the camera in mint, no red.
+        let shot = Status { rec: None, shot: Some(20.0) };
+        let c = status_frame(&mut s, &font, shot, MS(20_600));
+        assert!(count_in(&c, r, MINT) > 40, "camera");
+        assert_eq!(count_in(&c, r, RED), 0);
+        // Over a recording: both, the camera on top in the middle.
+        let both = Status { rec: Some(Rec { since: 0.0, ended: None }), shot: Some(30.2) };
+        let c = status_frame(&mut s, &font, both, MS(30_500));
+        assert!(count_in(&c, r, MINT) > 20);
+        assert!(count_in(&c, r, WHITE) > 0 || count_in(&c, r, RED) > 0, "the recording under it");
+        // Nothing spills out of its slot onto its neighbours.
+        let after = s.buttons.iter().find(|b| b.id == "after").unwrap().rect;
+        assert!(after.x >= r.x + r.w);
+    }
+
+    #[test]
+    fn status_keeps_its_place_or_none() {
+        let Some(font) = font() else { return };
+        let s = status_scene(&font, STATUS_LAYER);
+        let x = |s: &Scene, id: &str| s.buttons.iter().find(|b| b.id == id).unwrap().rect.x;
+        let before = s.buttons.iter().find(|b| b.id == "before").unwrap().rect;
+        // reserve: its 120 px stay between the buttons, empty.
+        assert_eq!(x(&s, "after"), before.x + before.w + 12.0 + 120.0 + 12.0);
+        // Without it (what idle = "hidden" builds at rest), the next one closes up.
+        let gone = STATUS_LAYER.replace("        [[layers.items]]\n        type = \"status\"\n", "");
+        let s2 = status_scene(&font, &gone);
+        assert_eq!(x(&s2, "after"), before.x + before.w + 12.0);
+    }
+
+    /// Not a check: a status item recording, done, with a screenshot, and both, cut
+    /// to the item and enlarged 4x, as PNGs in $TOUCHBINUX_FRAMES (run with
+    /// --ignored).
+    #[test]
+    #[ignore]
+    fn dump_status() {
+        use crate::status::{Rec, Status};
+        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let font = font().unwrap();
+        let mut s = status_scene(&font, STATUS_LAYER);
+        let r = s.widgets[0].0;
+        let mut shot = |st: Status, t: Duration, name: &str| {
+            let c = status_frame(&mut s, &font, st, t);
+            let (x0, w) = (r.x as u32 - 8, r.w as u32 + 16);
+            let img = image::RgbaImage::from_fn(w * 4, H * 4, |x, y| {
+                let i = (((y / 4) * W + x0 + x / 4) * 4) as usize;
+                let p = &c.data()[i..i + 4];
+                image::Rgba([p[0], p[1], p[2], 0xff])
+            });
+            img.save(format!("{dir}/status-{name}.png")).unwrap();
+        };
+        let rec = Status { rec: Some(Rec { since: -55.0, ended: None }), shot: None };
+        shot(rec, MS(10_100), "a-rec-on");
+        shot(rec, MS(10_520), "b-rec-fading");
+        shot(rec, MS(10_700), "c-rec-dim");
+        let long = Status { rec: Some(Rec { since: -3725.0, ended: None }), shot: None };
+        shot(long, MS(1_100), "d-rec-hours");
+        let done = Status { rec: Some(Rec { since: -55.0, ended: Some(10.0) }), shot: None };
+        shot(done, MS(11_000), "e-rec-done");
+        shot(done, MS(13_800), "f-rec-done-fading");
+        let sh = Status { rec: None, shot: Some(20.0) };
+        for ms in [40, 120, 200, 600, 1800] {
+            shot(sh, MS(20_000 + ms), &format!("g-shot-{ms:04}ms"));
+        }
+        let both = Status { rec: Some(Rec { since: 0.0, ended: None }), shot: Some(30.0) };
+        shot(both, MS(30_200), "h-rec-with-shot");
     }
 
     /// Not a check: workspaces at rest (four, strips closed), the active one with its

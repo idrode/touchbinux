@@ -45,6 +45,10 @@ pub struct Birth {
     /// border's colours, then again with `inset` = `w` in the fill colours: every
     /// half axis and the neck `w` thinner, the same centres.
     pub inset: f32,
+    /// The new one comes out of (and goes back into) the neighbour's inner end,
+    /// not its centre: a wide pill would hold it inside for half the birth. The
+    /// island's way when false (or when the neighbour is round).
+    pub from_end: bool,
 }
 
 fn clamp01(t: f32) -> f32 {
@@ -239,7 +243,11 @@ pub fn draw(canvas: &mut Canvas, b: &Birth) {
         return;
     }
     let (s, brk) = (STRETCH_END, BREAK_AT);
-    let dist = b.to_x - b.from_x;
+    // Where the child comes out: the neighbour's centre, or its inner end's.
+    let side = if b.to_x >= b.from_x { 1.0 } else { -1.0 };
+    let straight = b.neighbor_hw - b.neighbor_hw.min(b.neighbor_hh);
+    let from_x = if b.from_end { b.from_x + side * straight } else { b.from_x };
+    let dist = b.to_x - from_x;
     // The child's drop radius before it takes its shape: its short half axis.
     let r = b.child_hw.min(b.child_hh);
     // Child's position (share of the way), drop size, neighbour's scale and lean,
@@ -271,7 +279,7 @@ pub fn draw(canvas: &mut Canvas, b: &Birth) {
         h = 0.0;
     }
     let xa = b.from_x + dist * 0.12 * lean;
-    let xc = b.from_x + dist * f;
+    let xc = from_x + dist * f;
     // Neighbour: its real shape, a little smaller while it gives up mass.
     let (hwa, hha) = (b.neighbor_hw * sa, b.neighbor_hh * sa);
     // Child: a round drop while liquid; settling, to its final shape.
@@ -285,7 +293,7 @@ pub fn draw(canvas: &mut Canvas, b: &Birth) {
     if p < brk && h > 0.01 && show_a && show_c {
         let a = (xa, hwa, hha, b.neighbor_color);
         let c = (xc, hwc, hhc, b.child_color);
-        if dist >= 0.0 {
+        if side > 0.0 {
             blob(canvas, cy, a, c, h);
         } else {
             blob(canvas, cy, c, a, h);
@@ -299,7 +307,9 @@ pub fn draw(canvas: &mut Canvas, b: &Birth) {
         } else {
             1.0 - ease_out_quad(clamp01(t3 / 0.3))
         };
-        let xm = (xa + xc) / 2.0;
+        // Half way between the lobes: from the neighbour's inner end.
+        let inner = if b.from_end { xa + side * (hwa - hwa.min(hha)) } else { xa };
+        let xm = (inner + xc) / 2.0;
         if show_a {
             lobe(canvas, cy, xa, hwa, hha, b.neighbor_color, lerp(xa, xm, tail));
         }
@@ -329,6 +339,7 @@ mod tests {
             neighbor_color: WHITE,
             child_color: MINT,
             inset: 0.0,
+            from_end: false,
         }
     }
 

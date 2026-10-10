@@ -1865,6 +1865,7 @@ pub fn bar_with(
                         WsStyle::Capsule => workspaces::DEFAULT_GAP,
                         WsStyle::Dots => workspaces::DEFAULT_DOT_GAP,
                     }),
+                    fluid_births: look == WsStyle::Dots,
                     strip_bg: item.strip_background.map_or(workspaces::DEFAULT_STRIP_BG, |c| c.0),
                     icon,
                     icon_gap: item.icon_gap.unwrap_or(workspaces::DEFAULT_ICON_GAP),
@@ -4574,7 +4575,7 @@ mod tests {
             s.advance(t, &live);
             s.draw(&mut canvas, t, &font, &live).unwrap();
             let r = s.workspaces[0].0.rect;
-            let (x0, w) = (r.x as u32 - 4, 330);
+            let (x0, w) = (r.x as u32 - 4, 360);
             let img = image::RgbaImage::from_fn(w * 4, H * 4, |x, y| {
                 let i = (((y / 4) * W + x0 + x / 4) * 4) as usize;
                 let p = &canvas.data()[i..i + 4];

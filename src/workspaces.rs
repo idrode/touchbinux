@@ -1,10 +1,13 @@
 //! `workspaces` items: Hyprland's workspaces as capsules, after the user's
 //! Quickshell island (`Workspaces.qml`, `WorkspaceBirthCanvas.qml`).
 //!
-//! An inactive workspace is a horizontal white bar; the active one, the same capsule
-//! turned 90° (vertical) in mint. Beside a capsule a strip of its windows' icons can
-//! open, pushing the others along. A workspace that appears is born out of its
-//! neighbour (see `wsbirth`); one that goes merges back into it.
+//! With style = "dots" (the default) an inactive workspace is a white dot and the
+//! active one a mint pill, lying down or upright; with "capsule", a horizontal
+//! white bar and the same capsule turned 90° (vertical) in mint. Either way a
+//! capsule has an inactive and an active size and turns between them. Beside a
+//! capsule a strip of its windows' icons can open, pushing the others along. A
+//! workspace that appears is born out of its neighbour (see `wsbirth`); one that
+//! goes merges back into it.
 //!
 //! What it shows is a `WsView`, a projection of the daemon's `HyprState` keeping only
 //! what is drawn: events that don't change it (a window's title...) cost no frame.
@@ -120,6 +123,12 @@ pub struct Style {
     pub off: (f32, f32),
     pub on: (f32, f32),
     pub gap: f32,
+    /// style = "dots": a workspace being born heads for the middle of its slot as
+    /// it opens, not of its place at rest, and the neighbour it comes out of turns
+    /// at its own pace (150 ms), not at once. With a 64 px pill, the island's way
+    /// (kept for the capsules) reaches into the next workspace, and snaps a pill
+    /// to a dot.
+    pub fluid_births: bool,
     pub strip_bg: Rgba,
     /// Window icons' side, the gap between them and the strip's end padding.
     pub icon: f32,
@@ -301,6 +310,8 @@ struct Placed {
     x: f32,
     w: f32,
     h: f32,
+    /// How much of `w` it takes in the row (less than 1 while born or merging).
+    slot: f32,
     strip_x: f32,
     strip_w: f32,
 }
@@ -597,7 +608,7 @@ impl Workspaces {
             out.insert(i, if sp.dying || self.is_active(c.id) { 1.0 } else { 0.0 });
             let nb = sp.neighbor.and_then(|id| self.caps.iter().position(|c| c.id == id));
             if let Some(j) = nb {
-                out.insert(j, self.absorbed(self.caps[j].id, sp, k));
+                out.insert(j, self.absorbed(self.caps[j].id, sp, k, t));
             }
         }
         out
@@ -606,7 +617,11 @@ impl Workspaces {
     /// How "active" a birth's or merge's neighbour looks: merging into it, it takes
     /// the colour and shape the leaving one had as it absorbs it, only if the focus
     /// went to it.
-    fn absorbed(&self, neighbor: i64, sp: Spawn, k: f32) -> f32 {
+    fn absorbed(&self, neighbor: i64, sp: Spawn, k: f32, t: Duration) -> f32 {
+        if self.style.fluid_births && !sp.dying {
+            let c = self.caps.iter().find(|c| c.id == neighbor);
+            return c.map_or(0.0, |c| c.act.value(t));
+        }
         if !self.is_active(neighbor) {
             0.0
         } else if !sp.dying {
@@ -636,6 +651,7 @@ impl Workspaces {
                 x,
                 w,
                 h,
+                slot,
                 strip_x: x + w * slot + STRIP_GAP,
                 strip_w,
             });
@@ -737,16 +753,16 @@ impl Workspaces {
             let child_colour = if child_active { s.active } else { s.inactive };
             // Its place follows its drawn shape too (`looks`): QML's rest width
             // had a merging bar drawn upright stick out of a horizontal one's place.
-            let to_x = p.cx();
+            let to_x = if s.fluid_births { p.x + p.w * p.slot / 2.0 } else { p.cx() };
             let Some(nb) = nb else {
-                // Nobody to come out of: it grows in place.
-                let g = ease_in_out(k);
+                // Nobody to come out of: it grows in place (in its slot).
+                let g = if s.fluid_births { p.slot } else { ease_in_out(k) };
                 let size = (chw * g / 2.0, chh * g / 2.0);
                 let border = self.border(if child_active { 1.0 } else { 0.0 });
                 wsbirth::bordered_capsule(canvas, (to_x, cy), size, child_colour, border);
                 continue;
             };
-            let mix = self.absorbed(self.caps[nb.i].id, sp, k);
+            let mix = self.absorbed(self.caps[nb.i].id, sp, k, t);
             let (nbw, nbh) = s.size(mix);
             let birth = Birth {
                     progress: k,
@@ -763,6 +779,7 @@ impl Workspaces {
                     neighbor_color: s.inactive.lerp(s.active, mix),
                     child_color: child_colour,
                     inset: 0.0,
+                    from_end: s.fluid_births,
             };
             // With a border: the shapes in the border's colours, then their
             // inside in the fill colours (the rest's capsules, at both ends).
@@ -1009,6 +1026,7 @@ pub mod tests {
             off: (28.0, 16.0),
             on: (16.0, 28.0),
             gap: DEFAULT_GAP,
+            fluid_births: false,
             strip_bg: DEFAULT_STRIP_BG,
             icon: DEFAULT_ICON,
             icon_gap: DEFAULT_ICON_GAP,
@@ -1573,6 +1591,306 @@ pub mod tests {
         let mut st = style(WsStrip::None);
         st.bar_border = Some((RED, BLUE, 2.0));
         assert_eq!(capsule_run_hash(st), 0xdf1f_fcf5_3d44_0aa7);
+    }
+
+    /// style = "dots" with its defaults: 26 px dots, a 64 x 26 pill, gap 8.
+    pub fn dots(strip: WsStrip) -> Style {
+        Style {
+            off: (26.0, 26.0),
+            on: (64.0, 26.0),
+            gap: DEFAULT_DOT_GAP,
+            fluid_births: true,
+            ..style(strip)
+        }
+    }
+
+    /// How much of the pixels in `xs` x `ys` a colour covers (antialiased edges
+    /// count in part): `ch` is a channel the colour has at 0xff and the black
+    /// background at 0.
+    fn cover(c: &Canvas, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>, ch: usize) -> f32 {
+        let mut sum = 0.0;
+        for y in ys {
+            for x in xs.clone() {
+                sum += f32::from(px(c, x as f32, y as f32)[ch]) / 255.0;
+            }
+        }
+        sum
+    }
+
+    /// The covered extent of a shape around its slot, along its middle row and
+    /// column, and its centroid: (width, height, centre x, centre y).
+    fn shape(c: &Canvas, p: &Placed, ch: usize) -> (f32, f32, f32, f32) {
+        let x0 = (p.x - 6.0) as u32;
+        let x1 = (p.x + p.w + 6.0).ceil() as u32;
+        let (y0, y1) = (0, 60);
+        // Row 29 and column cx - 0.5 run along y 29.5 and x cx: half a px off
+        // the centre lines, which shortens a 26 px circle's chord by 0.02 px.
+        let w = cover(c, x0..x1, 29..30, ch);
+        let h = cover(c, p.cx() as u32..p.cx() as u32 + 1, y0..y1, ch);
+        let (mut m, mut mx, mut my) = (0.0, 0.0, 0.0);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let k = f32::from(px(c, x as f32, y as f32)[ch]) / 255.0;
+                m += k;
+                mx += k * (x as f32 + 0.5);
+                my += k * (y as f32 + 0.5);
+            }
+        }
+        (w, h, mx / m, my / m)
+    }
+
+    fn near(a: f32, b: f32, tol: f32) -> bool {
+        (a - b).abs() <= tol
+    }
+
+    #[test]
+    fn dots_inactive_are_circles_active_a_pill() {
+        let mut r = Rig::with(dots(WsStrip::None), &state());
+        let c = r.frame(0);
+        // Inactive 1: a white circle 26 across, centred in its slot and the row.
+        let p1 = placed(&r.w, 1, 0);
+        assert_eq!((p1.w, p1.h), (26.0, 26.0));
+        let (w, h, cx, cy) = shape(&c, &p1, 0);
+        assert!(near(w, 26.0, 0.5) && near(h, 26.0, 0.5), "{w} x {h}");
+        assert!(near(cx, p1.cx(), 0.5) && near(cy, 30.0, 0.5), "({cx}, {cy})");
+        // Its area is a circle's, not a square's or a rounded one's.
+        let area = cover(&c, p1.x as u32 - 2..(p1.x + 28.0) as u32, 0..60, 0);
+        assert!(near(area, PI * 13.0 * 13.0, 4.0), "{area}");
+        assert_eq!(px(&c, p1.cx(), 30.0)[..3], WHITE);
+        // Active 2: a mint pill 64 x 26 (blue 0xb7: only it has blue).
+        let p2 = placed(&r.w, 2, 0);
+        assert_eq!((p2.w, p2.h), (64.0, 26.0));
+        let (w, h, cx, cy) = shape(&c, &p2, 2);
+        let (w, h) = (w * 255.0 / 183.0, h * 255.0 / 183.0);
+        assert!(near(w, 64.0, 0.5) && near(h, 26.0, 0.5), "{w} x {h}");
+        assert!(near(cx, p2.cx(), 0.5) && near(cy, 30.0, 0.5), "({cx}, {cy})");
+        // Round ends: a corner of its box is black, the middle of an end mint.
+        assert_eq!(px(&c, p2.x + 1.0, 18.0), [0, 0, 0, 0xff]);
+        assert_eq!(px(&c, p2.x + 0.5, 29.5)[..3], [0, 0xff, 0xb7]);
+        // Gap 8 between the slots.
+        let p4 = placed(&r.w, 4, 0);
+        assert_eq!(p2.x, p1.x + 26.0 + 8.0);
+        assert_eq!(p4.x, p2.x + 64.0 + 8.0);
+        assert_eq!(r.w.next_change(MS(0)), None, "at rest: no frames");
+    }
+
+    #[test]
+    fn dots_switch_stretches_and_shrinks_in_150_ms() {
+        let s = state();
+        let mut r = Rig::with(dots(WsStrip::None), &s);
+        let mut to4 = s.clone();
+        to4.active_workspace = Some(4);
+        r.set(&to4, 1000);
+        // Half way in time, OutCubic is 0.875 of the way: 4 stretches to 59.25,
+        // 2 shrinks to 30.75; both stay 26 high and round.
+        let (p2, p4) = (placed(&r.w, 2, 1075), placed(&r.w, 4, 1075));
+        assert_eq!((p4.w, p4.h), (26.0 + 38.0 * 0.875, 26.0));
+        assert_eq!((p2.w, p2.h), (26.0 + 38.0 * 0.125, 26.0));
+        let c = r.frame(1075);
+        for p in [&p2, &p4] {
+            let (w, h, cx, _) = shape(&c, p, 1);
+            assert!(near(w, p.w, 0.5) && near(h, 26.0, 0.5), "{} x {}: {w} x {h}", p.w, p.h);
+            assert!(near(cx, p.cx(), 0.5), "{cx}");
+        }
+        // Colours on their way: 4 mostly mint, 2 mostly white.
+        let b4 = px(&c, p4.cx(), 30.0)[2];
+        let b2 = px(&c, p2.cx(), 30.0)[2];
+        assert!(b4 > 0xb7 && b4 < 0xd0 && b2 > 0xf0 && b2 < 0xff, "{b4:#x} {b2:#x}");
+        assert_eq!(r.w.next_change(MS(1149)), Some(MS(1149)));
+        assert_eq!(r.w.next_change(MS(1150)), None);
+        let mut rest = Rig::with(dots(WsStrip::None), &to4);
+        assert!(r.frame(1150).data() == rest.frame(0).data());
+    }
+
+    #[test]
+    fn a_pressed_dot_grows_to_1_15() {
+        let mut r = Rig::with(dots(WsStrip::None), &state());
+        r.w.set_touch(Some((1, true)), MS(0));
+        let c = r.frame(150);
+        let (w, h, _, _) = shape(&c, &placed(&r.w, 1, 150), 0);
+        assert!(near(w, 26.0 * 1.15, 0.5) && near(h, 26.0 * 1.15, 0.5), "{w} x {h}");
+        r.w.set_touch(None, MS(200));
+        assert_eq!(r.w.next_change(MS(350)), None);
+    }
+
+    #[test]
+    fn the_strip_starts_4_px_from_the_pill() {
+        let mut st = dots(WsStrip::Active);
+        st.strip_h = Some(40.0);
+        let mut r = Rig::with(st, &state());
+        let p2 = placed(&r.w, 2, 0);
+        assert_eq!(p2.strip_x, p2.x + 64.0 + 4.0);
+        let c = r.frame(0);
+        let bg = [0x1a, 0x1d, 0x1c];
+        let x = p2.strip_x + 45.0;
+        assert_eq!(px(&c, x, 9.0), [0, 0, 0, 0xff]);
+        assert_eq!(px(&c, x, 10.0)[..3], bg, "40 high, centred in the row");
+        assert_eq!(px(&c, x, 49.0)[..3], bg);
+        assert_eq!(px(&c, x, 50.0), [0, 0, 0, 0xff]);
+        // Between the pill and the strip: black.
+        assert_eq!(px(&c, p2.x + 64.0 + 2.0, 30.0), [0, 0, 0, 0xff]);
+        assert_eq!(placed(&r.w, 4, 0).x, p2.strip_x + 90.0 + 8.0);
+    }
+
+    #[test]
+    fn upright_pill_is_dot_size_wide() {
+        let mut st = dots(WsStrip::None);
+        st.on = (26.0, 48.0);
+        let mut r = Rig::with(st, &state());
+        let c = r.frame(0);
+        let p2 = placed(&r.w, 2, 0);
+        assert_eq!((p2.w, p2.h), (26.0, 48.0));
+        let (w, h, cx, cy) = shape(&c, &p2, 2);
+        let (w, h) = (w * 255.0 / 183.0, h * 255.0 / 183.0);
+        assert!(near(w, 26.0, 0.5) && near(h, 48.0, 0.5), "{w} x {h}");
+        assert!(near(cx, p2.cx(), 0.5) && near(cy, 30.0, 0.5), "({cx}, {cy})");
+        assert_eq!(placed(&r.w, 4, 0).x, p2.x + 26.0 + 8.0);
+    }
+
+    #[test]
+    fn dot_borders_follow_the_circle_and_the_pill() {
+        let mut st = dots(WsStrip::None);
+        st.bar_border = Some((RED, BLUE, 2.0));
+        let mut r = Rig::with(st, &state());
+        let c = r.frame(0);
+        let p1 = placed(&r.w, 1, 0);
+        // Top of the circle (y 17): red, red, then white.
+        assert_eq!(px(&c, p1.cx(), 17.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, p1.cx(), 18.0), [0xff, 0, 0, 0xff]);
+        assert_eq!(px(&c, p1.cx(), 19.0)[..3], WHITE);
+        // At 45°, still a ring: in the band 11..13 px from the centre, red.
+        let d = 12.0 / 2f32.sqrt();
+        assert_eq!(px(&c, p1.cx() - d, 30.0 - d)[..2], [0xff, 0]);
+        // The pill's round end: blue.
+        let p2 = placed(&r.w, 2, 0);
+        assert_eq!(px(&c, p2.x + 0.5, 29.5), [0, 0, 0xff, 0xff]);
+        assert_eq!(px(&c, p2.x + 3.0, 29.5)[..3], [0, 0xff, 0xb7]);
+        // Outlines unchanged.
+        let plain = Rig::with(dots(WsStrip::None), &state()).frame(0);
+        assert!(painted(&c) == painted(&plain));
+    }
+
+    /// While a workspace is born out of its neighbour or merges into it, the rest
+    /// stay clear of them: their own colour at their centre, black in the gaps
+    /// between them.
+    fn others_stay_clear(r: &mut Rig, t: u64, involved: &[i64]) {
+        let c = r.frame(t);
+        let (placed, _) = r.w.place(MS(t));
+        let others: Vec<&Placed> = placed
+            .iter()
+            .filter(|p| !involved.contains(&r.w.caps[p.i].id))
+            .collect();
+        for p in &others {
+            let id = r.w.caps[p.i].id;
+            let want = if r.w.is_active(id) { MINT } else { WHITE };
+            assert_eq!(px(&c, p.cx(), 30.0)[..3], want, "{t} ms: {id}");
+            // Its left edge's gap: black, whatever is born beside it.
+            assert_eq!(px(&c, p.x - 2.0, 30.0), [0, 0, 0, 0xff], "{t} ms: left of {id}");
+        }
+    }
+
+    /// 3 is born out of 2 (dot) and becomes the active pill; then it merges back
+    /// and 2 takes the pill back.
+    #[test]
+    fn dots_are_born_and_merge_with_their_shapes() {
+        let s = state();
+        let st = dots(WsStrip::None);
+        let mut r = Rig::with(st.clone(), &s);
+        let before = r.frame(0);
+        let mut born = s.clone();
+        born.workspaces.insert(3, "3".into());
+        born.active_workspace = Some(3);
+        born.windows.retain(|w| w.workspace != 2);
+        born.focused = None;
+        r.set(&born, 1000);
+        let three = r.w.caps.iter().find(|c| c.id == 3).unwrap();
+        assert_eq!(three.spawn.unwrap().neighbor, Some(2));
+        assert!(r.frame(1000).data() == before.data(), "first frame: the rest before");
+        let mut slots = Vec::new();
+        for t in (1000..=1380).step_by(10) {
+            others_stay_clear(&mut r, t, &[2, 3]);
+            slots.push(placed(&r.w, 4, t).x);
+            // 2, the pill, shrinks to a dot in 150 ms as it would without a
+            // birth (no snap), 26 high but for OutBack's 1 % and antialiasing.
+            let c = r.frame(t);
+            let rows = |x: f32| (0..60).filter(|&y| px(&c, x, y as f32) != [0, 0, 0, 0xff]).count();
+            let p2 = placed(&r.w, 2, t);
+            assert_eq!((p2.w, p2.h), r.w.style.size(r.w.caps[1].act.value(MS(t))), "{t} ms");
+            assert!(rows(p2.cx()) <= 28, "{t} ms: {} rows", rows(p2.cx()));
+        }
+        // 4 moves smoothly: back as 2 shrinks, on as 3's slot opens.
+        let step = slots.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        assert!(step < 8.0, "no jumps: {slots:?}");
+        assert_eq!(placed(&r.w, 2, 1150).w, 26.0);
+        let mut rest = Rig::with(st.clone(), &born);
+        assert!(r.frame(1380).data() == rest.frame(0).data(), "last frame: the new rest");
+        assert_eq!(r.w.next_change(MS(1380)), None);
+        // Mid-birth: one shape from 2's dot to 3's drop, white into mint.
+        let c = r.frame(1150);
+        let p2 = placed(&r.w, 2, 1150);
+        assert_eq!(px(&c, p2.cx(), 30.0)[..3], WHITE);
+        assert!(c.data().chunks(4).any(|p| p[..3] == MINT), "the drop");
+        // Merge: 3 (active pill) goes back into 2, which takes its colour and
+        // shape: a pill at the end.
+        r.set(&s, 2000);
+        let before = rest.frame(0);
+        assert!(r.frame(2000).data() == before.data(), "first frame: the rest before");
+        for t in (2000..=2360).step_by(10) {
+            others_stay_clear(&mut r, t, &[2, 3]);
+        }
+        let c = r.frame(2340);
+        let p2 = placed(&r.w, 2, 2340);
+        assert!(p2.w > 50.0, "absorbing the pill: {}", p2.w);
+        assert!(px(&c, p2.cx(), 30.0)[2] > 0x80, "and the mint");
+        let mut rest = Rig::with(st, &s);
+        assert!(r.frame(2360).data() == rest.frame(0).data(), "last frame: the rest");
+        assert!(r.w.caps.iter().all(|c| c.id != 3));
+        assert_eq!(r.w.next_change(MS(2360)), None);
+    }
+
+    #[test]
+    fn capsule_births_keep_clear_of_the_others() {
+        let s = state();
+        let mut r = Rig::new(WsStrip::None, &s);
+        let mut born = s.clone();
+        born.workspaces.insert(3, "3".into());
+        born.active_workspace = Some(3);
+        r.set(&born, 1000);
+        for t in (1000..=1380).step_by(10) {
+            others_stay_clear(&mut r, t, &[2, 3]);
+        }
+    }
+
+    /// An inactive dot born out of the active pill, and merging back: the pill
+    /// stays a pill all along.
+    #[test]
+    fn a_dot_is_born_from_the_pill() {
+        let s = state();
+        let mut st = dots(WsStrip::None);
+        st.bar_border = Some((RED, BLUE, 2.0));
+        let mut r = Rig::with(st.clone(), &s);
+        let before = r.frame(0);
+        let mut more = s.clone();
+        more.workspaces.insert(3, "3".into());
+        r.set(&more, 1000);
+        assert!(r.frame(1000).data() == before.data());
+        for t in (1000..=1380).step_by(20) {
+            others_stay_clear(&mut r, t, &[2, 3]);
+            let c = r.frame(t);
+            // 2's pill's left end: its border (blue), all along.
+            let p2 = placed(&r.w, 2, t);
+            let from = (p2.x - 2.0) as u32;
+            let x = (from..p2.cx() as u32).find(|&x| px(&c, x as f32, 29.0) != [0, 0, 0, 0xff]).unwrap();
+            let end = px(&c, x as f32 + 1.0, 29.0);
+            assert!(end[2] > 0xc0 && end[0] < 0x20 && end[1] < 0x40, "{t} ms: {end:?}");
+        }
+        let mut rest = Rig::with(st.clone(), &more);
+        assert!(r.frame(1380).data() == rest.frame(0).data());
+        r.set(&s, 2000);
+        assert!(r.frame(2000).data() == rest.frame(0).data());
+        let mut rest = Rig::with(st, &s);
+        assert!(r.frame(2360).data() == rest.frame(0).data());
+        assert_eq!(r.w.next_change(MS(2360)), None);
     }
 
     #[test]

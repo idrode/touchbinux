@@ -1695,11 +1695,16 @@ comprobar dueño, nombre y hora de inicio del proceso justo antes de mandarle
 captura corren como cualquier acción `command`.
 
 **El servicio** aplica `ProtectSystem=full`, `ProtectKernelTunables`,
-`ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups` y
-`RestrictSUIDSGID`, y `StateDirectory=touchbinux` para el estado (`/var` sigue
-escribible con `ProtectSystem=full`). Otras protecciones (p. ej. `ProtectHome`, `NoNewPrivileges`) están
-listadas y comentadas en `dist/touchbinux.service` con el motivo: los comandos de los
-botones heredan el sandbox y dejarían de funcionar.
+`ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
+`RestrictSUIDSGID`, `SystemCallArchitectures=native` y `RestrictRealtime`, y
+`StateDirectory=touchbinux` para el estado (`/var` sigue escribible con
+`ProtectSystem=full`). Otras protecciones (p. ej. `ProtectHome`, `NoNewPrivileges`)
+están listadas y comentadas en `dist/touchbinux.service` con el motivo: los comandos
+de los botones heredan el sandbox y dejarían de funcionar. Ojo: por eso mismo, en
+una terminal abierta desde la barra `/usr` y `/etc` son de solo lectura (`sudo
+pacman` falla ahí). El modelo de amenazas, lo que necesita el daemon y las
+alternativas están en [SECURITY.md](SECURITY.md). Para comprobar el servicio en
+marcha: `tools/check-service.sh`.
 
 ## 9. Solución de problemas
 

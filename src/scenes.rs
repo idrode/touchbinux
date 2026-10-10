@@ -1891,6 +1891,8 @@ pub fn bar_with(
                 let drag = item.overview_action.as_ref().map(|_| item.drag_px());
                 scene.workspaces.push((ws, drag));
             }
+            // Only its place so far (nothing draws it yet).
+            ItemKind::Status => {}
             ItemKind::Spacer => {}
         }
     }

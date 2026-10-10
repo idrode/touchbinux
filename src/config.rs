@@ -82,6 +82,12 @@ pub const WS_ALL: i64 = 10;
 /// `drag_px` of a button with `drag_children`.
 pub const DEFAULT_DRAG_PX: f32 = 24.0;
 const DRAG_PX: std::ops::RangeInclusive<f32> = 8.0..=120.0;
+/// status: default `width`, and the ranges of its options.
+pub const DEFAULT_STATUS_WIDTH: f32 = 120.0;
+const REC_POLL_MS: std::ops::RangeInclusive<u64> = 250..=60_000;
+const REC_DONE_MS: std::ops::RangeInclusive<u64> = 0..=60_000;
+const SHOT_MS: std::ops::RangeInclusive<u64> = 0..=30_000;
+const MAX_REC_PROCESSES: usize = 8;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +158,7 @@ pub enum ItemKind {
     Player,
     Capture,
     Workspaces,
+    Status,
     Spacer,
 }
 
@@ -166,6 +173,17 @@ pub enum WsStrip {
     Pressed,
     All,
     None,
+}
+
+/// status: what it does with nothing to show.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusIdle {
+    /// Keeps its place, empty.
+    #[default]
+    Reserve,
+    /// Takes no room: the other items close up.
+    Hidden,
 }
 
 /// workspaces: how the capsules look.
@@ -215,6 +233,7 @@ impl ItemKind {
             ItemKind::Player => "player",
             ItemKind::Capture => "capture",
             ItemKind::Workspaces => "workspaces",
+            ItemKind::Status => "status",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -421,6 +440,28 @@ pub struct ItemConfig {
     /// is no gesture.
     #[serde(default)]
     pub overview_action: Option<Action>,
+    /// status: "reserve" (default) or "hidden" with nothing to show.
+    #[serde(default)]
+    pub idle: Option<StatusIdle>,
+    /// status: the recording dot's colour, and the screenshot icon's.
+    #[serde(default)]
+    pub rec_color: Option<Color>,
+    #[serde(default)]
+    pub shot_color: Option<Color>,
+    /// status: folder whose new files are screenshots (`~` is the session user's
+    /// home; "" watches nothing).
+    #[serde(default)]
+    pub shot_watch: Option<String>,
+    /// status: recorder process names, looked for every `rec_poll_ms` ([]: none).
+    #[serde(default)]
+    pub rec_processes: Option<Vec<String>>,
+    #[serde(default)]
+    pub rec_poll_ms: Option<u64>,
+    /// status: how long a finished recording's time and a screenshot stay.
+    #[serde(default)]
+    pub rec_done_ms: Option<u64>,
+    #[serde(default)]
+    pub shot_ms: Option<u64>,
     /// gif: the file's frames, decoded by `Config::load` (shared by items with the
     /// same `path`). Not part of the TOML.
     #[serde(skip)]
@@ -587,6 +628,7 @@ impl ItemConfig {
                 ItemKind::Volume | ItemKind::Brightness => 130.0,
                 ItemKind::GifPicker | ItemKind::Player | ItemKind::Capture => 80.0,
                 ItemKind::Workspaces => DEFAULT_WS_WIDTH,
+                ItemKind::Status => DEFAULT_STATUS_WIDTH,
             }),
         }
     }
@@ -670,6 +712,8 @@ impl ItemConfig {
             ItemKind::Spacer => &[],
             // Capsules: drawn as they are, no box of their own.
             ItemKind::Workspaces => &[],
+            // Nothing behind it: empty when idle.
+            ItemKind::Status => &[],
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
@@ -804,6 +848,19 @@ impl ItemConfig {
                 "overview_action",
                 "drag_px",
             ],
+            // No action: it only shows state, it never starts anything.
+            ItemKind::Status => &[
+                "id",
+                "idle",
+                "rec_color",
+                "shot_color",
+                "text_color",
+                "shot_watch",
+                "rec_processes",
+                "rec_poll_ms",
+                "rec_done_ms",
+                "shot_ms",
+            ],
             ItemKind::Spacer => &[],
         };
         let present = [
@@ -868,6 +925,14 @@ impl ItemConfig {
             ("screenshot", self.screenshot.is_some()),
             ("record", self.record.is_some()),
             ("record_color", self.record_color.is_some()),
+            ("idle", self.idle.is_some()),
+            ("rec_color", self.rec_color.is_some()),
+            ("shot_color", self.shot_color.is_some()),
+            ("shot_watch", self.shot_watch.is_some()),
+            ("rec_processes", self.rec_processes.is_some()),
+            ("rec_poll_ms", self.rec_poll_ms.is_some()),
+            ("rec_done_ms", self.rec_done_ms.is_some()),
+            ("shot_ms", self.shot_ms.is_some()),
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
@@ -975,6 +1040,9 @@ impl ItemConfig {
         }
         if self.kind == ItemKind::Workspaces {
             self.validate_workspaces(&what)?;
+        }
+        if self.kind == ItemKind::Status {
+            self.validate_status(&what)?;
         }
         if self.kind == ItemKind::Capture {
             if self.screenshot.is_none() && self.record.is_none() {
@@ -1188,6 +1256,62 @@ impl ItemConfig {
         )
     }
 
+    fn validate_status(&self, what: &str) -> Result<()> {
+        if self.stretch.is_some() {
+            bail!("{what}: use a fixed `width`, not `stretch`");
+        }
+        let ms = [
+            ("rec_poll_ms", self.rec_poll_ms, REC_POLL_MS),
+            ("rec_done_ms", self.rec_done_ms, REC_DONE_MS),
+            ("shot_ms", self.shot_ms, SHOT_MS),
+        ];
+        for (field, v, range) in ms {
+            if v.is_some_and(|v| !range.contains(&v)) {
+                bail!("{what}: {field} must be in {range:?}");
+            }
+        }
+        if let Some(path) = &self.shot_watch {
+            crate::statussrc::check_watch_path(path).with_context(|| format!("{what}: shot_watch"))?;
+        }
+        let names = self.rec_processes.as_deref().unwrap_or_default();
+        if names.len() > MAX_REC_PROCESSES {
+            bail!("{what}: rec_processes: at most {MAX_REC_PROCESSES} names");
+        }
+        for n in names {
+            if n.trim().is_empty() || n.len() > 64 || n.contains('/') || n != n.trim() {
+                bail!("{what}: rec_processes: {n:?} is not a process name (1-64 bytes, no / nor spaces around)");
+            }
+        }
+        Ok(())
+    }
+
+    /// status: its timings.
+    pub fn status_timing(&self) -> crate::status::Timing {
+        let d = crate::status::Timing::default();
+        crate::status::Timing {
+            rec_done: self.rec_done_ms.map_or(d.rec_done, Duration::from_millis),
+            shot: self.shot_ms.map_or(d.shot, Duration::from_millis),
+        }
+    }
+
+    /// status: the folder to watch for screenshots, unresolved (`None`: none).
+    pub fn status_shot_watch(&self) -> Option<&str> {
+        let p = self.shot_watch.as_deref().unwrap_or(crate::statussrc::DEFAULT_SHOT_WATCH);
+        (!p.is_empty()).then_some(p)
+    }
+
+    /// status: recorder process names.
+    pub fn status_rec_processes(&self) -> Vec<String> {
+        match &self.rec_processes {
+            Some(v) => v.clone(),
+            None => crate::statussrc::DEFAULT_REC_PROCESSES.map(String::from).to_vec(),
+        }
+    }
+
+    pub fn status_rec_poll(&self) -> Duration {
+        self.rec_poll_ms.map_or(crate::statussrc::DEFAULT_REC_POLL, Duration::from_millis)
+    }
+
     /// workspaces: a capsule's (width, height), inactive and active, for its
     /// style.
     pub fn ws_sizes(&self) -> ((f32, f32), (f32, f32)) {
@@ -1365,7 +1489,7 @@ impl LayerConfig {
     /// Whether `item` is drawn as a circle (and so sized as a square). Spacers have
     /// no box and are never circles.
     pub fn is_circle(&self, item: &ItemConfig) -> bool {
-        !matches!(item.kind, ItemKind::Spacer | ItemKind::Workspaces)
+        !matches!(item.kind, ItemKind::Spacer | ItemKind::Workspaces | ItemKind::Status)
             && self.frame_for(item).shape == Shape::Circle
     }
 
@@ -1688,6 +1812,14 @@ impl Config {
                 screenshot: None,
                 record: None,
                 record_color: None,
+                idle: None,
+                rec_color: None,
+                shot_color: None,
+                shot_watch: None,
+                rec_processes: None,
+                rec_poll_ms: None,
+                rec_done_ms: None,
+                shot_ms: None,
                 shape: None,
                 radius: None,
                 background: None,
@@ -2536,6 +2668,80 @@ mod tests {
         assert!(parse(&ws("active_orientation = 'vertical'\nactive_width = 60")).is_ok());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nstyle='dots'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ndot_size=20").is_err());
+    }
+
+    #[test]
+    fn status_options() {
+        let item = |body: &str| {
+            let c = parse(&format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='status'\n{body}"));
+            c.map(|c| c.layers[0].items[0].clone())
+        };
+        // Nothing but the type: every default.
+        let d = item("").unwrap();
+        assert_eq!(d.id(), Some("status"));
+        assert_eq!(d.size(), Size::Fixed(DEFAULT_STATUS_WIDTH));
+        assert_eq!(d.idle, None);
+        assert_eq!(d.status_timing(), crate::status::Timing::default());
+        assert_eq!(d.status_shot_watch(), Some("~/Pictures/Screenshots"));
+        assert_eq!(d.status_rec_processes(), ["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]);
+        assert_eq!(d.status_rec_poll(), Duration::from_millis(2000));
+        // All of them, as in the guide.
+        let full = item(
+            r##"id = "status"
+            width = 120
+            idle = "hidden"
+            rec_color = "#ff0000"
+            shot_color = "#00ffb7"
+            text_color = "#ffffff"
+            shot_watch = "~/Pictures/Screenshots"
+            rec_processes = ["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]
+            rec_poll_ms = 1000
+            rec_done_ms = 4000
+            shot_ms = 2000"##,
+        )
+        .unwrap();
+        assert_eq!(full.idle, Some(StatusIdle::Hidden));
+        assert_eq!(full.status_rec_poll(), Duration::from_millis(1000));
+        // Turned off: no folder, no processes, nothing shown after a recording.
+        let off = item("shot_watch = ''\nrec_processes = []\nrec_done_ms = 0\nshot_ms = 0").unwrap();
+        assert_eq!(off.status_shot_watch(), None);
+        assert!(off.status_rec_processes().is_empty());
+        assert_eq!(off.status_timing().rec_done, Duration::ZERO);
+        assert_eq!(item("shot_watch = '/srv/shots'").unwrap().status_shot_watch(), Some("/srv/shots"));
+        let bad = [
+            ("idle = 'gone'", "unknown variant"),
+            ("rec_color = 'red'", "rec_color"),
+            ("shot_color = '#00ff'", "shot_color"),
+            ("rec_poll_ms = 249", "rec_poll_ms must be in 250..=60000"),
+            ("rec_poll_ms = 60001", "rec_poll_ms must be in 250..=60000"),
+            ("rec_done_ms = 60001", "rec_done_ms must be in 0..=60000"),
+            ("shot_ms = 30001", "shot_ms must be in 0..=30000"),
+            ("rec_done_ms = -1", "invalid value"),
+            ("shot_watch = 'Pictures'", "must be absolute or start with ~/"),
+            ("shot_watch = '~ana/x'", "must be absolute or start with ~/"),
+            ("rec_processes = ['']", "is not a process name"),
+            ("rec_processes = ['/usr/bin/wf-recorder']", "is not a process name"),
+            ("rec_processes = ['a','b','c','d','e','f','g','h','i']", "at most 8"),
+            ("stretch = 1", "fixed `width`"),
+            ("width = 0", "width must be in"),
+            // It never starts anything, and has no box of its own.
+            ("action = { type = 'socket' }", "`action` is not valid for a status"),
+            ("background = '#333333'", "`background` is not valid for a status"),
+            ("label = 'x'", "`label` is not valid for a status"),
+            ("record_color = '#ff0000'", "`record_color` is not valid for a status"),
+            ("rec_colour = '#ff0000'", "unknown field"),
+        ];
+        for (body, why) in bad {
+            let err = format!("{:#}", item(body).unwrap_err());
+            assert!(err.contains(why), "{body}: {err}");
+        }
+        // And its options are only its own.
+        for opt in ["idle='hidden'", "rec_done_ms=10", "shot_watch='~'", "rec_processes=[]"] {
+            assert!(parse(&format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\n{opt}")).is_err(), "{opt}");
+        }
+        // A layer of circles doesn't make it one.
+        let c = parse("[[layers]]\nid='m'\nitem_shape='circle'\n[[layers.items]]\ntype='status'").unwrap();
+        assert!(!c.layers[0].is_circle(&c.layers[0].items[0]));
     }
 
     #[test]

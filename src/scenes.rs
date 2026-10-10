@@ -1239,6 +1239,12 @@ impl Scene {
         });
     }
 
+    /// Where button (or widget) `id` is.
+    #[cfg(test)]
+    pub fn button_rect(&self, id: &str) -> Option<Rect> {
+        self.buttons.iter().find(|b| b.id == id).map(|b| b.rect)
+    }
+
     /// A widget that only shows something: no background, no button (touching it
     /// does nothing and reports nothing).
     pub fn add_display_widget(&mut self, rect: Rect, widget: Box<dyn Widget>) {

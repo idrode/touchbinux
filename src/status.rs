@@ -15,8 +15,6 @@
 //! - screenshot: an icon that pops in, stays `shot` long and fades out; over a
 //!   recording, a short flash instead.
 
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::{
     anim::{ease_in_out, ease_out_back},
     canvas::{Canvas, Font, Rect, Rgba},

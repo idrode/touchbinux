@@ -36,7 +36,7 @@ use anyhow::{Result, anyhow};
 use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
 use capture::CaptureMode;
-use config::{Action, Config, ItemConfig, ItemKind};
+use config::{Action, Config, ItemConfig, ItemKind, StatusIdle};
 use gifpick::{Loader, Reply, Request};
 use display::DrmBackend;
 use evdev::KeyCode;
@@ -62,8 +62,10 @@ use runner::{Purpose, Runner};
 use scenes::{ButtonSpec, Icon, Scene, Shared, UiEvent};
 use serde_json::{Value, json};
 use stats::Stats;
+use status::Status;
+use statussrc::{RecChange, RecWatch, ShotWatch};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     rc::Rc,
     str::FromStr,
@@ -115,7 +117,8 @@ const DEMO_BUTTONS: &[(&str, &str)] = &[
 const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
-                     [--config <file>] [--gif <file>] [--png <file>]";
+                     [--config <file>] [--gif <file>] [--png <file> [--status <state>]]\n\
+                     --status (previews only): rec | rec_done | shot | rec_shot";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -134,6 +137,8 @@ const TOKEN_GIF_LOADER: u64 = 12;
 const TOKEN_MPV: u64 = 13;
 const TOKEN_MPV_WATCH: u64 = 14;
 const TOKEN_BATTERY_POLL: u64 = 15;
+const TOKEN_STATUS_SHOTS: u64 = 16;
+const TOKEN_STATUS_PID: u64 = 17;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -141,6 +146,8 @@ struct Args {
     gif: Option<PathBuf>,
     png: Option<PathBuf>,
     config: Option<PathBuf>,
+    /// `--png` only: what status items show in the preview.
+    status: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -149,6 +156,7 @@ fn parse_args() -> Result<Args> {
         gif: None,
         png: None,
         config: None,
+        status: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -159,10 +167,33 @@ fn parse_args() -> Result<Args> {
             "--gif" => args.gif = Some(it.next().ok_or(anyhow!(USAGE))?.into()),
             "--png" => args.png = Some(it.next().ok_or(anyhow!(USAGE))?.into()),
             "--config" => args.config = Some(it.next().ok_or(anyhow!(USAGE))?.into()),
+            "--status" => {
+                let st = it.next().ok_or(anyhow!(USAGE))?;
+                if preview_status(&st).is_none() {
+                    return Err(anyhow!("unknown --status {st:?}\n{USAGE}"));
+                }
+                args.status = Some(st);
+            }
             _ => return Err(anyhow!("unknown argument {arg:?}\n{USAGE}")),
         }
     }
+    if args.status.is_some() && args.png.is_none() {
+        return Err(anyhow!("--status only goes with --png\n{USAGE}"));
+    }
     Ok(args)
+}
+
+/// What `--status <state>` previews (drawn at scene time 1 s).
+fn preview_status(state: &str) -> Option<Status> {
+    use status::Rec;
+    let rec = Rec { since: -64.0, ended: None };
+    Some(match state {
+        "rec" => Status { rec: Some(rec), shot: None },
+        "rec_done" => Status { rec: Some(Rec { ended: Some(0.5), ..rec }), shot: None },
+        "shot" => Status { rec: None, shot: Some(0.5) },
+        "rec_shot" => Status { rec: Some(rec), shot: Some(0.7) },
+        _ => return None,
+    })
 }
 
 /// The config file to use: `--config` (must load), else the default path if it
@@ -221,6 +252,17 @@ struct App {
     /// Why each capture child is disabled (missing script or tools), as last
     /// logged; by child id.
     capture_missing: BTreeMap<String, String>,
+    /// What status items show, and where it comes from besides the socket.
+    status: Status,
+    shot_watch: Option<ShotWatch>,
+    /// The folders `shot_watch` watches, and an id that changes with it (epoll).
+    shot_dirs: Vec<PathBuf>,
+    shot_watch_id: u64,
+    rec_watch: Option<RecWatch>,
+    /// The process names and scan period `rec_watch` was made for.
+    rec_key: (Vec<String>, Duration),
+    /// Status items with idle = "hidden" that are on the bar (showing something).
+    status_shown: BTreeSet<String>,
 }
 
 /// A gif_picker's folder as last read, and its GIF.
@@ -246,7 +288,7 @@ impl App {
             now: chrono::Local::now(),
             player: self.mpv.as_ref().map(|m| m.state.clone()).unwrap_or_default(),
             recording: self.recorder.recording(),
-            status: Default::default(),
+            status: self.status,
         }
     }
 
@@ -384,6 +426,96 @@ impl App {
         self.recorder.set_owner(want);
         // Already recording when the daemon (re)starts.
         self.recorder.scan(Instant::now());
+    }
+
+    fn status_items(&self) -> impl Iterator<Item = &ItemConfig> {
+        let items = self.config.layers.iter().flat_map(|l| &l.items);
+        items.filter(|i| i.kind == ItemKind::Status)
+    }
+
+    /// Scene time now, in seconds (the status's clock).
+    fn scene_now(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64()
+    }
+
+    /// Sets up what status items learn from (besides the socket) for the current
+    /// config and session user. A watch whose folders or processes didn't change
+    /// is kept as it is (a reload after resume restarts nothing).
+    fn sync_status(&mut self) {
+        let home = self.runner.user().map(|u| u.home.clone());
+        let mut dirs = Vec::new();
+        for item in self.status_items() {
+            let Some(p) = item.status_shot_watch() else {
+                continue;
+            };
+            match statussrc::expand_home(p, home.as_deref()) {
+                Ok(d) => dirs.push(d),
+                Err(e) => eprintln!("status: shot_watch {e}; no screenshots from it"),
+            }
+        }
+        dirs.sort();
+        dirs.dedup();
+        if dirs != self.shot_dirs {
+            self.shot_watch = match dirs.is_empty() {
+                true => None,
+                false => ShotWatch::new(&dirs)
+                    .inspect_err(|e| eprintln!("status: {e:#}"))
+                    .ok(),
+            };
+            self.shot_dirs = dirs;
+            self.shot_watch_id += 1;
+        }
+        let mut names: Vec<String> = self.status_items().flat_map(|i| i.status_rec_processes()).collect();
+        names.sort();
+        names.dedup();
+        let every = self.status_items().map(|i| i.status_rec_poll()).min().unwrap_or_default();
+        let key = (names, every);
+        if key != self.rec_key {
+            self.rec_watch = (!key.0.is_empty()).then(|| RecWatch::new(&key.0, key.1));
+            self.rec_key = key;
+        }
+        let owner = self.runner.user().map(|u| u.uid);
+        if let Some(w) = &mut self.rec_watch {
+            w.set_owner(owner, Instant::now());
+        }
+    }
+
+    /// The process watch noticed something. Returns whether what the bar shows
+    /// changed.
+    fn on_rec_change(&mut self, change: RecChange) -> bool {
+        let now = self.scene_now();
+        let ev = match change {
+            RecChange::Started { age } => status::Event::RecStart { since: now - age },
+            RecChange::Ended => status::Event::RecStop { at: now },
+        };
+        self.status.apply(ev)
+    }
+
+    /// A `status` message from the socket.
+    fn status_command(&mut self, id: &str, state: Option<&str>) -> Result<bool, String> {
+        let now = self.scene_now();
+        let changed = self.status.command(id, state, now)?;
+        if id == "rec"
+            && let Some(w) = &mut self.rec_watch
+        {
+            w.socket_told();
+        }
+        Ok(changed)
+    }
+
+    /// The status items with idle = "hidden" that show something now.
+    fn hidden_status_shown(&self) -> BTreeSet<String> {
+        let t = self.epoch.elapsed();
+        self.status_items()
+            .filter(|i| i.idle == Some(StatusIdle::Hidden))
+            .filter(|i| !self.status.view(i.status_timing(), t).is_idle())
+            .filter_map(|i| i.id().map(String::from))
+            .collect()
+    }
+
+    /// A hidden status item has to appear or go: the row is laid out again.
+    fn status_layout_changed(&self) -> bool {
+        self.hidden_status_shown() != self.status_shown
     }
 
     /// The config of gif_picker `id`.
@@ -582,6 +714,14 @@ impl App {
     }
 
     fn build_scene(&mut self) -> Result<Scene> {
+        // Hidden status items with nothing to show take no room.
+        self.status_shown = self.hidden_status_shown();
+        let shown = &self.status_shown;
+        let gone = |i: &ItemConfig| {
+            i.kind == ItemKind::Status
+                && i.idle == Some(StatusIdle::Hidden)
+                && !i.id().is_some_and(|id| shown.contains(id))
+        };
         let (w, h) = (self.w, self.h);
         let area = scenes::content_area(w, h);
         let label = self.label();
@@ -594,7 +734,10 @@ impl App {
         match self.args.scene.as_str() {
             "windows" => scenes::windows(w, h, font, &self.hypr.state, &mut self.icons, &shared),
             "bar" => match self.config.default_layer() {
-                Some(layer) => {
+                Some(mut layer) => {
+                    if layer.items.iter().any(gone) {
+                        layer.to_mut().items.retain(|i| !gone(i));
+                    }
                     let hypr = self.hypr.connected().then_some(&self.hypr.state);
                     let mut scene = scenes::bar_with(w, h, font, &layer, &mut self.icons, hypr)?;
                     // `text` items show what clients have already set.
@@ -778,6 +921,7 @@ impl App {
                 self.sync_mpv();
                 self.sync_recorder();
                 self.sync_capture();
+                self.sync_status();
             }
             Err(e) => eprintln!("config: {e:#}\nconfig: keeping the previous configuration"),
         }
@@ -969,6 +1113,13 @@ fn main() -> Result<()> {
                 m.on_readable();
             }
         }
+        if let Some(st) = app.args.status.as_deref().and_then(preview_status) {
+            app.status = st;
+            // Drawn at 1 s: hidden status items showing something take their room.
+            app.epoch -= Duration::from_secs(1);
+            app.scene = app.build_scene()?;
+            app.epoch += Duration::from_secs(1);
+        }
         let mut canvas = Canvas::new(w, h)?;
         // Advanced at 0 and drawn a second later: state changes (the player's icon
         // following mpv) have finished their morph by then.
@@ -1096,9 +1247,21 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         epoch,
         recorder: capture::Recorder::new(epoch),
         capture_missing: BTreeMap::new(),
+        status: Status::default(),
+        shot_watch: None,
+        shot_dirs: Vec::new(),
+        shot_watch_id: 0,
+        rec_watch: None,
+        rec_key: (Vec::new(), Duration::ZERO),
+        status_shown: BTreeSet::new(),
     };
     app.sync_mpv();
     app.sync_recorder();
+    app.sync_status();
+    // A recording already going on when the daemon starts.
+    if let Some(change) = app.rec_watch.as_mut().and_then(|w| w.poll(Instant::now())) {
+        app.on_rec_change(change);
+    }
     app.refresh_battery();
     app.scene = app.build_scene()?;
     app.sync_pickers();
@@ -1297,6 +1460,9 @@ fn run(
     // Which mpv watch and connection are registered with epoll (see `Mpv`).
     let mut mpv_watch: Option<u64> = None;
     let mut mpv_stream: Option<u64> = None;
+    // The same for the status item's folder watch and recorder pidfd.
+    let mut shot_watch: Option<u64> = None;
+    let mut rec_pidfd: Option<u64> = None;
     let debug_touch = app.args.scene == "touch";
     let start = app.epoch;
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
@@ -1310,6 +1476,30 @@ fn run(
         let now = Instant::now();
         app.runner.kill_expired(now);
         dirty |= app.recorder.poll(now);
+        if let Some(change) = app.rec_watch.as_mut().and_then(|w| w.poll(now)) {
+            dirty |= app.on_rec_change(change);
+        }
+        // Status: its folder watch (new after a reload) and the followed
+        // recorder's pidfd (new with each recording) into epoll.
+        if let Some(sw) = &app.shot_watch
+            && shot_watch != Some(app.shot_watch_id)
+        {
+            epoll.add(sw.fd(), EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_STATUS_SHOTS))?;
+            shot_watch = Some(app.shot_watch_id);
+        }
+        if let Some((id, fd)) = app.rec_watch.as_ref().and_then(RecWatch::pidfd)
+            && rec_pidfd != Some(id)
+        {
+            epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_STATUS_PID))?;
+            rec_pidfd = Some(id);
+        }
+        // A hidden status item appears or goes: the others move up or make room.
+        if app.status_layout_changed() {
+            match app.rebuild() {
+                Ok(()) => dirty = true,
+                Err(e) => eprintln!("status: laying out the row again: {e:#}"),
+            }
+        }
         app.vol.poll(now, &mut app.runner);
         if let Some(b) = &mut app.backlight {
             b.poll(now);
@@ -1396,6 +1586,7 @@ fn run(
             app.backlight.as_ref().and_then(|b| b.next_deadline(now)),
             app.mpv.as_ref().and_then(mpv::Mpv::next_deadline),
             app.recorder.next_deadline(),
+            app.rec_watch.as_ref().and_then(RecWatch::next_deadline),
         ]
         .into_iter()
         .flatten()
@@ -1450,6 +1641,17 @@ fn run(
                     }
                 }
                 TOKEN_TIMER => drain_timer(&timer)?,
+                TOKEN_STATUS_SHOTS => {
+                    let at = app.scene_now();
+                    if app.shot_watch.as_mut().is_some_and(ShotWatch::read) {
+                        dirty |= app.status.apply(status::Event::Shot { at });
+                    }
+                }
+                TOKEN_STATUS_PID => {
+                    if let Some(change) = app.rec_watch.as_mut().and_then(|w| w.on_exit(Instant::now())) {
+                        dirty |= app.on_rec_change(change);
+                    }
+                }
                 TOKEN_BATTERY_POLL => {
                     drain_timer(&battery_poll)?;
                     dirty |= app.refresh_battery();
@@ -1625,10 +1827,133 @@ fn run(
                                     &epoll,
                                 ),
                             },
+                            Incoming::Status { id, state } => {
+                                match app.status_command(&id, state.as_deref()) {
+                                    Ok(redraw) => dirty |= redraw,
+                                    Err(e) => ipc.send_to(
+                                        slot,
+                                        &json!({"type": "error", "message": e}),
+                                        &epoll,
+                                    ),
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, io::Write};
+
+    /// A temporary folder for one test.
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("touchbinux-app-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The daemon's App for the bar scene with `status` (TOML) between two
+    /// buttons; no DRM, no session user, no Hyprland.
+    fn app(dir: &Path, status: &str) -> App {
+        let toml = format!(
+            "[[layers]]\nid = 'main'\nmargin = 1\n\
+             [[layers.items]]\ntype = 'button'\nid = 'before'\nlabel = 'B'\naction = {{ type = 'socket' }}\n\
+             [[layers.items]]\ntype = 'status'\n{status}\n\
+             [[layers.items]]\ntype = 'button'\nid = 'after'\nlabel = 'A'\naction = {{ type = 'socket' }}\n"
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: None,
+        };
+        new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap()
+    }
+
+    fn x_of(app: &App, id: &str) -> f32 {
+        app.scene.button_rect(id).unwrap().x
+    }
+
+    #[test]
+    fn a_hidden_status_makes_room_while_it_shows_something() {
+        let dir = tmp("hidden");
+        let shots = dir.join("shots");
+        fs::create_dir(&shots).unwrap();
+        let mut app = app(
+            &dir,
+            &format!("idle = 'hidden'\nrec_done_ms = 0\nshot_ms = 300\nshot_watch = '{}'", shots.display()),
+        );
+        let rest = x_of(&app, "after");
+        let before = app.scene.button_rect("before").unwrap();
+        assert_eq!(rest, before.x + before.w + 12.0, "at rest it takes no room");
+        assert!(!app.status_layout_changed());
+        // Recording (from the socket): 120 px and a gap open up for it.
+        assert_eq!(app.status_command("rec", Some("start")), Ok(true));
+        assert!(app.status_layout_changed());
+        app.rebuild().unwrap();
+        assert!(!app.status_layout_changed());
+        assert_eq!(x_of(&app, "after"), rest + 120.0 + 12.0);
+        // Stopped, with rec_done_ms = 0: gone again at once.
+        assert_eq!(app.status_command("rec", Some("stop")), Ok(true));
+        assert!(app.status_layout_changed());
+        app.rebuild().unwrap();
+        assert_eq!(x_of(&app, "after"), rest);
+        // A screenshot in the folder: there for shot_ms, then gone.
+        fs::File::create(shots.join("1.png")).unwrap().write_all(b"png").unwrap();
+        assert!(app.shot_watch.as_mut().unwrap().read());
+        let at = app.scene_now();
+        assert!(app.status.apply(status::Event::Shot { at }));
+        assert!(app.status_layout_changed());
+        app.rebuild().unwrap();
+        assert_eq!(x_of(&app, "after"), rest + 132.0);
+        std::thread::sleep(Duration::from_millis(350));
+        assert!(app.status_layout_changed());
+        app.rebuild().unwrap();
+        assert_eq!(x_of(&app, "after"), rest);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn status_from_the_socket_and_at_rest_nothing_runs() {
+        let dir = tmp("socket");
+        let mut app = app(&dir, "shot_watch = ''");
+        let reserve = x_of(&app, "after");
+        // Unknown ids and states are refused with a reason; nothing changes.
+        let err = app.status_command("telegram", Some("1")).unwrap_err();
+        assert!(err.contains("unknown status id"), "{err}");
+        assert!(app.status_command("rec", Some("pause")).is_err());
+        assert_eq!(app.status, Status::default());
+        // "reserve": its place is kept whatever it shows.
+        app.status_command("rec", Some("start")).unwrap();
+        assert!(!app.status_layout_changed());
+        assert_eq!(x_of(&app, "after"), reserve);
+        // At rest: no folder watch (shot_watch = ''), no process scans (no session
+        // user to scan for), no frames.
+        let mut idle = self::app(&dir, "shot_watch = ''");
+        assert!(idle.shot_watch.is_none());
+        assert!(idle.rec_watch.as_ref().and_then(RecWatch::next_deadline).is_none());
+        let live = idle.live();
+        idle.scene.advance(Duration::from_secs(1), &live);
+        assert_eq!(idle.scene.next_change(Duration::from_secs(1)), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

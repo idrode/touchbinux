@@ -12,8 +12,6 @@
 //!   its real length. Once the socket has told about a recording, the socket is
 //!   trusted and the scan stops for good (until the config is reloaded).
 
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::capture;
 use anyhow::{Context, Result, bail};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify, WatchDescriptor};

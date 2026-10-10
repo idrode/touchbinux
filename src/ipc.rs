@@ -1,6 +1,7 @@
 //! Our own Unix socket: JSON lines in both directions.
 //!
-//! In  (client -> daemon): `{"type":"set","key":"volume","value":42}`
+//! In  (client -> daemon): `{"type":"set","key":"volume","value":42}`,
+//! `{"type":"status","id":"rec","state":"start"}`
 //! Out (daemon -> every client): `{"type":"tap","id":"..."}`,
 //! `{"type":"slider","id":"vol","value":57}`, and `{"type":"error",...}` replies.
 //!
@@ -37,6 +38,13 @@ const MAX_READ_PER_WAKEUP: usize = 256 * 1024;
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Incoming {
     Set { key: String, value: Value },
+    /// Something status items show: `{"type":"status","id":"rec","state":"start"}`
+    /// (see `Status::command`).
+    Status {
+        id: String,
+        #[serde(default)]
+        state: Option<String>,
+    },
 }
 
 struct Client {

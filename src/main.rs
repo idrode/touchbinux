@@ -3003,12 +3003,12 @@ mod tests {
             keyboard: None,
             loader: None,
             follow_fn: false,
-            touchbar_light: Some(light),
+            // Opened below, with its own state file: never /var/lib's.
+            touchbar_light: None,
         };
-        // Hermetic: its own state file, not /var/lib's.
         let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
-        app.idle.light = None;
         app.state = state::StateFile::at(dir.join("state.toml"), true);
+        app.idle.light_dir = Some(light);
         let t0 = app.epoch;
         app.sync_idle(t0);
         (app, t0)
@@ -3095,11 +3095,11 @@ mod tests {
             keyboard: None,
             loader: None,
             follow_fn: false,
-            touchbar_light: Some(dir.join("light")),
+            touchbar_light: None,
         };
         let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
-        app.idle.light = None;
         app.state = state::StateFile::at(dir.join("state.toml"), true);
+        app.idle.light_dir = Some(dir.join("light"));
         let t0 = app.epoch;
         app.sync_idle(t0);
         (app, t0)

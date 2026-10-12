@@ -1038,7 +1038,7 @@ impl App {
                 Ok(a) => self.hyprctl(&a),
                 Err(e) => eprintln!("action: {e:#}"),
             },
-            Action::Key { key } => match (&mut self.keyboard, KeyCode::from_str(key)) {
+            Action::Key { key, .. } => match (&mut self.keyboard, KeyCode::from_str(key)) {
                 (Some(kb), Ok(code)) => {
                     if let Err(e) = kb.tap(code) {
                         eprintln!("action: {e:#}");

@@ -3,6 +3,7 @@
 use crate::{
     canvas::Rgba,
     capture::CaptureMode,
+    fnlayer::FnMode,
     frame::{Background, Frame, Radius, Shape},
     gif::{Decoded, Play},
     hyprctl::HyprAction,
@@ -88,6 +89,21 @@ const REC_POLL_MS: std::ops::RangeInclusive<u64> = 250..=60_000;
 const REC_DONE_MS: std::ops::RangeInclusive<u64> = 0..=60_000;
 const SHOT_MS: std::ops::RangeInclusive<u64> = 0..=30_000;
 const MAX_REC_PROCESSES: usize = 8;
+pub const DEFAULT_FN_LAYER: &str = "fn";
+pub const DEFAULT_FN_DELAY_MS: u64 = 80;
+pub const DEFAULT_FN_TRANSITION_MS: u64 = 120;
+const FN_MS: std::ops::RangeInclusive<u64> = 0..=1000;
+const MAX_FN_DEVICE_LEN: usize = 128;
+/// What a layer shown only while Fn is held may have: nothing that unfolds or
+/// lists live state (it would be cut off when Fn is released).
+const FN_LAYER_KINDS: &[ItemKind] = &[
+    ItemKind::Button,
+    ItemKind::Text,
+    ItemKind::Clock,
+    ItemKind::Battery,
+    ItemKind::Gif,
+    ItemKind::Spacer,
+];
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +118,92 @@ pub struct Config {
     pub default_layer: Option<String>,
     #[serde(default)]
     pub layers: Vec<LayerConfig>,
+    /// The layer shown while Fn is held; none without this section.
+    #[serde(default, rename = "fn")]
+    pub fn_layer: Option<FnConfig>,
+}
+
+/// `[fn]`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FnConfig {
+    /// Id of the `[[layers]]` shown.
+    #[serde(default = "default_fn_layer")]
+    pub layer: String,
+    #[serde(default)]
+    pub mode: FnMode,
+    /// Hold only: how long Fn must be down before the layer shows (0: at once).
+    #[serde(default)]
+    pub delay_ms: Option<u64>,
+    /// The cross-fade between layers (0: instant).
+    #[serde(default = "default_fn_transition")]
+    pub transition_ms: u64,
+    /// Part of the keyboard's name, to choose it instead of finding it.
+    #[serde(default)]
+    pub fn_device: Option<String>,
+}
+
+fn default_fn_layer() -> String {
+    DEFAULT_FN_LAYER.into()
+}
+
+fn default_fn_transition() -> u64 {
+    DEFAULT_FN_TRANSITION_MS
+}
+
+impl FnConfig {
+    pub fn delay(&self) -> Duration {
+        match self.mode {
+            FnMode::Hold => Duration::from_millis(self.delay_ms.unwrap_or(DEFAULT_FN_DELAY_MS)),
+            FnMode::Toggle => Duration::ZERO,
+        }
+    }
+
+    pub fn transition(&self) -> Duration {
+        Duration::from_millis(self.transition_ms)
+    }
+
+    fn validate(&self, layers: &[LayerConfig]) -> Result<()> {
+        let Some(layer) = layers.iter().find(|l| l.id == self.layer) else {
+            bail!("[fn] layer {:?} is not one of the [[layers]]", self.layer);
+        };
+        if let Some(d) = self.delay_ms {
+            if self.mode == FnMode::Toggle {
+                bail!("[fn] delay_ms only applies to mode = \"hold\"");
+            }
+            if !FN_MS.contains(&d) {
+                bail!("[fn] delay_ms must be {FN_MS:?}");
+            }
+        }
+        if !FN_MS.contains(&self.transition_ms) {
+            bail!("[fn] transition_ms must be {FN_MS:?}");
+        }
+        if let Some(d) = &self.fn_device
+            && (d.is_empty() || d.len() > MAX_FN_DEVICE_LEN)
+        {
+            bail!("[fn] fn_device must be 1-{MAX_FN_DEVICE_LEN} bytes of the keyboard's name");
+        }
+        for item in &layer.items {
+            let what = format!(
+                "layer {:?} ([fn]): {} {:?}",
+                layer.id,
+                item.kind.name(),
+                item.id().unwrap_or("")
+            );
+            if !FN_LAYER_KINDS.contains(&item.kind) {
+                let kinds: Vec<_> = FN_LAYER_KINDS.iter().map(|k| k.name()).collect();
+                bail!(
+                    "{what}: the Fn layer only shows while Fn is held, so it takes {} \
+                     (nothing that unfolds or follows live state)",
+                    kinds.join(", ")
+                );
+            }
+            if item.drags() {
+                bail!("{what}: no drag_children in the Fn layer");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A row of items laid out left to right (see `layout::distribute`).
@@ -1107,6 +1209,9 @@ impl ItemConfig {
         }
         if let Some(action) = &self.action {
             validate_action(&what, action)?;
+            if action.held_key().is_some() && (self.kind != ItemKind::Button || self.drags()) {
+                bail!("{what}: `hold` only works on a button without drag_children");
+            }
         }
         Ok(())
     }
@@ -1236,6 +1341,9 @@ impl ItemConfig {
             }
         }
         match &self.overview_action {
+            Some(a) if a.held_key().is_some() => {
+                bail!("{what}: overview_action can't `hold` a key (a drag has no finger on a key)")
+            }
             Some(a) => validate_action(&format!("{what}: overview_action"), a)?,
             None if self.drag_px.is_some() => {
                 bail!("{what}: `drag_px` only applies with `overview_action`")
@@ -1388,6 +1496,9 @@ impl ItemConfig {
                 }
             }
             match (&child.action, child.role) {
+                (Some(action), _) if action.held_key().is_some() => {
+                    bail!("{what}: `hold` only works on a layer's buttons, not on children")
+                }
                 (Some(action), _) => validate_action(&what, action)?,
                 (None, Some(_)) => {}
                 (None, None) if self.kind == ItemKind::Player => {
@@ -1556,7 +1667,13 @@ pub enum Action {
     /// hyprlang). Exactly one of the fields, see `HyprctlAction`.
     Hyprctl(HyprctlAction),
     /// Press and release a key on the virtual keyboard, e.g. `"KEY_PLAYPAUSE"`.
-    Key { key: String },
+    /// With `hold`, on a layer's button: down when the finger lands, up when it
+    /// lifts or leaves the button (auto-repeat and combinations, like a real key).
+    Key {
+        key: String,
+        #[serde(default)]
+        hold: bool,
+    },
     /// Do nothing locally; the tap is only reported on the socket.
     Socket,
 }
@@ -1619,6 +1736,14 @@ impl HyprctlAction {
 }
 
 impl Action {
+    /// A key held while the finger is on the button (`hold = true`).
+    pub fn held_key(&self) -> Option<&str> {
+        match self {
+            Action::Key { key, hold: true } => Some(key),
+            _ => None,
+        }
+    }
+
     pub fn timeout(&self) -> Option<Duration> {
         match self {
             Action::Command { timeout_ms, .. } => timeout_ms.map(Duration::from_millis),
@@ -1681,6 +1806,15 @@ impl Config {
         {
             bail!("default_layer {d:?} is not one of the [[layers]]");
         }
+        if let Some(f) = &self.fn_layer {
+            f.validate(&self.layers)?;
+            if self.default_layer.as_ref() == Some(&f.layer) {
+                bail!(
+                    "default_layer {:?} is the [fn] layer, which only shows while Fn is held",
+                    f.layer
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1742,9 +1876,11 @@ impl Config {
     /// `[[layers]]`, else one made from the `[[buttons]]` (each an equal share of the
     /// bar, like tiny-dfr). `None` if there is nothing at all.
     pub fn default_layer(&self) -> Option<Cow<'_, LayerConfig>> {
+        let fn_layer = self.fn_layer.as_ref().map(|f| f.layer.as_str());
         if let Some(l) = match &self.default_layer {
             Some(id) => self.layers.iter().find(|l| &l.id == id),
-            None => self.layers.first(),
+            // The first one, but never the Fn layer.
+            None => self.layers.iter().find(|l| Some(l.id.as_str()) != fn_layer),
         } {
             return Some(Cow::Borrowed(l));
         }
@@ -1845,6 +1981,17 @@ impl Config {
         }))
     }
 
+    /// The layer `id`.
+    pub fn layer(&self, id: &str) -> Option<&LayerConfig> {
+        self.layers.iter().find(|l| l.id == id)
+    }
+
+    /// The `[fn]` section and its layer, if configured.
+    pub fn fn_layer(&self) -> Option<(&FnConfig, &LayerConfig)> {
+        let f = self.fn_layer.as_ref()?;
+        Some((f, self.layer(&f.layer)?))
+    }
+
     pub fn button(&self, id: &str) -> Option<&ButtonConfig> {
         self.buttons.iter().find(|b| b.id == id)
     }
@@ -1875,7 +2022,7 @@ fn validate_action(what: &str, action: &Action) -> Result<()> {
                 eprintln!("config: {what}: `args` is deprecated, read as {a:?}");
             }
         }
-        Action::Key { key } => {
+        Action::Key { key, .. } => {
             let code = KeyCode::from_str(key)
                 .map_err(|_| anyhow::anyhow!("{what}: unknown key {key:?}"))?;
             if !crate::keys::supported(code) {
@@ -3277,6 +3424,14 @@ mod tests {
                 panic!("example depends on a command: {argv:?}");
             }
         }
+        // F1-F12 while Fn is held, across the whole bar, each a held key.
+        let (f, layer) = c.fn_layer().unwrap();
+        assert_eq!((f.layer.as_str(), f.mode), ("fn", FnMode::Hold));
+        let keys: Vec<_> = layer.items.iter().filter_map(|i| i.action.as_ref()?.held_key()).collect();
+        let want: Vec<_> = (1..=12).map(|n| format!("KEY_F{n}")).collect();
+        assert_eq!(keys, want);
+        assert!(layer.items.iter().all(|i| i.size() == Size::Stretch(1.0)));
+        assert_eq!(c.default_layer().unwrap().id, "main");
     }
 
     /// The workspaces item commented out in the example is valid once uncommented.
@@ -3390,5 +3545,149 @@ mod tests {
         let err = format!("{:#}", Config::load(&conf).unwrap_err());
         assert!(err.contains("gif \"a\""), "{err}");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A main layer, and a Fn layer with F1 and F2 held, plus `fn_section`.
+    fn with_fn(fn_section: &str) -> Result<Config> {
+        parse(&format!(
+            r#"
+            {fn_section}
+            [[layers]]
+            id = "fn"
+            [[layers.items]]
+            type = "button"
+            id = "f1"
+            label = "F1"
+            action = {{ type = "key", key = "KEY_F1", hold = true }}
+            [[layers.items]]
+            type = "button"
+            id = "f2"
+            label = "F2"
+            action = {{ type = "key", key = "KEY_F2", hold = true }}
+
+            [[layers]]
+            id = "main"
+            [[layers.items]]
+            type = "button"
+            id = "esc"
+            label = "esc"
+            action = {{ type = "key", key = "KEY_ESC" }}
+            "#
+        ))
+    }
+
+    #[test]
+    fn fn_section_defaults_and_values() {
+        let c = with_fn("[fn]").unwrap();
+        let (f, layer) = c.fn_layer().unwrap();
+        assert_eq!(f.layer, "fn");
+        assert_eq!(f.mode, FnMode::Hold);
+        assert_eq!(f.delay(), Duration::from_millis(80));
+        assert_eq!(f.transition(), Duration::from_millis(120));
+        assert_eq!(f.fn_device, None);
+        assert_eq!(layer.items.len(), 2);
+        assert_eq!(c.action("f1").and_then(Action::held_key), Some("KEY_F1"));
+        assert_eq!(c.action("esc").and_then(Action::held_key), None, "taps by default");
+        // The Fn layer comes first in the file but is never the starting one.
+        assert_eq!(c.default_layer().unwrap().id, "main");
+
+        let c = with_fn(
+            "[fn]\nlayer = 'fn'\nmode = 'hold'\ndelay_ms = 0\ntransition_ms = 0\n\
+             fn_device = 'MTP keyboard'",
+        )
+        .unwrap();
+        let f = c.fn_layer.unwrap();
+        assert_eq!((f.delay(), f.transition()), (Duration::ZERO, Duration::ZERO));
+        assert_eq!(f.fn_device.as_deref(), Some("MTP keyboard"));
+        let c = with_fn("[fn]\nmode = 'toggle'").unwrap();
+        assert_eq!(c.fn_layer.unwrap().delay(), Duration::ZERO);
+    }
+
+    #[test]
+    fn without_fn_section_nothing_changes() {
+        let c = with_fn("").unwrap();
+        assert!(c.fn_layer.is_none() && c.fn_layer().is_none());
+        // Without [fn], a layer called "fn" is an ordinary one: here, the first.
+        assert_eq!(c.default_layer().unwrap().id, "fn");
+    }
+
+    #[test]
+    fn rejects_bad_fn_sections() {
+        for (section, want) in [
+            ("[fn]\nlayer = 'nope'", "[fn] layer \"nope\" is not one of the [[layers]]"),
+            ("[fn]\nlayer = 'main'\n", ""), // valid: checked below
+            ("[fn]\nmode = 'press'", "unknown variant `press`"),
+            ("[fn]\ndelay_ms = 1001", "delay_ms must be 0..=1000"),
+            ("[fn]\ndelay_ms = -1", "invalid value"),
+            ("[fn]\nmode = 'toggle'\ndelay_ms = 80", "delay_ms only applies to mode = \"hold\""),
+            ("[fn]\ntransition_ms = 5000", "transition_ms must be 0..=1000"),
+            ("[fn]\nfn_device = ''", "fn_device must be 1-128 bytes"),
+            ("[fn]\ndelay = 80", "unknown field `delay`"),
+            ("[fn]\nlayer = 'fn'\ndefault_layer = 'fn'", "unknown field `default_layer`"),
+            ("default_layer = 'fn'\n[fn]", "default_layer \"fn\" is the [fn] layer"),
+        ] {
+            let res = with_fn(section);
+            if want.is_empty() {
+                assert!(res.is_ok(), "{section}: {res:?}");
+                continue;
+            }
+            let err = format!("{:#}", res.unwrap_err());
+            assert!(err.contains(want), "{section}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_fn_layer_takes_only_simple_items() {
+        let fn_layer = |item: &str| {
+            parse(&format!(
+                "[fn]\n[[layers]]\nid = 'main'\n[[layers]]\nid = 'fn'\n[[layers.items]]\n{item}"
+            ))
+        };
+        for ok in [
+            "type = 'button'\nid = 'f1'\nlabel = 'F1'\naction = { type = 'key', key = 'KEY_F1', hold = true }",
+            "type = 'text'\nid = 'k'\nkey = 'k'",
+            "type = 'clock'\nid = 'c'",
+            "type = 'spacer'",
+        ] {
+            assert!(fn_layer(ok).is_ok(), "{ok}: {:?}", fn_layer(ok).err());
+        }
+        for (bad, want) in [
+            ("type = 'volume'\nid = 'v'", "the Fn layer only shows while Fn is held"),
+            ("type = 'workspaces'\nid = 'w'", "the Fn layer only shows while Fn is held"),
+            (
+                "type = 'button'\nid = 'b'\nlabel = 'b'\naction = { type = 'socket' }\n\
+                 drag_children = [{ label = 'x', action = { type = 'socket' } }]",
+                "no drag_children in the Fn layer",
+            ),
+        ] {
+            let err = format!("{:#}", fn_layer(bad).unwrap_err());
+            assert!(err.contains(want), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn hold_is_only_for_buttons() {
+        let layer = |item: &str| parse(&format!("[[layers]]\nid = 'main'\n[[layers.items]]\n{item}"));
+        let held = "action = { type = 'key', key = 'KEY_F5', hold = true }";
+        assert!(layer(&format!("type = 'button'\nid = 'b'\nlabel = 'b'\n{held}")).is_ok());
+        for (bad, want) in [
+            (format!("type = 'clock'\nid = 'c'\n{held}"), "`hold` only works on a button"),
+            (
+                format!(
+                    "type = 'expandable'\nid = 'e'\nicon = 'builtin:folder'\n\
+                     children = [{{ label = 'x', {held} }}]"
+                ),
+                "not on children",
+            ),
+            (
+                "type = 'button'\nid = 'b'\nlabel = 'b'\n\
+                 action = { type = 'key', key = 'KEY_F5', hold = 'yes' }"
+                    .to_string(),
+                "invalid type",
+            ),
+        ] {
+            let err = format!("{:#}", layer(&bad).unwrap_err());
+            assert!(err.contains(want), "{bad}: {err}");
+        }
     }
 }

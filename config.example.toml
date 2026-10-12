@@ -17,6 +17,113 @@
 
 default_layer = "main"
 
+# While the keyboard's Fn key is held, the bar shows the layer "fn" below (F1-F12)
+# instead; when Fn is released, the normal layer comes back. Remove this section
+# to have no Fn layer at all.
+[fn]
+layer = "fn"             # id of the [[layers]] shown while Fn is held
+mode = "hold"            # hold | toggle (toggle: each press of Fn shows/hides it)
+delay_ms = 80            # hold only: Fn must be down this long first, so a quick
+                         # tap doesn't flash the layer (0 = at once; 0-1000)
+transition_ms = 120      # cross-fade between the layers (0 = instant; 0-1000)
+# fn_device = "Apple MTP keyboard"  # part of the keyboard's name; by default the
+                                    # internal keyboard is found by itself
+
+#  [F1] [F2] [F3] [F4] [F5] [F6] [F7] [F8] [F9] [F10] [F11] [F12]
+# Only buttons, text, clock, battery, gif and spacers: nothing that unfolds.
+[[layers]]
+id = "fn"
+margin = 4
+gap = 8
+# item_text_color = "#ffffff"   # the labels' colour (default white)
+
+# hold = true: the key is down while the finger is on the button and goes up
+# when it lifts (or slides off), so it auto-repeats and combines with Ctrl, Alt,
+# Shift or Super held on the keyboard.
+[[layers.items]]
+type = "button"
+id = "f1"
+label = "F1"
+stretch = 1
+action = { type = "key", key = "KEY_F1", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f2"
+label = "F2"
+stretch = 1
+action = { type = "key", key = "KEY_F2", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f3"
+label = "F3"
+stretch = 1
+action = { type = "key", key = "KEY_F3", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f4"
+label = "F4"
+stretch = 1
+action = { type = "key", key = "KEY_F4", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f5"
+label = "F5"
+stretch = 1
+action = { type = "key", key = "KEY_F5", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f6"
+label = "F6"
+stretch = 1
+action = { type = "key", key = "KEY_F6", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f7"
+label = "F7"
+stretch = 1
+action = { type = "key", key = "KEY_F7", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f8"
+label = "F8"
+stretch = 1
+action = { type = "key", key = "KEY_F8", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f9"
+label = "F9"
+stretch = 1
+action = { type = "key", key = "KEY_F9", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f10"
+label = "F10"
+stretch = 1
+action = { type = "key", key = "KEY_F10", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f11"
+label = "F11"
+stretch = 1
+action = { type = "key", key = "KEY_F11", hold = true }
+
+[[layers.items]]
+type = "button"
+id = "f12"
+label = "F12"
+stretch = 1
+action = { type = "key", key = "KEY_F12", hold = true }
+
 #  [esc]  ·····················  [prev] [play] [next]  [brightness] [volume] [battery] [clock]
 [[layers]]
 id = "main"

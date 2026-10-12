@@ -50,6 +50,9 @@ fn button(id: String, c: &ChildConfig) -> ItemConfig {
         pressed_background: c.pressed_background,
         pressed_scale: c.pressed_scale,
         text_color: c.text_color,
+        border_color: c.border_color,
+        border_width: c.border_width,
+        pressed_border_color: c.pressed_border_color,
         // Equal shares of the slot.
         stretch: Some(1.0),
         ..ItemConfig::plain_button(&id, action)
@@ -79,6 +82,9 @@ impl AppKeys {
                 id: format!("{id}.{}", set.id),
                 margin: 0.0,
                 items,
+                // Children take only their own border, as everywhere.
+                item_border_color: None,
+                item_border_width: None,
                 ..layer.clone()
             };
             let scene = scenes::bar_with(size.0, size.1, font, &sub, icons, None)?;

@@ -5415,5 +5415,42 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn app_keys_buttons_take_their_own_border_only() {
+        let Some(font) = font() else { return };
+        let toml = r##"
+            [[layers]]
+            id = "m"
+            item_border_color = "#ff0000"
+            item_border_width = 2
+            [[layers.items]]
+            type = "app_keys"
+            width = 200
+            [[layers.items.sets]]
+            id = "a"
+            class = ["zen"]
+            [[layers.items.sets.children]]
+            label = "x"
+            background = "#333333"
+            border_color = "#00ff00"
+            border_width = 2
+            action = { type = "socket" }
+            [[layers.items.sets.children]]
+            label = "y"
+            background = "#333333"
+            action = { type = "socket" }
+        "##;
+        let live = live();
+        let mut s = menu_scene(&font, toml);
+        s.set_app_focus("zen", "", MS(0), &font, false);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        let r = s.app_keys_rect("app_keys").unwrap();
+        let y = r.y.ceil() + 0.5;
+        assert!(is(pixel(&c, r.x + r.w / 4.0, y), [0, 0xff, 0]), "its own: green");
+        let p = pixel(&c, r.x + 3.0 * r.w / 4.0, y);
+        assert!(!is(p, RED) && !is(p, [0, 0xff, 0]), "none from the layer: {p:?}");
+    }
 }
 

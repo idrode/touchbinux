@@ -3992,6 +3992,27 @@ mod tests {
         assert!(matches!(nvim, Action::Command { argv, detach: true, .. } if argv[4] == "/usr/bin/nvim"));
     }
 
+    /// The bordered items commented out in the example are valid once uncommented.
+    #[test]
+    fn example_borders_are_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let start = text.find("# [[layers.items]]\n# type = \"brightness\"").unwrap();
+        let block = &text[start..start + text[start..].find("\n\n").unwrap()];
+        let body: String = block
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = parse(&format!("[[layers]]\nid='m'\n{body}")).unwrap();
+        let l = &c.layers[0];
+        let kinds: Vec<_> = l.items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, [ItemKind::Brightness, ItemKind::Volume, ItemKind::Button]);
+        let widths: Vec<_> = l.items.iter().map(|i| l.border_for(i).map(|b| b.width)).collect();
+        assert_eq!(widths, [Some(1.5), Some(2.0), Some(1.0)]);
+        assert!(l.border_for(&l.items[2]).unwrap().pressed.is_some());
+    }
+
     /// The app_keys item commented out in the example is valid once uncommented.
     #[test]
     fn example_app_keys_is_valid() {

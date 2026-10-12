@@ -613,6 +613,71 @@ pressed_scale = 0.9             # y un poco más pequeño
 action = { type = "key", key = "KEY_PREVIOUSSONG" }
 ```
 
+### Bordes
+
+Un **borde** alrededor de la caja de un elemento: un anillo **por dentro** de su
+contorno (el tamaño y la colocación no cambian), que sigue la forma (`rounded`
+con su `radius`, `circle`) y se dibuja con antialiasing. Es el mismo tipo de
+borde que el de las cápsulas de `workspaces` (que conserva sus propias claves,
+`strip_border_*`, `bar_border_*` y `active_border_color`).
+
+```toml
+[[layers.items]]
+type = "brightness"
+radius = "full"
+background = "#1a1a1a"
+border_color = "#00ffb766"
+border_width = 1.5
+```
+
+| Campo | Valores | Qué hace |
+|---|---|---|
+| `border_color` | `"#rrggbb"` o `"#rrggbbaa"` | color del borde; sin él no hay borde |
+| `border_width` | de `0` a `6` px (como en `workspaces`) | grosor hacia dentro; `0` = sin borde |
+| `pressed_border_color` | `"#rrggbb"` o `"#rrggbbaa"` | color del borde mientras se pulsa (opcional) |
+
+**Dónde.** En todos los elementos con caja: `button`, `clock`, `battery`, `gif`,
+`text`, `volume`, `brightness`, `expandable`, `gif_picker`, `player` y `capture`, y
+en los hijos con caja propia (los de un `player`, de un `drag_children` y de un
+`app_keys`). `pressed_border_color` solo donde hay aspecto pulsado propio:
+`button`, `clock`, `battery`, `gif`, `text` y esos hijos (`volume` y `brightness`
+se despliegan en vez de resaltarse, y en un `expandable` el resaltado es el de sus
+hijos). No llevan borde `spacer`, `workspaces` (usa los suyos), `status` (no tiene
+caja: en reposo no ocupa nada visible) ni `app_keys` (sus botones sí).
+
+**Desde la capa.** `item_border_color` e `item_border_width` en la `[[layers]]`
+dan borde a todos sus elementos con caja; cada uno los cambia con los suyos
+(`border_width = 0` lo quita). El de la capa no se aplica a los elementos con
+`shape = "none"`. Los hijos no heredan nada: solo llevan borde con sus propias
+claves.
+
+**Cómo se ve:**
+
+- En `volume` y `brightness` el borde sigue la caja mientras se despliega (de
+  círculo a píldora, o de píldora corta a larga). En `expandable`, `player` y
+  `gif_picker`, el contenedor lleva el suyo y cada hijo con caja el suyo.
+- Al pulsar sin `pressed_background`, el velo blanco cubre también el borde, como
+  el resto del elemento; con `pressed_border_color`, el borde pulsado se pinta por
+  encima del velo. Con `pressed_background`, el elemento pulsado se ve con ese
+  fondo y el borde en `pressed_border_color` (o en `border_color` si no hay).
+  `pressed_scale` escala el borde con todo lo demás.
+- Con fondo transparente o semitransparente, el anillo no tapa nada de dentro: es
+  solo el anillo.
+- No cuesta nada por fotograma: en botones y widgets va en la capa que se dibuja
+  una vez; en los que se despliegan, con su caja.
+
+**Errores** (al cargar, con el nombre de la clave):
+
+- `border_color` sin `border_width`, o al revés (contando los de la capa):
+  `border_color needs border_width (here or the layer's item_border_*)`.
+- `border_width` fuera de 0-6, un color mal escrito (`"white"`, `"#fff"`), o
+  `pressed_border_color` sin borde.
+- Borde con `shape = "none"` (no hay contorno): `shape = "none" has no outline to
+  put a border on`.
+- Una clave de `workspaces` en otro elemento lo explica: ``strip_border_color` is
+  not valid for a brightness (it is a workspaces key); for a border around it use
+  border_color and border_width``.
+
 ### `id`
 
 Los toques se identifican por `id`. Es obligatorio en `button`; los demás tipos

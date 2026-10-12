@@ -248,6 +248,32 @@ format = "%H:%M"
 # The clock above as plain text: add `shape = "none"` to it. The battery in a
 # circle: add `shape = "circle"` to it.
 
+# Borders: a ring inside the outline (the layout doesn't change) that follows
+# the shape, also while volume and brightness unfold. border_width 0-6 px; the
+# layer can give all its items one (item_border_color, item_border_width).
+# [[layers.items]]
+# type = "brightness"
+# radius = "full"
+# background = "#1a1a1a"
+# border_color = "#00ffb766"       # #rrggbb or #rrggbbaa
+# border_width = 1.5
+#
+# [[layers.items]]
+# type = "volume"
+# shape = "circle"
+# border_color = "#00ffb7"
+# border_width = 2
+#
+# [[layers.items]]
+# type = "button"
+# id = "esc-bordered"
+# label = "esc"
+# background = "transparent"
+# border_color = "#ffffff80"
+# border_width = 1
+# pressed_border_color = "#00ffb7" # while pressed (buttons and the like)
+# action = { type = "key", key = "KEY_ESC" }
+
 # A button that unfolds into a row of its children (see "expandable" in
 # docs/GUIA.md). Tapping a child runs its action and folds the row; so does
 # tapping outside it (without running anything) or leaving it alone for

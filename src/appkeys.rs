@@ -36,8 +36,8 @@ pub struct AppKeys {
     size: (u32, u32),
 }
 
-/// A set's child as a layer button: the same look and the same action.
-fn button(id: String, c: &ChildConfig) -> ItemConfig {
+/// A child as a layer button: the same look and the same action.
+pub fn button(id: String, c: &ChildConfig) -> ItemConfig {
     let action = c.action.clone().unwrap_or(crate::config::Action::Socket);
     ItemConfig {
         icon: c.icon.clone(),
@@ -59,6 +59,27 @@ fn button(id: String, c: &ChildConfig) -> ItemConfig {
     }
 }
 
+/// `items` (buttons) laid out in a `size` slot with `layer`'s gap and item
+/// defaults (but no layer border: children only have their own), as a scene.
+pub fn row_scene(
+    id: String,
+    items: Vec<ItemConfig>,
+    size: (u32, u32),
+    layer: &LayerConfig,
+    font: &Font,
+    icons: &mut IconResolver,
+) -> Result<Scene> {
+    let sub = LayerConfig {
+        id,
+        margin: 0.0,
+        items,
+        item_border_color: None,
+        item_border_width: None,
+        ..layer.clone()
+    };
+    scenes::bar_with(size.0, size.1, font, &sub, icons, None)
+}
+
 impl AppKeys {
     /// Item `item` of `layer`, in `rect`: each set's buttons laid out in it with
     /// the layer's gap and item defaults.
@@ -78,16 +99,7 @@ impl AppKeys {
                 .filter(|(_, _, s)| *s == set.id)
                 .map(|(id, c, _)| button(id, c))
                 .collect();
-            let sub = LayerConfig {
-                id: format!("{id}.{}", set.id),
-                margin: 0.0,
-                items,
-                // Children take only their own border, as everywhere.
-                item_border_color: None,
-                item_border_width: None,
-                ..layer.clone()
-            };
-            let scene = scenes::bar_with(size.0, size.1, font, &sub, icons, None)?;
+            let scene = row_scene(format!("{id}.{}", set.id), items, size, layer, font, icons)?;
             sets.push(SetView {
                 config: set.clone(),
                 scene,

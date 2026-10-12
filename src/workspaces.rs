@@ -694,6 +694,15 @@ impl Workspaces {
             .map(|p| Hit::Workspace(self.caps[p.i].id))
     }
 
+    /// `class`'s icon as its strips draw it, centred in `cell`.
+    pub fn draw_app_icon(&self, canvas: &mut Canvas, class: &str, cell: Rect, font: &Font) {
+        if let Some(g) = self.glyphs.get(class) {
+            let side = self.style.icon;
+            let (cx, cy) = cell.center();
+            g.draw(canvas, Rect::new(cx - side / 2.0, cy - side / 2.0, side, side), font);
+        }
+    }
+
     /// The workspace a hit belongs to.
     pub fn workspace_of(&self, hit: &Hit) -> Option<i64> {
         match hit {

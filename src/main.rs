@@ -1,4 +1,5 @@
 mod anim;
+mod appactions;
 mod appkeys;
 mod barlight;
 mod battery;

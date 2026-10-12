@@ -4,6 +4,7 @@
 
 use crate::{
     anim::Animated,
+    appactions::{AppActions, Open},
     border::Border,
     appkeys::AppKeys,
     capture::{self, RecLook},
@@ -328,6 +329,8 @@ enum Capture {
     Ws(usize, (f32, f32), PullState),
     /// On an app_keys item: the touch goes to the set it shows.
     AppKeys(usize),
+    /// On a workspaces item's unfolded app buttons (`Scene::ws_apps`).
+    WsApps(usize),
     /// A touch outside an unfolded item: it folds, and the touch does nothing else.
     Blocked,
 }
@@ -354,6 +357,8 @@ pub struct Scene {
     workspaces: Vec<(Workspaces, Option<f32>)>,
     /// app_keys items: a set of buttons by the focused window.
     app_keys: Vec<AppKeys>,
+    /// Each workspaces item's app buttons (same index as `workspaces`).
+    ws_apps: Vec<AppActions>,
     /// What the finger on a workspaces item came down on, and what it is on now.
     ws_target: Option<Hit>,
     ws_hover: Option<Hit>,
@@ -388,6 +393,7 @@ impl Scene {
             menus: Vec::new(),
             workspaces: Vec::new(),
             app_keys: Vec::new(),
+            ws_apps: Vec::new(),
             ws_target: None,
             ws_hover: None,
             buttons: Vec::new(),
@@ -451,6 +457,12 @@ impl Scene {
                 _ => None,
             };
             ws.draw(canvas, t, font, pressed.as_ref());
+            if let Some(apps) = self.ws_apps.get(i)
+                && let Some(open) = apps.opened()
+            {
+                let class = open.class.clone();
+                apps.draw(canvas, t, font, live, |c, cell| ws.draw_app_icon(c, &class, cell, font));
+            }
         }
         for a in &self.app_keys {
             a.draw(canvas, t, font, live);
@@ -540,12 +552,14 @@ impl Scene {
         let menus = self.menus.iter().map(|m| m.next_change(t));
         let ws = self.workspaces.iter().map(|(w, _)| w.next_change(t));
         let keys = self.app_keys.iter().map(|a| a.next_change(t));
+        let apps = self.ws_apps.iter().map(|a| a.next_change(t));
         animated
             .chain(widgets)
             .chain(expanders)
             .chain(menus)
             .chain(ws)
             .chain(keys)
+            .chain(apps)
             .flatten()
             .min()
     }
@@ -574,7 +588,77 @@ impl Scene {
         for a in &mut self.app_keys {
             changed |= a.advance(t, live);
         }
+        for a in &mut self.ws_apps {
+            changed |= a.advance(t, live);
+        }
         changed
+    }
+
+    /// Window `addr` was tapped in workspaces item `item`'s strip (and gets the
+    /// focus): its app's buttons unfold, if its class has some. Returns whether
+    /// they did.
+    pub fn open_app_row(&mut self, item: &str, addr: &str, state: &HyprState, t: Duration, animate: bool) -> bool {
+        let addr = addr.trim_start_matches("0x");
+        let Some(i) = self.workspaces.iter().position(|(w, _)| w.id == item) else {
+            return false;
+        };
+        let Some(win) = state.windows.iter().find(|w| w.addr == addr) else {
+            return false;
+        };
+        let Some(apps) = self.ws_apps.get_mut(i) else {
+            return false;
+        };
+        let Some(row) = apps.find(&win.class, &win.title) else {
+            return false;
+        };
+        let open = Open {
+            row,
+            addr: addr.to_string(),
+            class: win.class.clone(),
+            workspace: win.workspace,
+            focused: state.focused.as_deref() == Some(addr),
+            on_workspace: state.active_workspace == Some(win.workspace),
+        };
+        eprintln!("workspaces: {:?} buttons out", win.class);
+        apps.open(open, t, animate);
+        true
+    }
+
+    /// Hyprland's state changed: an unfolded app row learns that its window has
+    /// the focus (its buttons work from then on), and folds if the window closed
+    /// or changed class, or once it had the focus or its workspace, they went to
+    /// another app or workspace. Returns whether anything changed.
+    pub fn sync_app_rows(&mut self, state: &HyprState, t: Duration, font: &Font) -> bool {
+        let mut changed = false;
+        for apps in &mut self.ws_apps {
+            let Some(open) = apps.opened_mut() else {
+                continue;
+            };
+            let win = state.windows.iter().find(|w| w.addr == open.addr);
+            let gone = win.is_none_or(|w| w.class != open.class);
+            let focused_class = state.focused_window().map(|w| w.class.as_str());
+            if state.focused.as_deref() == Some(open.addr.as_str()) {
+                open.focused = true;
+            }
+            if state.active_workspace == Some(open.workspace) {
+                open.on_workspace = true;
+            }
+            let other_app = open.focused && focused_class.is_some_and(|c| c != open.class);
+            let other_ws = open.on_workspace && state.active_workspace != Some(open.workspace);
+            if gone || other_app || other_ws {
+                changed |= apps.close(t, true, font);
+            }
+        }
+        changed
+    }
+
+    /// The class whose app buttons are out in workspaces item `item`, and
+    /// whether its window has had the focus.
+    #[cfg(test)]
+    pub fn app_row(&self, item: &str) -> Option<(&str, bool)> {
+        let i = self.workspaces.iter().position(|(w, _)| w.id == item)?;
+        let a = self.ws_apps.get(i)?;
+        a.opened().filter(|_| a.is_open()).map(|o| (o.class.as_str(), o.focused))
     }
 
     /// The focused window is of `class`, titled `title`: app_keys items show its
@@ -785,6 +869,11 @@ impl Scene {
                 self.capture = if let Some(c) = self.expander_down((x, y), t, font, out) {
                     changed = true;
                     c
+                } else if let Some(i) = (0..self.ws_apps.len())
+                    .find(|&i| self.ws_apps[i].active(t) && contains(self.workspaces[i].0.rect, x, y))
+                {
+                    changed |= self.ws_apps[i].handle_touch(phase, (x, y), t, font, out);
+                    Capture::WsApps(i)
                 } else if let Some(i) = self.app_keys.iter().position(|a| contains(a.rect, x, y)) {
                     changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
                     Capture::AppKeys(i)
@@ -817,6 +906,9 @@ impl Scene {
                 } else {
                     Capture::None
                 };
+            }
+            (Phase::Move, Capture::WsApps(i)) => {
+                changed |= self.ws_apps[i].handle_touch(phase, (x, y), t, font, out);
             }
             (Phase::Move, Capture::AppKeys(i)) => {
                 changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
@@ -896,6 +988,9 @@ impl Scene {
             }
             (Phase::Up | Phase::Cancel, capture) => {
                 match capture {
+                    Capture::WsApps(i) => {
+                        changed |= self.ws_apps[i].handle_touch(phase, (x, y), t, font, out);
+                    }
                     Capture::AppKeys(i) => {
                         changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
                     }
@@ -1115,7 +1210,7 @@ impl Scene {
                 j.map_or(Capture::None, |j| Capture::Ws(j, from, state))
             }
             // The set may be laid out anew: the touch on it ends.
-            Capture::AppKeys(_) => Capture::Blocked,
+            Capture::AppKeys(_) | Capture::WsApps(_) => Capture::Blocked,
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
@@ -1148,6 +1243,10 @@ impl Scene {
         self.ws_hover = None;
         for a in &mut self.app_keys {
             a.interrupt(t, font);
+        }
+        // App buttons fold at once (Fn, rest).
+        for a in &mut self.ws_apps {
+            a.close(t, false, font);
         }
     }
 
@@ -2088,6 +2187,8 @@ pub fn bar_with(
                 ws.set_view(view, Duration::ZERO, font, icons, false);
                 let drag = item.overview_action.as_ref().map(|_| item.drag_px());
                 scene.workspaces.push((ws, drag));
+                let apps = AppActions::new(item, rect, layer, font, icons)?;
+                scene.ws_apps.push(apps);
             }
             ItemKind::Status => {
                 let look = status::Look {
@@ -5451,6 +5552,214 @@ mod tests {
         assert!(is(pixel(&c, r.x + r.w / 4.0, y), [0, 0xff, 0]), "its own: green");
         let p = pixel(&c, r.x + 3.0 * r.w / 4.0, y);
         assert!(!is(p, RED) && !is(p, [0, 0xff, 0]), "none from the layer: {p:?}");
+    }
+
+    /// ws_layer with app_actions for kitty (two buttons) and Code, plus `extra`
+    /// (TOML) on the workspaces item.
+    fn apps_layer(extra: &str) -> String {
+        ws_layer(false).replace(
+            "width = 600\n",
+            &format!(
+                "width = 600\n{extra}\n\
+                 [[layers.items.app_actions]]\nclass = ['kitty']\n\
+                 [[layers.items.app_actions.children]]\nlabel = 'Tab'\nbackground = '#333333'\n\
+                 action = {{ type = 'keys', keys = 'ctrl+shift+t' }}\n\
+                 [[layers.items.app_actions.children]]\nlabel = 'Copy'\nbackground = '#333333'\n\
+                 action = {{ type = 'keys', keys = 'ctrl+shift+c' }}\n\
+                 [[layers.items.app_actions]]\nclass = ['code']\n\
+                 [[layers.items.app_actions.children]]\nlabel = 'P'\naction = {{ type = 'keys', keys = 'ctrl+p' }}\n"
+            ),
+        )
+    }
+
+    /// A tap on window `addr`'s icon, as the daemon handles it: the focus
+    /// request, then its buttons if any.
+    fn tap_app(s: &mut Scene, st: &HyprState, addr: &str, t: Duration, font: &Font) -> bool {
+        let at = ws_point(s, &Hit::Window(addr.into()));
+        let (_, ev) = tap(s, at, t, font);
+        assert_eq!(ev, vec![UiEvent::FocusWindow("ws".into(), format!("0x{addr}"))]);
+        s.open_app_row("ws", &format!("0x{addr}"), st, t, true)
+    }
+
+    /// The middle of the unfolded row's `n`th of `of` buttons, and the handle's.
+    fn row_point(s: &Scene, n: usize, of: usize) -> (f32, f32) {
+        let r = s.workspaces[0].0.rect;
+        let x0 = r.x + r.h + 8.0;
+        let w = (r.x + r.w - x0) / of as f32;
+        (x0 + w * (n as f32 + 0.5), r.y + r.h / 2.0)
+    }
+
+    fn handle_point(s: &Scene) -> (f32, f32) {
+        let r = s.workspaces[0].0.rect;
+        (r.x + r.h / 2.0, r.y + r.h / 2.0)
+    }
+
+    #[test]
+    fn tapping_an_app_icon_unfolds_its_buttons_and_the_handle_folds_them() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = crate::workspaces::tests::state();
+        let mut s = ws_scene(&font, &apps_layer(""), Some(&st));
+        // firefox has no buttons: only the focus.
+        assert!(!tap_app(&mut s, &st, "b2", MS(0), &font));
+        assert_eq!(s.app_row("ws"), None);
+        // kitty (already focused): out, and its keys work at once.
+        assert!(tap_app(&mut s, &st, "a1", MS(100), &font));
+        assert_eq!(s.app_row("ws"), Some(("kitty", true)));
+        assert_eq!(s.next_change(MS(150)), Some(MS(150)), "unfolding: frames");
+        s.advance(MS(300), &live);
+        assert_eq!(s.next_change(MS(300)), Some(MS(100) + MS(5000)), "out: only the fold's moment");
+        // Its buttons report their ids; each touch restarts the count.
+        let at = row_point(&s, 1, 2);
+        let (_, ev) = tap(&mut s, at, MS(1000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("ws.kitty.2".into())]);
+        assert_eq!(s.next_change(MS(1000)), Some(MS(6000)));
+        assert_eq!(s.app_row("ws"), Some(("kitty", true)), "close_on_tap is false by default");
+        // The handle folds it, and then nothing runs.
+        let at = handle_point(&s);
+        let (_, ev) = tap(&mut s, at, MS(2000), &font);
+        assert!(ev.is_empty(), "{ev:?}");
+        assert_eq!(s.app_row("ws"), None);
+        s.advance(MS(2200), &live);
+        assert_eq!(s.next_change(MS(2200)), None);
+        // The strip works again.
+        assert!(!tap_app(&mut s, &st, "b2", MS(3000), &font));
+    }
+
+    #[test]
+    fn app_buttons_fold_by_themselves_and_with_close_on_tap() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = crate::workspaces::tests::state();
+        let mut s = ws_scene(&font, &apps_layer("collapse_after_ms = 1000"), Some(&st));
+        tap_app(&mut s, &st, "a1", MS(0), &font);
+        s.advance(MS(999), &live);
+        assert!(s.app_row("ws").is_some());
+        assert!(s.advance(MS(1030), &live), "folds after collapse_after_ms");
+        assert_eq!(s.app_row("ws"), None);
+        let mut s = ws_scene(&font, &apps_layer("close_on_tap = true"), Some(&st));
+        tap_app(&mut s, &st, "a1", MS(0), &font);
+        s.advance(MS(200), &live);
+        let at = row_point(&s, 0, 2);
+        let (_, ev) = tap(&mut s, at, MS(300), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("ws.kitty.1".into())]);
+        assert_eq!(s.app_row("ws"), None, "close_on_tap: folds after the tap");
+    }
+
+    #[test]
+    fn keys_only_once_the_window_has_the_focus() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let mut st = crate::workspaces::tests::state();
+        st.workspaces.insert(3, "3".into());
+        // Every workspace's icons, to reach a window on another one.
+        let mut s = ws_scene(&font, &apps_layer("strip = 'all'"), Some(&st));
+        // Code is on workspace 4, kitty has the focus on 2.
+        assert!(tap_app(&mut s, &st, "c3", MS(0), &font));
+        assert_eq!(s.app_row("ws"), Some(("Code", false)));
+        s.advance(MS(200), &live);
+        let at = row_point(&s, 0, 1);
+        let (_, ev) = tap(&mut s, at, MS(300), &font);
+        assert!(ev.is_empty(), "no keys to the wrong window: {ev:?}");
+        // Other events before Hyprland switches: kitty still focused, still 2.
+        assert!(!s.sync_app_rows(&st, MS(350), &font));
+        assert_eq!(s.app_row("ws"), Some(("Code", false)));
+        // Hyprland switches to 4 and focuses Code: its keys go out.
+        st.active_workspace = Some(4);
+        st.focused = Some("c3".into());
+        s.sync_app_rows(&st, MS(400), &font);
+        assert_eq!(s.app_row("ws"), Some(("Code", true)));
+        let at = row_point(&s, 0, 1);
+        let (_, ev) = tap(&mut s, at, MS(500), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("ws.code.1".into())]);
+    }
+
+    #[test]
+    fn app_buttons_fold_when_focus_workspace_or_window_change() {
+        let Some(font) = font() else { return };
+        let base = crate::workspaces::tests::state();
+        let open = |font: &Font| {
+            let mut s = ws_scene(font, &apps_layer(""), Some(&base));
+            assert!(tap_app(&mut s, &base, "a1", MS(0), font));
+            s
+        };
+        // Another app gets the focus.
+        let mut s = open(&font);
+        let mut st = base.clone();
+        st.focused = Some("b2".into());
+        assert!(s.sync_app_rows(&st, MS(500), &font));
+        assert_eq!(s.app_row("ws"), None);
+        // Another kitty window: stays (its keys go to that one).
+        let mut s = open(&font);
+        let mut st = base.clone();
+        st.windows.push(crate::workspaces::tests::win("e5", "kitty", 2));
+        st.focused = Some("e5".into());
+        assert!(!s.sync_app_rows(&st, MS(500), &font));
+        assert_eq!(s.app_row("ws"), Some(("kitty", true)));
+        // Another workspace.
+        let mut s = open(&font);
+        let mut st = base.clone();
+        st.active_workspace = Some(4);
+        assert!(s.sync_app_rows(&st, MS(500), &font));
+        assert_eq!(s.app_row("ws"), None);
+        // The window closes, or changes class.
+        let mut s = open(&font);
+        let mut st = base.clone();
+        st.windows.retain(|w| w.addr != "a1");
+        st.focused = None;
+        assert!(s.sync_app_rows(&st, MS(500), &font));
+        assert_eq!(s.app_row("ws"), None);
+        let mut s = open(&font);
+        let mut st = base.clone();
+        st.windows[0].class = "kitty-other".into();
+        assert!(s.sync_app_rows(&st, MS(500), &font));
+        assert_eq!(s.app_row("ws"), None);
+        // Fn or rest (the scene leaves the screen): folded at once, no animation.
+        let mut s = open(&font);
+        s.interrupt(None, MS(500), &font);
+        assert_eq!(s.app_row("ws"), None);
+        assert_eq!(s.next_change(MS(500)), None);
+    }
+
+    #[test]
+    fn the_unfolded_row_replaces_the_strip_and_fades_in() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = crate::workspaces::tests::state();
+        let mut s = ws_scene(&font, &apps_layer(""), Some(&st));
+        let mut c = Canvas::new(W, H).unwrap();
+        s.advance(MS(0), &live);
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        let before = c.data().to_vec();
+        tap_app(&mut s, &st, "a1", MS(0), &font);
+        // Half way: something in between; then the row, the same from then on.
+        s.advance(MS(75), &live);
+        s.draw(&mut c, MS(75), &font, &live).unwrap();
+        let half = c.data().to_vec();
+        s.advance(MS(400), &live);
+        s.draw(&mut c, MS(400), &font, &live).unwrap();
+        let out = c.data().to_vec();
+        assert!(half != before && half != out);
+        // The row's first button (#333333) where the strip was.
+        let (x, y) = row_point(&s, 0, 2);
+        let p = pixel(&c, x, y - 18.0);
+        assert!(is(p, [0x33, 0x33, 0x33]), "{p:?}");
+        // The item's width and the rest of the layer don't move.
+        let b = s.button_rect("after").unwrap();
+        let px = |d: &[u8]| { let i = (((b.y + 5.0) as u32 * W + (b.x + 5.0) as u32) * 4) as usize; d[i..i + 4].to_vec() };
+        assert_eq!(px(&before), px(&out));
+    }
+
+    #[test]
+    fn app_buttons_that_dont_fit_say_how_wide_the_item_must_be() {
+        let Some(font) = font() else { return };
+        let st = crate::workspaces::tests::state();
+        let toml = apps_layer("").replace("width = 600", "width = 120");
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let err = format!("{:#}", bar_with(W, H, &font, &layer, &mut icons, Some(&st)).err().unwrap());
+        assert!(err.contains("the app_actions of \"kitty\" need") && err.contains("make the item at least"), "{err}");
     }
 }
 

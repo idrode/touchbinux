@@ -219,8 +219,6 @@ pub struct Backlight {
     throttle: Throttle,
 }
 
-/// Touch Bar panels, not the display.
-const TOUCHBAR_BACKLIGHTS: &[&str] = &["228600000.dsi.0", "display-pipe", "appletb_backlight"];
 
 impl Backlight {
     /// Picks the display backlight: skip the Touch Bar's, then prefer the kernel's
@@ -229,7 +227,7 @@ impl Backlight {
         let mut best: Option<(u8, PathBuf)> = None;
         for e in fs::read_dir("/sys/class/backlight")?.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if TOUCHBAR_BACKLIGHTS.iter().any(|t| name.contains(t)) {
+            if crate::barlight::TOUCHBAR_BACKLIGHTS.iter().any(|t| name.contains(t)) {
                 continue;
             }
             let ty = fs::read_to_string(e.path().join("type")).unwrap_or_default();

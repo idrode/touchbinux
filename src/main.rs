@@ -1,4 +1,5 @@
 mod anim;
+mod barlight;
 mod battery;
 mod canvas;
 mod capture;
@@ -48,6 +49,7 @@ use evdev::KeyCode;
 use fnkey::{FnEvent, FnKeyboard, Lost, NodeWatch};
 use fnlayer::{Fade, FnMachine};
 use hypr::{Hypr, ReadOutcome};
+use barlight::BarLight;
 use idle::{IdleMachine, Stage};
 use hyprctl::HyprAction;
 use hyprwatch::InstanceWatch;
@@ -85,6 +87,8 @@ use user::SessionUser;
 use widgets::{Level, Live};
 
 /// Frame cap for animations and touch-driven redraws (~30 fps).
+/// The longest the bar takes to wake from an idle stage.
+const WAKE_FADE: Duration = Duration::from_millis(150);
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
 /// Fallback only, if the instance watch can't be set up: how often to look for
 /// Hyprland again while it isn't there.
@@ -299,6 +303,10 @@ struct App {
 #[derive(Default)]
 struct IdleSide {
     machine: Option<IdleMachine>,
+    /// The bar's backlight directory (the daemon only; none in previews).
+    light_dir: Option<PathBuf>,
+    /// Open while `[idle]` is configured; its Drop puts the normal brightness back.
+    light: Option<BarLight>,
 }
 
 impl IdleSide {
@@ -1036,23 +1044,61 @@ impl App {
         let from = self.idle.stage();
         let cfg = self.config.idle.as_ref().filter(|_| self.args.scene == "bar");
         self.idle.machine = cfg.map(|c| IdleMachine::new(c, now));
-        self.apply_idle((from, Stage::Awake))
+        if self.idle.machine.is_none() {
+            // Dropped: the normal brightness comes back.
+            self.idle.light = None;
+        } else if self.idle.light.is_none()
+            && let Some(dir) = self.idle.light_dir.clone()
+        {
+            self.open_light(&dir);
+        }
+        self.apply_idle((from, Stage::Awake), now)
+    }
+
+    /// Opens the bar's backlight and keeps its normal brightness in the state file.
+    fn open_light(&mut self, dir: &Path) {
+        let saved = self.state.state.touchbar_brightness;
+        match BarLight::open(dir, saved, &barlight::REGISTRY) {
+            Ok(l) => {
+                eprintln!("idle: backlight {} (normal {} of {})", dir.display(), l.normal(), l.max());
+                if saved != Some(l.normal()) {
+                    self.state.state.touchbar_brightness = Some(l.normal());
+                    self.state.save();
+                }
+                self.idle.light = Some(l);
+            }
+            Err(e) => eprintln!("idle: {e:#}; no dimming (sleep and off still apply)"),
+        }
     }
 
     /// The idle timer went off.
     fn on_idle_timer(&mut self, now: Instant) -> bool {
         match self.idle.machine.as_mut().and_then(|m| m.fire(now)) {
-            Some(change) => self.apply_idle(change),
+            Some(change) => self.apply_idle(change, now),
             None => false,
         }
     }
 
-    /// Puts the bar in the stage it went to. Returns whether it changed.
-    fn apply_idle(&mut self, (from, to): idle::Change) -> bool {
+    /// Puts the bar in the stage it went to at `now`. Returns whether it changed.
+    fn apply_idle(&mut self, (from, to): idle::Change, now: Instant) -> bool {
         if from == to {
             return false;
         }
         eprintln!("idle: {from:?} -> {to:?}");
+        let Some(cfg) = &self.config.idle else {
+            return true;
+        };
+        let level = match to {
+            Stage::Awake => 1.0,
+            Stage::Dim => cfg.dim_level,
+            Stage::Sleep => cfg.sleep_level,
+            Stage::Off => 0.0,
+        };
+        // Waking is quick; going to rest takes fade_ms.
+        let len = if to < from { cfg.fade().min(WAKE_FADE) } else { cfg.fade() };
+        if let Some(l) = &mut self.idle.light {
+            l.set(level, len, now);
+        }
         true
     }
 
@@ -1493,6 +1539,7 @@ fn main() -> Result<()> {
             // Previews read the folders inline, so the PNG shows the chosen GIFs.
             loader: None,
             follow_fn: false,
+            touchbar_light: None,
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         // Give mpv a moment to report its state, so the preview shows it.
@@ -1540,6 +1587,8 @@ fn main() -> Result<()> {
     signals.thread_block()?;
     let sigfd = SignalFd::with_flags(&signals, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)?;
 
+    // A panic puts the bar's brightness back first (see barlight).
+    barlight::restore_on_panic();
     let mut drm = DrmBackend::open_card()?;
     let (w, h) = drm.canvas_size();
     eprintln!("canvas: {w}x{h}");
@@ -1582,6 +1631,11 @@ fn main() -> Result<()> {
                 .inspect_err(|e| eprintln!("gif_picker: {e:#}; reading folders inline"))
                 .ok(),
             follow_fn: true,
+            touchbar_light: barlight::find()
+                .or_else(|| {
+                    eprintln!("idle: no Touch Bar backlight in /sys/class/backlight");
+                    None
+                }),
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         let result = run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app);
@@ -1611,6 +1665,8 @@ struct AppParts {
     loader: Option<Loader>,
     /// Read the keyboard's Fn key (the daemon only).
     follow_fn: bool,
+    /// The bar's backlight directory, for `[idle]` (the daemon only).
+    touchbar_light: Option<PathBuf>,
 }
 
 fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> Result<App> {
@@ -1659,7 +1715,10 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         },
         held: None,
         finger: None,
-        idle: IdleSide::default(),
+        idle: IdleSide {
+            light_dir: p.touchbar_light,
+            ..IdleSide::default()
+        },
     };
     app.sync_mpv();
     app.sync_recorder();
@@ -1984,6 +2043,9 @@ fn run(
             }
         }
         app.vol.poll(now, &mut app.runner);
+        if let Some(l) = &mut app.idle.light {
+            l.poll(now);
+        }
         if let Some(b) = &mut app.backlight {
             b.poll(now);
         }
@@ -2091,6 +2153,7 @@ fn run(
             app.mpv.as_ref().and_then(mpv::Mpv::next_deadline),
             app.recorder.next_deadline(),
             app.rec_watch.as_ref().and_then(RecWatch::next_deadline),
+            app.idle.light.as_ref().and_then(BarLight::next_deadline),
         ]
         .into_iter()
         .flatten()
@@ -2395,6 +2458,7 @@ mod tests {
             keyboard: None,
             loader: None,
             follow_fn: false,
+            touchbar_light: None,
         };
         new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap()
     }
@@ -2506,6 +2570,7 @@ mod tests {
             keyboard: None,
             loader: None,
             follow_fn: false,
+            touchbar_light: None,
         };
         new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap()
     }
@@ -2706,5 +2771,172 @@ mod tests {
         t.sync(&epoll, None, now).unwrap();
         assert!(!t.exists());
         assert_eq!(epoll.wait(&mut events, EpollTimeout::ZERO).unwrap(), 0);
+    }
+
+
+    const S: fn(u64) -> Duration = Duration::from_secs;
+
+    /// The daemon's App with `[idle]` (`idle_section`, TOML), a fake backlight at
+    /// 100 and a state file, both in `dir`. Layers: main (a button and a
+    /// dropdown), "idle" (a 20 fps GIF) and "fn". Its clock starts at the
+    /// returned instant, with activity then.
+    fn idle_app(dir: &Path, idle_section: &str) -> (App, Instant) {
+        crate::gifpick::tests::write_gif(&dir.join("idle.gif"), 40, 40, 4);
+        let toml = format!(
+            "[[layers]]\nid = 'main'\n\
+             [[layers.items]]\ntype = 'button'\nid = 'before'\nlabel = 'B'\naction = {{ type = 'socket' }}\n\
+             [[layers.items]]\ntype = 'expandable'\nid = 'cap'\nicon = 'builtin:folder'\nlabel = 'Cap'\n\
+             [[layers.items.children]]\nid = 'one'\nlabel = 'Uno'\naction = {{ type = 'socket' }}\n\
+             [[layers]]\nid = 'idle'\n\
+             [[layers.items]]\ntype = 'gif'\nid = 'g'\npath = '{}'\n\
+             [[layers]]\nid = 'fn'\n\
+             [[layers.items]]\ntype = 'button'\nid = 'f1'\nlabel = 'F1'\n\
+             action = {{ type = 'key', key = 'KEY_F1', hold = true }}\n\
+             [fn]\ndelay_ms = 0\ntransition_ms = 0\n\
+             {idle_section}\n",
+            dir.join("idle.gif").display()
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let light = dir.join("light");
+        fs::create_dir(&light).unwrap();
+        fs::write(light.join("max_brightness"), "255\n").unwrap();
+        fs::write(light.join("brightness"), "100\n").unwrap();
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+                layer: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: None,
+            follow_fn: false,
+            touchbar_light: Some(light),
+        };
+        // Hermetic: its own state file, not /var/lib's.
+        let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
+        app.idle.light = None;
+        app.state = state::StateFile::at(dir.join("state.toml"), true);
+        let t0 = app.epoch;
+        app.sync_idle(t0);
+        (app, t0)
+    }
+
+    /// The backlight as sysfs would hold it.
+    fn light(dir: &Path) -> u32 {
+        crate::barlight::tests::on_disk(&dir.join("light"))
+    }
+
+    /// Lets the brightness ramp run to its end.
+    fn ramp_done(app: &mut App) {
+        while let Some(at) = app.idle.light.as_ref().and_then(BarLight::next_deadline) {
+            app.idle.light.as_mut().unwrap().poll(at);
+        }
+    }
+
+    const IDLE: &str = "[idle]\ndim_after_s = 5\ndim_level = 0.25\nsleep_after_s = 10\n\
+                        sleep_layer = 'idle'\nsleep_level = 0.1\noff_after_s = 20\nfade_ms = 250";
+
+    #[test]
+    fn idle_stages_set_the_brightness_and_waking_restores_it() {
+        let dir = tmp("idle-light");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        assert_eq!(light(&dir), 100);
+        assert_eq!(app.state.state.touchbar_brightness, Some(100), "kept for a killed run");
+        assert!(app.on_idle_timer(t0 + S(5)));
+        assert_eq!(app.idle.stage(), Stage::Dim);
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 25);
+        assert!(app.on_idle_timer(t0 + S(10)));
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 10);
+        assert!(app.on_idle_timer(t0 + S(20)));
+        ramp_done(&mut app);
+        assert_eq!((app.idle.stage(), light(&dir)), (Stage::Off, 0));
+        assert_eq!(app.idle.deadline(), None, "off: no timer");
+        // A reload (also what a resume sends) wakes it, at the normal brightness.
+        app.reload_config();
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 100);
+        // The daemon ending while dimmed (SIGTERM, Ctrl+C, an error, a panic
+        // unwinding): the App is dropped and the normal brightness comes back.
+        let t = app.epoch + S(100);
+        app.sync_idle(t);
+        app.on_idle_timer(t + S(5));
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 25);
+        drop(app);
+        assert_eq!(light(&dir), 100);
+    }
+
+    #[test]
+    fn a_killed_run_left_it_dimmed_and_the_next_start_restores_it() {
+        let dir = tmp("idle-killed");
+        let (app, _) = idle_app(&dir, IDLE);
+        // As after a SIGKILL: no Drop ran, the panel stays at 25.
+        std::mem::forget(app);
+        fs::write(dir.join("light/brightness"), "25\n").unwrap();
+        let (app, _) = idle_app_again(&dir);
+        assert_eq!(app.idle.light.as_ref().unwrap().normal(), 100);
+        assert_eq!(light(&dir), 100);
+    }
+
+    /// Another start on the same folder (config, backlight and state file).
+    fn idle_app_again(dir: &Path) -> (App, Instant) {
+        let path = dir.join("config.toml");
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+                layer: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: None,
+            follow_fn: false,
+            touchbar_light: Some(dir.join("light")),
+        };
+        let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
+        app.idle.light = None;
+        app.state = state::StateFile::at(dir.join("state.toml"), true);
+        let t0 = app.epoch;
+        app.sync_idle(t0);
+        (app, t0)
+    }
+
+    #[test]
+    fn a_reload_without_idle_restores_the_brightness_and_stops_the_timer() {
+        let dir = tmp("idle-reload");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        app.on_idle_timer(t0 + S(5));
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 25);
+        let toml = fs::read_to_string(dir.join("config.toml")).unwrap();
+        fs::write(dir.join("config.toml"), toml.replace(IDLE, "")).unwrap();
+        app.reload_config();
+        assert!(app.idle.machine.is_none() && app.idle.light.is_none());
+        assert_eq!((light(&dir), app.idle.deadline()), (100, None));
+        // New times on a reload apply from then.
+        fs::write(dir.join("config.toml"), toml.replace("dim_after_s = 5", "dim_after_s = 7")).unwrap();
+        app.reload_config();
+        assert!(app.idle.deadline().is_some_and(|d| d > Instant::now() + S(6)));
     }
 }

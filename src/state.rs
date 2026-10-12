@@ -23,6 +23,10 @@ pub struct State {
     /// `gif_picker` id -> the chosen file.
     #[serde(default)]
     pub gif_picker: BTreeMap<String, PathBuf>,
+    /// The Touch Bar's normal brightness, as first found by `[idle]` (a later
+    /// start may find it dimmed, after a run that was killed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touchbar_brightness: Option<u32>,
 }
 
 pub struct StateFile {

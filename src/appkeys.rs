@@ -46,7 +46,7 @@ fn button(id: String, c: &ChildConfig) -> ItemConfig {
         shape: c.shape,
         radius: c.radius,
         diameter: c.diameter,
-        background: c.background.clone(),
+        background: c.background,
         pressed_background: c.pressed_background,
         pressed_scale: c.pressed_scale,
         text_color: c.text_color,

@@ -652,6 +652,12 @@ impl Scene {
         changed
     }
 
+    /// The first workspaces item (tests).
+    #[cfg(test)]
+    pub fn first_ws(&self) -> &(Workspaces, Option<f32>) {
+        &self.workspaces[0]
+    }
+
     /// The class whose app buttons are out in workspaces item `item`, and
     /// whether its window has had the focus.
     #[cfg(test)]

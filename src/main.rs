@@ -136,10 +136,11 @@ const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] \
-                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>]]\n\
+                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>]]\n\
                      --status (previews only): rec | rec_done | shot | rec_shot\n\
                      --layer (previews only): the bar scene's layer to draw, e.g. fn\n\
-                     --focus-class (previews only): app_keys show this window class's set";
+                     --focus-class (previews only): app_keys show this window class's set\n\
+                     --expand (previews only): workspaces with this class's app buttons out";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -178,6 +179,9 @@ struct Args {
     /// `--png` only: the focused window's class for app_keys, instead of
     /// Hyprland's.
     focus_class: Option<String>,
+    /// `--png` only: workspaces drawn with one window of this class, its
+    /// app buttons out (no Hyprland needed).
+    expand: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -189,6 +193,7 @@ fn parse_args() -> Result<Args> {
         status: None,
         layer: None,
         focus_class: None,
+        expand: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -208,6 +213,7 @@ fn parse_args() -> Result<Args> {
             }
             "--layer" => args.layer = Some(it.next().ok_or(anyhow!(USAGE))?),
             "--focus-class" => args.focus_class = Some(it.next().ok_or(anyhow!(USAGE))?),
+            "--expand" => args.expand = Some(it.next().ok_or(anyhow!(USAGE))?),
             _ => return Err(anyhow!("unknown argument {arg:?}\n{USAGE}")),
         }
     }
@@ -219,6 +225,9 @@ fn parse_args() -> Result<Args> {
     }
     if args.focus_class.is_some() && (args.png.is_none() || args.scene != "bar") {
         return Err(anyhow!("--focus-class only goes with bar --png\n{USAGE}"));
+    }
+    if args.expand.is_some() && (args.png.is_none() || args.scene != "bar") {
+        return Err(anyhow!("--expand only goes with bar --png\n{USAGE}"));
     }
     Ok(args)
 }
@@ -318,6 +327,9 @@ struct App {
     /// The scene on screen changed since the last frame (the Fn layer, the sleep
     /// layer): the loop cross-fades over this long.
     cross_fade: Option<Duration>,
+    /// Hyprland's state as made up by `--expand` (previews) and tests, used
+    /// instead of the real one.
+    fake_hypr: Option<hypr::HyprState>,
 }
 
 /// The bar at rest (`[idle]`).
@@ -909,7 +921,10 @@ impl App {
         if layer.items.iter().any(gone) {
             layer.to_mut().items.retain(|i| !gone(i));
         }
-        let hypr = self.hypr.connected().then_some(&self.hypr.state);
+        let hypr = match &self.fake_hypr {
+            Some(fake) => Some(fake),
+            None => self.hypr.connected().then_some(&self.hypr.state),
+        };
         let mut scene = scenes::bar_with(w, h, font, &layer, &mut self.icons, hypr)?;
         // `text` items show what clients have already set.
         for (key, value) in &self.store {
@@ -1458,6 +1473,71 @@ impl App {
         w.map_or_else(Default::default, |w| (w.class.clone(), w.title.clone()))
     }
 
+    /// `--expand <class>`: Hyprland made up with one window of `class`,
+    /// focused, on workspace 1; every workspaces item shows its buttons out.
+    fn expand_preview(&mut self, class: &str) -> Result<()> {
+        self.fake_hypr = Some(hypr::HyprState {
+            workspaces: [(1, "1".to_string())].into(),
+            active_workspace: Some(1),
+            windows: vec![hypr::Window {
+                addr: "preview".into(),
+                class: class.into(),
+                title: String::new(),
+                workspace: 1,
+            }],
+            focused: Some("preview".into()),
+        });
+        self.scene = self.build_scene()?;
+        let items: Vec<String> = self
+            .config
+            .layers
+            .iter()
+            .flat_map(|l| &l.items)
+            .filter(|i| i.kind == ItemKind::Workspaces)
+            .filter_map(|i| i.id().map(String::from))
+            .collect();
+        let opened = items.iter().any(|id| self.open_app_row(id, "preview", false));
+        if !opened {
+            eprintln!("--expand: no workspaces item with app_actions for {class:?} on this layer");
+        }
+        Ok(())
+    }
+
+    /// Hyprland's state, if there is one (made up in previews and tests).
+    fn hypr_state(&self) -> Option<&hypr::HyprState> {
+        match &self.fake_hypr {
+            Some(fake) => Some(fake),
+            None => self.hypr.connected().then_some(&self.hypr.state),
+        }
+    }
+
+    /// Window `addr` was tapped in workspaces item `item` (and asked for the
+    /// focus): its app's buttons unfold, if it has some. Returns whether they did.
+    fn open_app_row(&mut self, item: &str, addr: &str, animate: bool) -> bool {
+        let Some(state) = self.hypr_state().cloned() else {
+            return false;
+        };
+        let t = self.epoch.elapsed();
+        let scene = self.idle.scene.as_mut().or(self.fnl.scene.as_mut()).unwrap_or(&mut self.scene);
+        scene.open_app_row(item, addr, &state, t, animate)
+    }
+
+    /// Hyprland's state changed: unfolded app buttons learn their window has the
+    /// focus, or fold (another app or workspace, the window gone). Returns
+    /// whether the bar changed.
+    fn sync_app_rows(&mut self) -> bool {
+        let Some(state) = self.hypr_state().cloned() else {
+            return false;
+        };
+        let t = self.epoch.elapsed();
+        let font = &self.font;
+        let mut changed = self.scene.sync_app_rows(&state, t, font);
+        for s in [&mut self.fnl.scene, &mut self.idle.scene].into_iter().flatten() {
+            changed |= s.sync_app_rows(&state, t, font);
+        }
+        changed
+    }
+
     /// Hyprland's focus changed: app_keys items on every layer show the new
     /// window's set, cross-faded. Returns whether the bar changed (a new title,
     /// or another window of the same class, changes nothing).
@@ -1812,6 +1892,9 @@ fn main() -> Result<()> {
             touchbar_light: None,
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
+        if let Some(class) = app.args.expand.clone() {
+            app.expand_preview(&class)?;
+        }
         // Give mpv a moment to report its state, so the preview shows it.
         if let Some(m) = &mut app.mpv {
             let end = Instant::now() + Duration::from_millis(300);
@@ -1994,6 +2077,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
             ..IdleSide::default()
         },
         cross_fade: None,
+        fake_hypr: None,
     };
     app.sync_mpv();
     app.sync_recorder();
@@ -2604,10 +2688,13 @@ fn run(
                                     eprintln!("workspaces: {e:#}");
                                 }
                             }
-                            UiEvent::FocusWindow(_, addr) => {
+                            UiEvent::FocusWindow(item, addr) => {
+                                // Focus first: its buttons (if any) work once
+                                // Hyprland says the window has it.
                                 if let Err(e) = app.hypr.dispatch_focus_window(addr) {
                                     eprintln!("workspaces: {e:#}");
                                 }
+                                dirty |= app.open_app_row(item, addr, true);
                             }
                             UiEvent::Overview(item) => app.on_overview(item),
                         }
@@ -2620,6 +2707,7 @@ fn run(
                         let (st, font) = (&app.hypr.state, &app.font);
                         dirty |= app.scene.set_workspaces(st, t, font, &mut app.icons);
                         dirty |= app.sync_app_keys();
+                        dirty |= app.sync_app_rows();
                         let st = &app.hypr.state;
                         let focused = st
                             .focused_window()
@@ -2756,6 +2844,7 @@ mod tests {
                 status: None,
                 layer: None,
                 focus_class: None,
+                expand: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -2869,6 +2958,7 @@ mod tests {
                 status: None,
                 layer: None,
                 focus_class: None,
+                expand: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3120,6 +3210,7 @@ mod tests {
                 status: None,
                 layer: None,
                 focus_class: None,
+                expand: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3213,6 +3304,7 @@ mod tests {
                 status: None,
                 layer: None,
                 focus_class: None,
+                expand: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3480,6 +3572,7 @@ mod tests {
                 status: None,
                 layer: None,
                 focus_class: None,
+                expand: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3664,7 +3757,7 @@ mod tests {
         );
         fs::write(&path, toml).unwrap();
         let parts = AppParts {
-            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None },
+            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
             font: Font::find(FONT_CANDIDATES),
@@ -3723,6 +3816,7 @@ mod tests {
                 status: None,
                 layer: None,
                 focus_class: None,
+                expand: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3812,6 +3906,170 @@ mod tests {
             vec![(vec![ctrl, shift], 1), (vec![key], 1), (vec![key], 0), (vec![shift, ctrl], 0)]
         );
         assert_eq!(app.key_queue.next_deadline(), None, "nothing left: no timer");
+    }
+
+
+    /// The daemon's App with a workspaces item (kitty buttons) and [fn] and
+    /// [idle], on a made-up Hyprland: workspaces 2 (kitty a1, focused; firefox
+    /// b2) and 4 (Code c3), every strip open.
+    fn ws_app(dir: &Path) -> App {
+        let toml = "[fn]\ndelay_ms = 0\ntransition_ms = 0\n\
+             [idle]\nsleep_after_s = 10\nsleep_layer = 'idle'\n\
+             [[layers]]\nid = 'main'\n\
+             [[layers.items]]\ntype = 'workspaces'\nid = 'ws'\nwidth = 700\nstrip = 'all'\n\
+             [[layers.items.app_actions]]\nclass = ['kitty']\n\
+             [[layers.items.app_actions.children]]\nlabel = 'Tab'\naction = { type = 'keys', keys = 'ctrl+shift+t' }\n\
+             [[layers.items.app_actions.children]]\nlabel = 'Copy'\naction = { type = 'keys', keys = 'ctrl+shift+c' }\n\
+             [[layers.items.app_actions]]\nclass = ['Code']\n\
+             [[layers.items.app_actions.children]]\nlabel = 'P'\naction = { type = 'keys', keys = 'ctrl+p' }\n\
+             [[layers]]\nid = 'idle'\n[[layers.items]]\ntype = 'spacer'\n\
+             [[layers]]\nid = 'fn'\n[[layers.items]]\ntype = 'button'\nid = 'f1'\nlabel = 'F1'\n\
+             action = { type = 'key', key = 'KEY_F1', hold = true }\n";
+        let path = dir.join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+                layer: None,
+                focus_class: None,
+                expand: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: None,
+            follow_fn: false,
+            touchbar_light: None,
+        };
+        let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
+        app.fake_hypr = Some(crate::workspaces::tests::state());
+        app.rebuild().unwrap();
+        app
+    }
+
+    /// Touches a window's icon as the loop does: the tap, then its focus
+    /// request and buttons. Returns what was reported.
+    fn tap_window(app: &mut App, addr: &str, t: Duration) -> Vec<UiEvent> {
+        let w = &app.scene.first_ws().0;
+        let r = w.rect;
+        let y = r.y + r.h / 2.0;
+        let hit = crate::workspaces::Hit::Window(addr.into());
+        let xs: Vec<f32> = (r.x as i32..(r.x + r.w) as i32)
+            .map(|x| x as f32)
+            .filter(|&x| w.hit(x, y, t).as_ref() == Some(&hit))
+            .collect();
+        let at = ((xs[0] + xs[xs.len() - 1]) / 2.0, y);
+        loop_tap(app, at, t)
+    }
+
+    /// A tap at `at`, with the loop's handling of what it reports.
+    fn loop_tap(app: &mut App, at: (f32, f32), t: Duration) -> Vec<UiEvent> {
+        let mut out = Vec::new();
+        app.on_touch(Phase::Down, at, t, &mut out);
+        app.on_touch(Phase::Up, at, t + MS(20), &mut out);
+        for e in &out {
+            match e {
+                UiEvent::Tap(id) => app.on_tap(id),
+                UiEvent::FocusWindow(item, addr) => {
+                    app.open_app_row(item, addr, true);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The middle of the unfolded row's `n`th of `of` buttons.
+    fn row_at(app: &App, n: usize, of: usize) -> (f32, f32) {
+        let r = app.scene.first_ws().0.rect;
+        let x0 = r.x + r.h + 8.0;
+        let w = (r.x + r.w - x0) / of as f32;
+        (x0 + w * (n as f32 + 0.5), r.y + r.h / 2.0)
+    }
+
+    /// What the virtual keyboard got from the chords sent so far.
+    fn keys_sent(app: &mut App) -> Vec<(Vec<KeyCode>, i32)> {
+        let mut rec = crate::keys::tests::Recorder::default();
+        while let Some(at) = app.key_queue.next_deadline() {
+            app.key_queue.poll(at, Some(&mut rec));
+        }
+        rec.0
+    }
+
+    #[test]
+    fn a_tapped_app_icon_unfolds_buttons_that_send_chords_to_it() {
+        let dir = tmp("apps-keys");
+        let mut app = ws_app(&dir);
+        // firefox: no buttons, only the focus.
+        let out = tap_window(&mut app, "b2", S(1));
+        assert_eq!(out, vec![UiEvent::FocusWindow("ws".into(), "0xb2".into())]);
+        assert_eq!(app.scene.app_row("ws"), None);
+        // kitty, focused: its buttons, and a tap sends its chord.
+        tap_window(&mut app, "a1", S(2));
+        assert_eq!(app.scene.app_row("ws"), Some(("kitty", true)));
+        let live = app.live();
+        app.scene.advance(S(3), &live);
+        let at = row_at(&app, 0, 2);
+        assert_eq!(loop_tap(&mut app, at, S(3)), vec![UiEvent::Tap("ws.kitty.1".into())]);
+        let (ctrl, shift, t) = (KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_T);
+        assert_eq!(
+            keys_sent(&mut app),
+            vec![(vec![ctrl, shift], 1), (vec![t], 1), (vec![t], 0), (vec![shift, ctrl], 0)]
+        );
+    }
+
+    #[test]
+    fn no_keys_until_hyprland_says_the_window_has_the_focus() {
+        let dir = tmp("apps-focus");
+        let mut app = ws_app(&dir);
+        tap_window(&mut app, "c3", S(1));
+        assert_eq!(app.scene.app_row("ws"), Some(("Code", false)));
+        let live = app.live();
+        app.scene.advance(S(2), &live);
+        let at = row_at(&app, 0, 1);
+        assert!(loop_tap(&mut app, at, S(2)).is_empty());
+        assert!(keys_sent(&mut app).is_empty(), "nothing to kitty, which still has it");
+        // Hyprland: workspace 4, Code focused.
+        let st = app.fake_hypr.as_mut().unwrap();
+        st.active_workspace = Some(4);
+        st.focused = Some("c3".into());
+        app.sync_app_rows();
+        assert_eq!(loop_tap(&mut app, at, S(3)), vec![UiEvent::Tap("ws.code.1".into())]);
+        assert_eq!(keys_sent(&mut app).len(), 4);
+        // Back to workspace 2: folded.
+        let st = app.fake_hypr.as_mut().unwrap();
+        st.active_workspace = Some(2);
+        st.focused = Some("a1".into());
+        assert!(app.sync_app_rows());
+        assert_eq!(app.scene.app_row("ws"), None);
+    }
+
+    #[test]
+    fn fn_and_rest_fold_the_app_buttons_at_once() {
+        let dir = tmp("apps-fn");
+        let mut app = ws_app(&dir);
+        tap_window(&mut app, "a1", S(1));
+        assert!(app.scene.app_row("ws").is_some());
+        app.on_fn_events(&[FnEvent::Pressed], app.epoch + S(2));
+        assert!(fn_shown(&app));
+        assert_eq!(app.scene.app_row("ws"), None, "folded at once under the Fn layer");
+        app.on_fn_events(&[FnEvent::Released], app.epoch + S(3));
+        tap_window(&mut app, "a1", S(4));
+        assert!(app.scene.app_row("ws").is_some());
+        // Ten seconds after that touch (each touch counts as activity).
+        app.on_idle_timer(app.epoch + S(30));
+        assert_eq!(app.idle.stage(), Stage::Sleep);
+        assert_eq!(app.scene.app_row("ws"), None, "and asleep");
+        let t = app.epoch.elapsed() + S(20);
+        assert_eq!(app.scene.next_change(t), None, "nothing runs");
     }
 }
 

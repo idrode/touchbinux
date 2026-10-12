@@ -7,6 +7,7 @@ mod display;
 mod expandable;
 mod expander;
 mod fnkey;
+mod fnlayer;
 mod frame;
 mod gif;
 mod gifpick;

@@ -6,6 +6,7 @@ mod config;
 mod display;
 mod expandable;
 mod expander;
+mod fnkey;
 mod frame;
 mod gif;
 mod gifpick;

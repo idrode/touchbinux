@@ -10,6 +10,9 @@ pub fn supported(key: KeyCode) -> bool {
     (1..=0xff).contains(&key.code())
 }
 
+/// Our uinput device's name (other code must not take it for a real keyboard).
+pub const NAME: &str = "touchbinux virtual keyboard";
+
 pub struct VirtualKeyboard {
     dev: VirtualDevice,
 }
@@ -24,7 +27,7 @@ impl VirtualKeyboard {
         }
         let dev = VirtualDevice::builder()
             .context("opening /dev/uinput")?
-            .name("touchbinux virtual keyboard")
+            .name(NAME)
             .with_keys(&keys)?
             .build()
             .context("creating uinput device")?;
@@ -35,10 +38,32 @@ impl VirtualKeyboard {
     /// Press and release.
     pub fn tap(&mut self, key: KeyCode) -> Result<()> {
         for value in [1, 0] {
-            self.dev
-                .emit(&[InputEvent::new(EventType::KEY.0, key.code(), value)])
-                .with_context(|| format!("emitting {key:?}"))?;
+            self.emit(&[key], value)?;
         }
         Ok(())
+    }
+
+    /// Presses `mods` (in order), then `key`, and leaves them down: the compositor
+    /// repeats `key` as for a physical one, until `release`.
+    pub fn press(&mut self, mods: &[KeyCode], key: KeyCode) -> Result<()> {
+        let keys: Vec<KeyCode> = mods.iter().copied().chain([key]).collect();
+        self.emit(&keys, 1)
+    }
+
+    /// Releases what `press` pressed: `key`, then `mods`.
+    pub fn release(&mut self, mods: &[KeyCode], key: KeyCode) -> Result<()> {
+        let keys: Vec<KeyCode> = [key].into_iter().chain(mods.iter().rev().copied()).collect();
+        self.emit(&keys, 0)
+    }
+
+    /// One report (a single SYN_REPORT, added by `emit`) with `keys` set to `value`.
+    fn emit(&mut self, keys: &[KeyCode], value: i32) -> Result<()> {
+        let events: Vec<InputEvent> = keys
+            .iter()
+            .map(|k| InputEvent::new(EventType::KEY.0, k.code(), value))
+            .collect();
+        self.dev
+            .emit(&events)
+            .with_context(|| format!("emitting {keys:?} = {value}"))
     }
 }

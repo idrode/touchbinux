@@ -264,6 +264,8 @@ struct App {
     battery: Option<Battery>,
     battery_status: Option<BatteryStatus>,
     keyboard: Option<VirtualKeyboard>,
+    /// Chords (`keys` actions) being sent.
+    key_queue: keys::KeyQueue,
     scene: Scene,
     /// Reads gif_picker folders off the main loop; `None` (previews) reads inline.
     loader: Option<Loader>,
@@ -1351,8 +1353,25 @@ impl App {
                 (None, _) => eprintln!("action: no virtual keyboard for {key}"),
                 (_, Err(_)) => eprintln!("action: unknown key {key}"),
             },
+            Action::Keys { keys } => match keys::Chord::parse(keys) {
+                Ok(chord) => {
+                    if self.keyboard.is_none() {
+                        eprintln!("action: no virtual keyboard for {keys}");
+                    }
+                    eprintln!("action: keys {keys}");
+                    // Sent step by step from the loop (KeyQueue): no sleeping here.
+                    self.key_queue.push(&chord, Instant::now());
+                }
+                Err(e) => eprintln!("action: keys {e}"),
+            },
             Action::Socket => {}
         }
+    }
+
+    /// Sends the chord steps that are due.
+    fn poll_keys(&mut self, now: Instant) {
+        let sink = self.keyboard.as_mut().map(|k| k as &mut dyn keys::KeySink);
+        self.key_queue.poll(now, sink);
     }
 
     fn on_level(&mut self, level: Level, value: u8) {
@@ -1851,8 +1870,10 @@ fn main() -> Result<()> {
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         let result = run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app);
-        // However it ends, no key is left down on the virtual keyboard.
+        // However it ends, no key is left down on the virtual keyboard: a chord
+        // half sent goes out to its end (its modifiers up).
         app.release_held();
+        app.poll_keys(Instant::now() + Duration::from_secs(3600));
         result
     })();
 
@@ -1906,6 +1927,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
             .ok(),
         battery_status: None,
         keyboard: p.keyboard,
+        key_queue: keys::KeyQueue::default(),
         scene: Scene::new(w, h)?,
         loader: p.loader,
         pickers: BTreeMap::new(),
@@ -2262,6 +2284,7 @@ fn run(
         if let Some(l) = &mut app.idle.light {
             l.poll(now);
         }
+        app.poll_keys(now);
         dirty |= app.sync_idle_hold(now);
         if let Some(b) = &mut app.backlight {
             b.poll(now);
@@ -2386,6 +2409,7 @@ fn run(
             app.recorder.next_deadline(),
             app.rec_watch.as_ref().and_then(RecWatch::next_deadline),
             app.idle.light.as_ref().and_then(BarLight::next_deadline),
+            app.key_queue.next_deadline(),
         ]
         .into_iter()
         .flatten()

@@ -1839,6 +1839,9 @@ pub enum Action {
         #[serde(default)]
         hold: bool,
     },
+    /// A chord on the virtual keyboard, e.g. `"ctrl+shift+t"`: the modifiers
+    /// down, the key down and up, the modifiers up (see `keys::Chord`).
+    Keys { keys: String },
     /// Do nothing locally; the tap is only reported on the socket.
     Socket,
 }
@@ -2208,6 +2211,9 @@ fn validate_action(what: &str, action: &Action) -> Result<()> {
             if !crate::keys::supported(code) {
                 bail!("{what}: key {key:?} not on the virtual keyboard");
             }
+        }
+        Action::Keys { keys } => {
+            crate::keys::Chord::parse(keys).map_err(|e| anyhow::anyhow!("{what}: keys {e}"))?;
         }
         Action::Socket => {}
     }
@@ -3992,4 +3998,28 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("is the [idle] sleep_layer"), "{err:#}");
     }
+
+    #[test]
+    fn keys_actions_are_checked_when_loading() {
+        let button = |keys: &str| {
+            parse(&format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='B'\n\
+                 action = {{ type = 'keys', keys = '{keys}' }}"
+            ))
+        };
+        let c = button("ctrl+shift+t").unwrap();
+        assert!(matches!(c.action("b"), Some(Action::Keys { keys }) if keys == "ctrl+shift+t"));
+        let err = format!("{:#}", button("ctrl+shift+tee").unwrap_err());
+        assert!(err.contains("button \"b\": keys \"ctrl+shift+tee\": unknown key \"tee\""), "{err}");
+        let err = format!("{:#}", button("ctrl").unwrap_err());
+        assert!(err.contains("a chord needs a key last"), "{err}");
+        // `keys` takes nothing else.
+        let err = parse(
+            "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='b'\nlabel='B'\n\
+             action = { type = 'keys', keys = 'esc', hold = true }",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unknown field `hold`"), "{err:#}");
+    }
 }
+

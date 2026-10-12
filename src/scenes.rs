@@ -8,7 +8,7 @@ use crate::{
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
         BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
-        DEFAULT_MAX_ICONS, ItemConfig, WsStyle,
+        Action, DEFAULT_MAX_ICONS, ItemConfig, WsStyle,
         ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
@@ -141,6 +141,8 @@ struct Button {
     anim: Option<usize>,
     /// Its `drag_children`, pulled out by dragging it to the right.
     pull: Option<Pull>,
+    /// A key held while the finger is on it (`hold = true`), instead of a tap.
+    hold: bool,
 }
 
 /// A button's `drag_children` row.
@@ -296,6 +298,9 @@ enum Capture {
     None,
     /// Button index and whether the finger is currently inside it.
     Button(usize, bool),
+    /// A held-key button (`Button::hold`) and whether its key is down: from the
+    /// finger landing until it lifts or slides off (and then up for good).
+    Key(usize, bool),
     Slider(usize),
     /// Tap on a folded expander (it unfolds); whether the finger is still on it.
     ExpanderTap(usize, bool),
@@ -499,7 +504,9 @@ impl Scene {
     /// The button drawn pressed: under the finger, as long as it is still a tap.
     fn pressed_button(&self) -> Option<usize> {
         match self.capture {
-            Capture::Button(i, true) | Capture::Pull(i, _, PullState::Tap) => Some(i),
+            Capture::Button(i, true) | Capture::Key(i, true) | Capture::Pull(i, _, PullState::Tap) => {
+                Some(i)
+            }
             _ => None,
         }
     }
@@ -745,6 +752,7 @@ impl Scene {
                             self.menus[p.menu].fold.touch_down();
                             Capture::Pull(i, (x, y), PullState::Tap)
                         }
+                        None if self.buttons[i].hold => Capture::Key(i, true),
                         None => Capture::Button(i, true),
                     }
                 } else if let Some(i) = self.sliders.iter().position(|s| contains(s.rect, x, y)) {
@@ -763,6 +771,11 @@ impl Scene {
                 // Leaving the button un-highlights it; coming back re-highlights it.
                 self.capture = Capture::Button(i, contains(self.buttons[i].rect, x, y));
             }
+            (Phase::Move, Capture::Key(i, true)) if !contains(self.buttons[i].rect, x, y) => {
+                // Sliding off releases the key; coming back doesn't press it again.
+                self.capture = Capture::Key(i, false);
+            }
+            (Phase::Move, Capture::Key(..)) => {}
             (Phase::Move, Capture::Pull(i, from, state)) => {
                 let next = self.pull_move(i, from, state, (x, y));
                 changed |= next == PullState::Pulling;
@@ -951,7 +964,8 @@ impl Scene {
                         }
                         changed = true;
                     }
-                    Capture::None | Capture::Blocked => {}
+                    // The daemon releases the key when `held_key` no longer says it.
+                    Capture::Key(..) | Capture::None | Capture::Blocked => {}
                 }
                 self.capture = Capture::None;
             }
@@ -988,6 +1002,15 @@ impl Scene {
                 .iter()
                 .position(|b| b.id == old.buttons[i].id)
                 .map_or(Capture::None, |j| Capture::Button(j, inside)),
+            // Still held only if it is still a held key; otherwise ignored until the
+            // finger lifts (and the daemon releases the key).
+            Capture::Key(i, down) => {
+                let id = &old.buttons[i].id;
+                match self.buttons.iter().position(|b| &b.id == id) {
+                    Some(j) if self.buttons[j].hold => Capture::Key(j, down),
+                    _ => Capture::Blocked,
+                }
+            }
             Capture::Slider(i) => {
                 let o = &old.sliders[i];
                 match self.sliders.iter_mut().position(|s| s.id == o.id) {
@@ -1037,6 +1060,39 @@ impl Scene {
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
+    }
+
+    /// The held-key button whose key must be down now, by id.
+    pub fn held_key(&self) -> Option<&str> {
+        match self.capture {
+            Capture::Key(i, true) => Some(&self.buttons[i].id),
+            _ => None,
+        }
+    }
+
+    /// This scene leaves the screen (the Fn layer comes or goes): a touch in
+    /// progress (the followed finger at `finger`) is cancelled as by a lost
+    /// touch, and everything unfolded folds at once, without animating.
+    pub fn interrupt(&mut self, finger: Option<(f32, f32)>, t: Duration, font: &Font) {
+        if let Some(at) = finger {
+            self.handle_touch(Phase::Cancel, at, t, font, &mut Vec::new());
+        }
+        self.capture = Capture::None;
+        for e in &mut self.expanders {
+            e.drag = None;
+            e.fold.close_now();
+        }
+        for m in &mut self.menus {
+            m.fold.close_now();
+        }
+        self.ws_target = None;
+        self.ws_hover = None;
+    }
+
+    /// This scene comes on screen under a finger that landed on another one: that
+    /// touch does nothing here until it lifts.
+    pub fn block_touch(&mut self) {
+        self.capture = Capture::Blocked;
     }
 
     /// Whether the player is unfolded (or unfolding): its seek bar wants mpv's
@@ -1183,6 +1239,7 @@ impl Scene {
             anim,
             text: None,
             pull: None,
+            hold: false,
         });
     }
 
@@ -1236,6 +1293,7 @@ impl Scene {
             anim: None,
             text: None,
             pull: None,
+            hold: false,
         });
     }
 
@@ -1687,6 +1745,11 @@ pub fn bar_with(
                     spec.style.text = c;
                 }
                 scene.add_button(rect, font, spec);
+                if item.action.as_ref().and_then(Action::held_key).is_some()
+                    && let Some(b) = scene.buttons.last_mut()
+                {
+                    b.hold = true;
+                }
                 if item.drags() {
                     // Its row, under the button's id, in the button's box style.
                     let children = children(item, &frame, rect.h, icons, font, size)?;
@@ -1836,6 +1899,7 @@ pub fn bar_with(
                     anim: None,
                     text: Some(scene.texts.len() - 1),
                     pull: None,
+                    hold: false,
                 });
             }
             ItemKind::Workspaces => {
@@ -4785,5 +4849,99 @@ mod tests {
         for (n, ms) in [0, 72, 144, 216, 288, 360].into_iter().enumerate() {
             shot(&mut s, MS(2000 + ms), &format!("d-merge-{n}-{ms}ms"));
         }
+    }
+
+    /// [F1 held] [F2 held] [tap]
+    const HELD: &str = r#"
+        [[layers]]
+        id = "fn"
+        [[layers.items]]
+        type = "button"
+        id = "f1"
+        label = "F1"
+        action = { type = "key", key = "KEY_F1", hold = true }
+        [[layers.items]]
+        type = "button"
+        id = "f2"
+        label = "F2"
+        action = { type = "key", key = "KEY_F2", hold = true }
+        [[layers.items]]
+        type = "button"
+        id = "tap"
+        label = "T"
+        action = { type = "key", key = "KEY_F3" }
+    "#;
+
+    #[test]
+    fn a_held_key_is_down_while_the_finger_is_on_it() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, HELD);
+        let (f1, f2, t) = (s.buttons[0].rect, s.buttons[1].rect, s.buttons[2].rect);
+        let mut out = Vec::new();
+        assert_eq!(s.held_key(), None);
+        // Down on F1: held, drawn pressed, no tap reported.
+        assert!(s.handle_touch(Phase::Down, mid(f1), MS(0), &font, &mut out));
+        assert_eq!(s.held_key(), Some("f1"));
+        assert_eq!(s.pressed_button(), Some(0));
+        s.handle_touch(Phase::Move, (f1.x + 2.0, mid(f1).1), MS(10), &font, &mut out);
+        assert_eq!(s.held_key(), Some("f1"), "moving inside keeps it");
+        // Slides onto F2: F1 goes up, and F2 isn't pressed.
+        s.handle_touch(Phase::Move, mid(f2), MS(20), &font, &mut out);
+        assert_eq!(s.held_key(), None);
+        s.handle_touch(Phase::Move, mid(f1), MS(30), &font, &mut out);
+        assert_eq!(s.held_key(), None, "coming back doesn't press it again");
+        s.handle_touch(Phase::Up, mid(f1), MS(40), &font, &mut out);
+        assert!(out.is_empty(), "held keys report no taps: {out:?}");
+        // Down and up again: held, then released.
+        s.handle_touch(Phase::Down, mid(f2), MS(50), &font, &mut out);
+        assert_eq!(s.held_key(), Some("f2"));
+        s.handle_touch(Phase::Cancel, mid(f2), MS(60), &font, &mut out);
+        assert_eq!(s.held_key(), None, "a lost touch releases it");
+        // An ordinary key button still taps on release.
+        let (_, ev) = tap(&mut s, mid(t), MS(70), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("tap".into())]);
+        assert_eq!(s.held_key(), None);
+    }
+
+    #[test]
+    fn interrupt_cancels_the_touch_and_folds_at_once() {
+        let Some(font) = font() else { return };
+        let mut s = scene(&font);
+        let live = live();
+        let vol = s.expanders[0].rect;
+        // Volume unfolded and being dragged.
+        tap(&mut s, mid(vol), MS(0), &font);
+        s.advance(MS(500), &live);
+        let open = s.expanders[0].open_rect;
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, mid(open), MS(500), &font, &mut out);
+        assert!(matches!(s.capture, Capture::ExpanderDrag(_)), "dragging");
+        s.interrupt(Some(mid(open)), MS(510), &font);
+        assert!(s.capture == Capture::None && s.expanders[0].drag.is_none());
+        assert_eq!(s.expanders[0].fold.progress(MS(510)), 0.0, "folded, not folding");
+        s.advance(MS(510), &live);
+        assert_eq!(s.next_change(MS(510)), None, "nothing left to animate");
+        // A held key interrupted: released.
+        let mut k = menu_scene(&font, HELD);
+        let f1 = k.buttons[0].rect;
+        k.handle_touch(Phase::Down, mid(f1), MS(0), &font, &mut out);
+        k.interrupt(Some(mid(f1)), MS(5), &font);
+        assert_eq!(k.held_key(), None);
+    }
+
+    #[test]
+    fn a_blocked_touch_does_nothing_until_it_lifts() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, HELD);
+        let (f1, t) = (s.buttons[0].rect, s.buttons[2].rect);
+        let mut out = Vec::new();
+        s.block_touch();
+        s.handle_touch(Phase::Move, mid(f1), MS(0), &font, &mut out);
+        assert_eq!(s.held_key(), None);
+        s.handle_touch(Phase::Up, mid(t), MS(10), &font, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        // The next touch works.
+        s.handle_touch(Phase::Down, mid(f1), MS(20), &font, &mut out);
+        assert_eq!(s.held_key(), Some("f1"));
     }
 }

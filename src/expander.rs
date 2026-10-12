@@ -81,6 +81,12 @@ impl Fold {
         self.collapse_at = None;
     }
 
+    /// Folded now, without animating, and no finger on it.
+    pub fn close_now(&mut self) {
+        self.pull_to(0.0);
+        self.held = false;
+    }
+
     /// A finger came down on it: no automatic fold until it lifts.
     pub fn touch_down(&mut self) {
         self.held = true;

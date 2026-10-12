@@ -44,14 +44,40 @@ pub enum Request {
         thumb_h: u32,
         reader: Reader,
     },
-    /// Decode `path` in full, fitted to `max_w`x`max_h`.
+    /// Decode `path` in full, fitted to `max_w`x`max_h`, unless the file still
+    /// is as `known` (the daemon has it decoded already).
     Load {
         item: String,
         path: PathBuf,
         max_w: u32,
         max_h: u32,
         reader: Reader,
+        known: Option<Stamp>,
     },
+}
+
+/// A file as far as telling it changed goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub mtime: Option<SystemTime>,
+    pub len: u64,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Result<Stamp> {
+        let meta = fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
+        Ok(Stamp {
+            mtime: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+/// What a `Load` found.
+pub enum Fresh {
+    Decoded(Frames),
+    /// The file is as the request's `known`: the daemon's copy is good.
+    Unchanged,
 }
 
 pub enum Reply {
@@ -63,7 +89,7 @@ pub enum Reply {
     Loaded {
         item: String,
         path: PathBuf,
-        result: Result<Frames, String>,
+        result: Result<(Stamp, Fresh), String>,
     },
 }
 
@@ -93,13 +119,18 @@ impl Loader {
             .spawn(move || {
                 let mut thumbs = ThumbCache::default();
                 // Ends when the Loader (the sender) is dropped.
-                for req in requests {
-                    let reply = handle(req, &mut thumbs);
-                    if replies.send(reply).is_err() {
-                        break;
+                while let Ok(first) = requests.recv() {
+                    // Whatever queued up meanwhile, minus what a newer request
+                    // replaces: a GIF picked and then another is never decoded.
+                    let queued = std::iter::once(first).chain(requests.try_iter()).collect();
+                    for req in coalesce(queued) {
+                        let reply = handle(req, &mut thumbs);
+                        if replies.send(reply).is_err() {
+                            return;
+                        }
+                        // A full buffer already holds wake-ups: losing this one is fine.
+                        let _ = (&wake_tx).write(&[1]);
                     }
-                    // A full buffer already holds wake-ups: losing this one is fine.
-                    let _ = (&wake_tx).write(&[1]);
                 }
             })
             .context("gif loader: starting the thread")?;
@@ -131,6 +162,98 @@ impl Loader {
     }
 }
 
+/// `reqs` in order, without the ones a later request for the same item makes
+/// pointless: an older `Load` (another GIF was chosen) or `Scan` (listed again).
+fn coalesce(reqs: Vec<Request>) -> Vec<Request> {
+    let key = |r: &Request| match r {
+        Request::Scan { item, .. } => (0, item.clone()),
+        Request::Load { item, .. } => (1, item.clone()),
+    };
+    let keys: Vec<_> = reqs.iter().map(key).collect();
+    reqs.into_iter()
+        .enumerate()
+        .filter(|(i, _)| !keys[i + 1..].contains(&keys[*i]))
+        .map(|(_, r)| r)
+        .collect()
+}
+
+/// Decoded GIFs kept for picking them again: at most this many bytes of frames.
+pub const CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// GIFs already decoded for the bar, by file and box, least recently used first
+/// out. Only the main thread has it (a `Gif` shares its frames); whether a file
+/// changed is checked by the loader, as the user (`Request::Load::known`).
+pub struct GifCache {
+    entries: Vec<Cached>,
+    max: usize,
+}
+
+struct Cached {
+    path: PathBuf,
+    size: (u32, u32),
+    stamp: Stamp,
+    gif: Gif,
+    bytes: usize,
+}
+
+impl GifCache {
+    pub fn new(max: usize) -> GifCache {
+        GifCache {
+            entries: Vec::new(),
+            max,
+        }
+    }
+
+    fn find(&self, path: &Path, size: (u32, u32)) -> Option<usize> {
+        self.entries.iter().position(|e| e.path == path && e.size == size)
+    }
+
+    /// The file as it was when `path` was decoded for `size`.
+    pub fn stamp(&self, path: &Path, size: (u32, u32)) -> Option<Stamp> {
+        self.find(path, size).map(|i| self.entries[i].stamp)
+    }
+
+    /// The GIF, now the most recently used.
+    pub fn get(&mut self, path: &Path, size: (u32, u32)) -> Option<Gif> {
+        let e = self.entries.remove(self.find(path, size)?);
+        let gif = e.gif.clone();
+        self.entries.push(e);
+        Some(gif)
+    }
+
+    /// Keeps `gif` (`bytes` of frames), dropping the least recently used ones
+    /// past the limit (never this one).
+    pub fn insert(&mut self, path: PathBuf, size: (u32, u32), stamp: Stamp, gif: Gif, bytes: usize) {
+        if let Some(i) = self.find(&path, size) {
+            self.entries.remove(i);
+        }
+        self.entries.push(Cached {
+            path,
+            size,
+            stamp,
+            gif,
+            bytes,
+        });
+        while self.bytes() > self.max && self.entries.len() > 1 {
+            self.entries.remove(0);
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.entries.iter().map(|e| e.bytes).sum()
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// The bytes of `frames`' pixels.
+pub fn frames_bytes(frames: &Frames) -> usize {
+    frames.frames.iter().map(|i| i.width() as usize * i.height() as usize * 4).sum()
+}
+
 /// Runs a request synchronously (for `--png` previews, and tests).
 pub fn handle_now(req: Request) -> Reply {
     handle(req, &mut ThumbCache::default())
@@ -155,13 +278,23 @@ fn handle(req: Request, thumbs: &mut ThumbCache) -> Reply {
             max_w,
             max_h,
             reader,
+            known,
         } => {
             let result = as_reader(reader)
-                .and_then(|()| decode_fitted(&path, max_w, max_h, false))
+                .and_then(|()| load(&path, max_w, max_h, known))
                 .map_err(|e| format!("{e:#}"));
             Reply::Loaded { item, path, result }
         }
     }
+}
+
+/// `path` decoded, unless it is still as `known`.
+fn load(path: &Path, max_w: u32, max_h: u32, known: Option<Stamp>) -> Result<(Stamp, Fresh)> {
+    let stamp = Stamp::of(path)?;
+    if known == Some(stamp) {
+        return Ok((stamp, Fresh::Unchanged));
+    }
+    Ok((stamp, Fresh::Decoded(decode_fitted(path, max_w, max_h, false)?)))
 }
 
 /// Makes this thread's file accesses those of `reader`. A daemon that isn't root
@@ -261,11 +394,21 @@ fn scan(dir: &Path, thumb_h: u32, cache: &mut ThumbCache) -> Result<Vec<Entry>> 
     Ok(entries)
 }
 
+/// What a gif_picker shows in the bar.
+pub enum PickerShow {
+    Gif(Gif, Play),
+    /// The outline picture: nothing chosen (or `loading = "icon"`).
+    Icon,
+    /// Nothing (`loading = "none"` while loading).
+    Blank,
+}
+
 /// A gif_picker's icon in the bar: the chosen GIF, or an outline picture while
 /// there is none (grey while there is nothing to choose).
 pub enum PickerFace {
     Empty { enabled: bool },
     Gif(GifPlayer),
+    Blank,
 }
 
 impl PickerFace {
@@ -282,25 +425,98 @@ impl Animated for PickerFace {
                 let color = if *enabled { ICON } else { DIM.with_alpha(0x90) };
                 draw_picture(canvas, rect.centered_square(), color);
             }
+            PickerFace::Blank => {}
         }
     }
 
     fn next_change(&self, t: Duration) -> Option<Duration> {
         match self {
             PickerFace::Gif(p) => p.next_change(t),
-            PickerFace::Empty { .. } => None,
+            PickerFace::Empty { .. } | PickerFace::Blank => None,
         }
     }
 
     fn on_tap(&mut self, t: Duration) -> bool {
         match self {
             PickerFace::Gif(p) => p.on_tap(t),
-            PickerFace::Empty { .. } => false,
+            PickerFace::Empty { .. } | PickerFace::Blank => false,
         }
     }
 }
 
 /// A picture frame with a sun and a hill, in lines (like `builtin:folder`).
+/// A new face cross-fading over the one it replaces, `len` from `start`. Once
+/// done, it only draws the new one (the old is dropped on the next advance).
+pub struct CrossFace {
+    old: Option<Box<dyn Animated>>,
+    new: Box<dyn Animated>,
+    start: Duration,
+    len: Duration,
+}
+
+impl CrossFace {
+    pub fn new(old: Box<dyn Animated>, new: Box<dyn Animated>, start: Duration, len: Duration) -> CrossFace {
+        CrossFace {
+            old: Some(old),
+            new,
+            start,
+            len,
+        }
+    }
+
+    /// How far the new face is in (0..=1).
+    fn progress(&self, t: Duration) -> f32 {
+        if self.len.is_zero() {
+            return 1.0;
+        }
+        (t.saturating_sub(self.start).as_secs_f32() / self.len.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    /// `face` drawn alone in a canvas the size of `rect`, as an image.
+    fn alone(face: &dyn Animated, rect: Rect, t: Duration) -> Option<Image> {
+        let (w, h) = (rect.w.ceil().max(1.0) as u32, rect.h.ceil().max(1.0) as u32);
+        let mut c = Canvas::new(w, h).ok()?;
+        face.draw(&mut c, Rect::new(0.0, 0.0, rect.w, rect.h), t);
+        Image::from_premultiplied(w, h, c.data().to_vec()).ok()
+    }
+}
+
+impl Animated for CrossFace {
+    fn draw(&self, canvas: &mut Canvas, rect: Rect, t: Duration) {
+        let k = self.progress(t);
+        let Some(old) = self.old.as_deref().filter(|_| k < 1.0) else {
+            self.new.draw(canvas, rect, t);
+            return;
+        };
+        let (x, y) = (rect.x.round() as i32, rect.y.round() as i32);
+        match (Self::alone(old, rect, t), Self::alone(self.new.as_ref(), rect, t)) {
+            (Some(a), Some(b)) => {
+                canvas.draw_image_faded(&a, x, y, 1.0 - k);
+                canvas.draw_image_faded(&b, x, y, k);
+            }
+            _ => self.new.draw(canvas, rect, t),
+        }
+    }
+
+    fn next_change(&self, t: Duration) -> Option<Duration> {
+        if self.old.is_some() && t < self.start + self.len {
+            return Some(t);
+        }
+        self.new.next_change(t)
+    }
+
+    fn on_tap(&mut self, t: Duration) -> bool {
+        self.new.on_tap(t)
+    }
+
+    fn advance(&mut self, t: Duration, live: &crate::widgets::Live) -> bool {
+        if t >= self.start + self.len {
+            self.old = None;
+        }
+        self.new.advance(t, live)
+    }
+}
+
 fn draw_picture(canvas: &mut Canvas, icon: Rect, color: Rgba) {
     let s = icon.w;
     let line = (s * 0.075).max(1.8);
@@ -430,6 +646,7 @@ pub(crate) mod tests {
             max_w: 100,
             max_h: 10,
             reader: None,
+            known: None,
         });
         let fd = loader.fd();
         let mut fds = [nix::poll::PollFd::new(
@@ -442,7 +659,7 @@ pub(crate) mod tests {
             [
                 Reply::Loaded {
                     item,
-                    result: Ok(f),
+                    result: Ok((_, Fresh::Decoded(f))),
                     ..
                 },
             ] => {
@@ -454,6 +671,155 @@ pub(crate) mod tests {
         }
         assert!(loader.drain().is_empty());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn load_req(item: &str, path: &Path, known: Option<Stamp>) -> Request {
+        Request::Load {
+            item: item.into(),
+            path: path.to_path_buf(),
+            max_w: 100,
+            max_h: 10,
+            reader: None,
+            known,
+        }
+    }
+
+    fn scan_req(item: &str) -> Request {
+        Request::Scan {
+            item: item.into(),
+            dir: PathBuf::from("/nowhere"),
+            thumb_h: 10,
+            reader: None,
+        }
+    }
+
+    /// (kind, item, path) of each request.
+    fn what(reqs: &[Request]) -> Vec<(&str, &str, String)> {
+        reqs.iter()
+            .map(|r| match r {
+                Request::Scan { item, .. } => ("scan", item.as_str(), String::new()),
+                Request::Load { item, path, .. } => ("load", item.as_str(), path.display().to_string()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_latest_request_of_each_kind_and_item_runs() {
+        let (a, b, c) = (Path::new("/g/a.gif"), Path::new("/g/b.gif"), Path::new("/g/c.gif"));
+        let queued = vec![
+            load_req("p", a, None),
+            scan_req("p"),
+            load_req("q", c, None),
+            load_req("p", b, None),
+            scan_req("p"),
+        ];
+        // a was replaced by b before the loader got to it: never decoded.
+        assert_eq!(
+            what(&coalesce(queued)),
+            vec![
+                ("load", "q", "/g/c.gif".into()),
+                ("load", "p", "/g/b.gif".into()),
+                ("scan", "p", String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_known_file_is_not_decoded_again_until_it_changes() {
+        let dir = temp_dir("known");
+        let path = dir.join("x.gif");
+        write_gif(&path, 20, 20, 4);
+        let Reply::Loaded { result: Ok((stamp, Fresh::Decoded(f))), .. } = handle_now(load_req("p", &path, None)) else {
+            panic!("not decoded");
+        };
+        assert_eq!(f.frames.len(), 4);
+        let again = handle_now(load_req("p", &path, Some(stamp)));
+        assert!(matches!(again, Reply::Loaded { result: Ok((s, Fresh::Unchanged)), .. } if s == stamp));
+        // Rewritten (another size): decoded again.
+        write_gif(&path, 20, 20, 6);
+        let Reply::Loaded { result: Ok((_, Fresh::Decoded(f))), .. } = handle_now(load_req("p", &path, Some(stamp))) else {
+            panic!("not decoded again");
+        };
+        assert_eq!(f.frames.len(), 6);
+    }
+
+    #[test]
+    fn unreadable_and_corrupt_files_are_errors_not_panics() {
+        let dir = temp_dir("corrupt");
+        let bad = dir.join("bad.gif");
+        fs::write(&bad, b"GIF89a this is not really a gif").unwrap();
+        for path in [bad, dir.join("missing.gif")] {
+            match handle_now(load_req("p", &path, None)) {
+                Reply::Loaded { result: Err(e), .. } => assert!(e.contains(&*path.to_string_lossy()), "{e}"),
+                _ => panic!("{} loaded", path.display()),
+            }
+        }
+    }
+
+    fn gif_of(dir: &Path, name: &str, frames: usize) -> (Gif, usize) {
+        let path = dir.join(name);
+        write_gif(&path, 10, 10, frames);
+        let f = decode_fitted(&path, 10, 10, false).unwrap();
+        let bytes = frames_bytes(&f);
+        (Gif::from(f), bytes)
+    }
+
+    #[test]
+    fn the_cache_keeps_the_most_recently_used_within_its_size() {
+        let dir = temp_dir("cache");
+        let (a, bytes) = gif_of(&dir, "a.gif", 2);
+        assert_eq!(bytes, 2 * 10 * 10 * 4);
+        let (b, _) = gif_of(&dir, "b.gif", 2);
+        let (c, _) = gif_of(&dir, "c.gif", 2);
+        let stamp = Stamp { mtime: None, len: 1 };
+        let size = (10, 10);
+        // Room for two.
+        let mut cache = GifCache::new(2 * bytes);
+        cache.insert(dir.join("a.gif"), size, stamp, a, bytes);
+        cache.insert(dir.join("b.gif"), size, stamp, b, bytes);
+        assert_eq!(cache.stamp(&dir.join("a.gif"), size), Some(stamp));
+        assert!(cache.stamp(&dir.join("a.gif"), (20, 20)).is_none(), "another box is another entry");
+        // a used again: b is the oldest now, and goes when c comes.
+        assert!(cache.get(&dir.join("a.gif"), size).is_some());
+        cache.insert(dir.join("c.gif"), size, stamp, c.clone(), bytes);
+        assert_eq!((cache.len(), cache.bytes()), (2, 2 * bytes));
+        assert!(cache.get(&dir.join("b.gif"), size).is_none());
+        assert!(cache.get(&dir.join("a.gif"), size).is_some());
+        // Replacing an entry (the file changed) doesn't grow it; one bigger than
+        // the whole cache is still kept, alone.
+        let newer = Stamp { mtime: None, len: 2 };
+        cache.insert(dir.join("c.gif"), size, newer, c.clone(), bytes);
+        assert_eq!((cache.len(), cache.stamp(&dir.join("c.gif"), size)), (2, Some(newer)));
+        cache.insert(dir.join("big.gif"), size, stamp, c, 10 * bytes);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_cross_fade_runs_for_its_length_then_costs_nothing() {
+        use crate::widgets::Live;
+        let dir = temp_dir("fade");
+        let (g, _) = gif_of(&dir, "g.gif", 2);
+        let ms = Duration::from_millis;
+        let old = Box::new(PickerFace::Empty { enabled: true });
+        let new = Box::new(PickerFace::gif(g, Play::OnTap));
+        let mut f = CrossFace::new(old, new, ms(100), ms(150));
+        assert_eq!(f.next_change(ms(120)), Some(ms(120)), "frames while fading");
+        let mut canvas = Canvas::new(40, 20).unwrap();
+        f.draw(&mut canvas, Rect::new(10.0, 5.0, 20.0, 10.0), ms(175));
+        assert!(canvas.data().iter().any(|&b| b != 0), "something drawn mid-fade");
+        let live = Live {
+            volume: 0,
+            muted: false,
+            brightness: None,
+            battery: None,
+            now: chrono::Local::now(),
+            player: Default::default(),
+            recording: None,
+            status: Default::default(),
+        };
+        f.advance(ms(250), &live);
+        assert!(f.old.is_none(), "the old face is dropped once done");
+        assert_eq!(f.next_change(ms(250)), None, "on_tap GIF at rest: no frames");
     }
 
     #[test]

@@ -384,11 +384,12 @@ impl Expandable {
         true
     }
 
-    /// Replaces the icon, drawn `width` px wide.
-    pub fn set_face(&mut self, face: Box<dyn Animated>, width: f32, font: &Font) {
-        self.face = face;
+    /// Replaces the icon, drawn `width` px wide. Returns the one it replaced.
+    pub fn set_face(&mut self, face: Box<dyn Animated>, width: f32, font: &Font) -> Box<dyn Animated> {
+        let old = std::mem::replace(&mut self.face, face);
         self.face_w = width;
         self.place(font);
+        old
     }
 
     /// Unfolded, the icon's column at the left, never narrower than a square; none

@@ -42,8 +42,8 @@ use anyhow::{Result, anyhow};
 use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
 use capture::CaptureMode;
-use config::{Action, Config, ItemConfig, ItemKind, StatusIdle, WakeOn};
-use gifpick::{Loader, Reply, Request};
+use config::{Action, Config, ItemConfig, ItemKind, Loading, StatusIdle, WakeOn};
+use gifpick::{Fresh, GifCache, Loader, PickerShow, Reply, Request};
 use display::DrmBackend;
 use evdev::KeyCode;
 use fnkey::{FnEvent, FnKeyboard, Lost, NodeWatch};
@@ -87,6 +87,8 @@ use user::SessionUser;
 use widgets::{Level, Live};
 
 /// Frame cap for animations and touch-driven redraws (~30 fps).
+/// A gif_picker's cross-fade to a newly loaded GIF.
+const PICK_FADE: Duration = Duration::from_millis(150);
 /// The longest the bar takes to wake from an idle stage.
 const WAKE_FADE: Duration = Duration::from_millis(150);
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
@@ -267,6 +269,8 @@ struct App {
     loader: Option<Loader>,
     /// What each gif_picker has found and shows, by item id; kept across rebuilds.
     pickers: BTreeMap<String, Picker>,
+    /// GIFs decoded for gif_pickers, to show again at once.
+    gif_cache: GifCache,
     /// Choices made on the bar (the gif_pickers' GIFs), saved across restarts.
     state: state::StateFile,
     /// mpv's state, while the config has a player.
@@ -367,8 +371,13 @@ struct Picker {
     /// Folder and thumbnail height of the last listing (asked again if they change).
     listed: Option<(PathBuf, u32)>,
     entries: Vec<(String, PathBuf, Rc<canvas::Image>)>,
-    /// The chosen file decoded, and the box it was fitted to.
+    /// The GIF on the bar (the chosen one, or the one before while that loads),
+    /// and the box it was fitted to.
     gif: Option<(PathBuf, (u32, u32), gif::Gif)>,
+    /// The chosen file, asked of the loader and not back yet.
+    loading: Option<PathBuf>,
+    /// A chosen file that failed to load: not asked again until picked again.
+    failed: Option<PathBuf>,
     /// Last listing error, so each one is logged once.
     error: Option<String>,
 }
@@ -650,22 +659,32 @@ impl App {
                 .gif
                 .as_ref()
                 .is_some_and(|(p, size, _)| Some(p) == chosen.as_ref() && *size == slot.gif_max);
-            if !loaded {
-                picker.gif = None;
-                if let Some(path) = chosen {
+            match chosen {
+                _ if loaded => picker.loading = None,
+                None => {
+                    picker.gif = None;
+                    picker.loading = None;
+                }
+                // Asked already, or broken: what is on the bar stays.
+                Some(path) if picker.loading.as_ref() == Some(&path) || picker.failed.as_ref() == Some(&path) => {}
+                Some(path) => {
+                    picker.loading = Some(path.clone());
                     let (max_w, max_h) = slot.gif_max;
                     let reader = self.reader();
                     let item = slot.id.clone();
+                    // Decoded before: the loader only checks the file is the same.
+                    let known = self.gif_cache.stamp(&path, slot.gif_max);
                     self.request(Request::Load {
                         item,
                         path,
                         max_w,
                         max_h,
                         reader,
+                        known,
                     });
                 }
             }
-            self.show_picker(&slot.id);
+            self.show_picker(&slot.id, None);
         }
     }
 
@@ -703,12 +722,10 @@ impl App {
         }
     }
 
-    /// Puts gif_picker `id`'s thumbnails and GIF in the scene.
-    fn show_picker(&mut self, id: &str) {
-        let play = self
-            .picker_config(id)
-            .and_then(|i| i.play)
-            .unwrap_or(gif::Play::OnTap);
+    /// Puts gif_picker `id`'s thumbnails and GIF in the scene, the GIF
+    /// cross-faded over `fade` if given.
+    fn show_picker(&mut self, id: &str, fade: Option<Duration>) {
+        let show = self.picker_show(id);
         let chosen = self.chosen_gif(id);
         let Some(p) = self.pickers.get(id) else {
             return;
@@ -722,10 +739,27 @@ impl App {
             .iter()
             .map(|(name, _, img)| (name.clone(), img.clone()))
             .collect();
-        let gif = p.gif.as_ref().map(|(_, _, g)| (g.clone(), play));
+        let fade = fade.map(|len| (self.epoch.elapsed(), len));
         self.scene
             .set_picker_entries(id, entries, chosen_name, &self.font);
-        self.scene.set_picker_gif(id, gif, &self.font);
+        self.scene.set_picker_gif(id, show, fade, &self.font);
+    }
+
+    /// What gif_picker `id` shows now: its GIF; while a new one loads, as
+    /// `loading` says (by default, still the one before).
+    fn picker_show(&self, id: &str) -> PickerShow {
+        let conf = self.picker_config(id);
+        let play = conf.and_then(|i| i.play).unwrap_or(gif::Play::OnTap);
+        let loading = conf.and_then(|i| i.loading).unwrap_or_default();
+        let Some(p) = self.pickers.get(id) else {
+            return PickerShow::Icon;
+        };
+        match (&p.gif, p.loading.is_some(), loading) {
+            (_, true, Loading::Icon) => PickerShow::Icon,
+            (_, true, Loading::None) => PickerShow::Blank,
+            (Some((_, _, g)), _, _) => PickerShow::Gif(g.clone(), play),
+            (None, _, _) => PickerShow::Icon,
+        }
     }
 
     /// A listing or a GIF from the loader thread.
@@ -765,31 +799,52 @@ impl App {
                         picker.entries.clear();
                     }
                 }
-                self.show_picker(&item);
+                self.show_picker(&item, None);
             }
             Reply::Loaded { item, path, result } => {
                 if self.chosen_gif(&item).as_ref() != Some(&path) {
-                    return; // another one was chosen meanwhile
+                    return; // another one was chosen meanwhile: never shown
                 }
                 let Some(slot) = self.scene.pickers().into_iter().find(|s| s.id == item) else {
                     return;
                 };
-                match result {
-                    Ok(frames) => {
+                let size = slot.gif_max;
+                let picker = self.pickers.entry(item.clone()).or_default();
+                picker.loading = None;
+                let (gif, how) = match result {
+                    Ok((stamp, Fresh::Decoded(frames))) => {
+                        let bytes = gifpick::frames_bytes(&frames);
                         let gif = gif::Gif::from(frames);
-                        eprintln!(
-                            "gif_picker {item:?}: showing {} ({} frames, {}x{})",
-                            path.display(),
-                            gif.frame_count(),
-                            gif.width(),
-                            slot.gif_max.1
-                        );
-                        let picker = self.pickers.entry(item.clone()).or_default();
-                        picker.gif = Some((path, slot.gif_max, gif));
+                        self.gif_cache.insert(path.clone(), size, stamp, gif.clone(), bytes);
+                        (gif, "decoded")
                     }
-                    Err(e) => eprintln!("gif_picker {item:?}: {e}"),
-                }
-                self.show_picker(&item);
+                    Ok((_, Fresh::Unchanged)) => match self.gif_cache.get(&path, size) {
+                        Some(gif) => (gif, "cached"),
+                        // Dropped from the cache meanwhile: decoded after all.
+                        None => {
+                            self.sync_pickers();
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        // What was on the bar stays.
+                        eprintln!("gif_picker {item:?}: {e}");
+                        picker.failed = Some(path);
+                        self.show_picker(&item, None);
+                        return;
+                    }
+                };
+                eprintln!(
+                    "gif_picker {item:?}: showing {} ({} frames, {}x{}, {how})",
+                    path.display(),
+                    gif.frame_count(),
+                    gif.width(),
+                    size.1
+                );
+                let picker = self.pickers.entry(item.clone()).or_default();
+                picker.gif = Some((path, size, gif));
+                picker.failed = None;
+                self.show_picker(&item, Some(PICK_FADE));
             }
         }
     }
@@ -806,6 +861,10 @@ impl App {
         };
         self.state.state.gif_picker.insert(item.to_string(), path);
         self.state.save();
+        // Picked again after failing: tried again (it may be fixed).
+        if let Some(p) = self.pickers.get_mut(item) {
+            p.failed = None;
+        }
         self.sync_pickers();
     }
 
@@ -1850,6 +1909,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         scene: Scene::new(w, h)?,
         loader: p.loader,
         pickers: BTreeMap::new(),
+        gif_cache: GifCache::new(gifpick::CACHE_BYTES),
         state: state::StateFile::open(),
         mpv: None,
         epoch,

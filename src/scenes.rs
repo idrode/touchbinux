@@ -15,7 +15,7 @@ use crate::{
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     frame::Frame,
     gif::{Gif, GifPlayer, Play},
-    gifpick::PickerFace,
+    gifpick::{CrossFace, PickerFace, PickerShow},
     player::{PlayerFace, SeekBar},
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
@@ -1149,21 +1149,34 @@ impl Scene {
         true
     }
 
-    /// A gif_picker's icon: the chosen GIF, or the empty picture (grey when there is
-    /// nothing to choose).
-    pub fn set_picker_gif(&mut self, id: &str, gif: Option<(Gif, Play)>, font: &Font) -> bool {
+    /// A gif_picker's icon: the chosen GIF, the empty picture (grey when there is
+    /// nothing to choose) or nothing; cross-faded over `fade` = (start, length).
+    pub fn set_picker_gif(
+        &mut self,
+        id: &str,
+        show: PickerShow,
+        fade: Option<(Duration, Duration)>,
+        font: &Font,
+    ) -> bool {
         let Some(m) = self.picker_mut(id) else {
             return false;
         };
         let side = icon_side(m.rect.h);
-        let (face, width) = match gif {
-            Some((g, play)) => {
+        let (face, width) = match show {
+            PickerShow::Gif(g, play) => {
                 let w = g.width() as f32;
                 (PickerFace::gif(g, play), w.max(side))
             }
-            None => (PickerFace::Empty { enabled: m.enabled }, side),
+            PickerShow::Icon => (PickerFace::Empty { enabled: m.enabled }, side),
+            PickerShow::Blank => (PickerFace::Blank, side),
         };
-        m.set_face(Box::new(face), width, font);
+        let mut face: Box<dyn Animated> = Box::new(face);
+        if let Some((start, len)) = fade {
+            // Over the face it replaces, fading.
+            let old = m.set_face(Box::new(PickerFace::Blank), width, font);
+            face = Box::new(CrossFace::new(old, face, start, len));
+        }
+        m.set_face(face, width, font);
         true
     }
 
@@ -2916,7 +2929,7 @@ mod tests {
         ];
         assert!(s.set_picker_entries("gifs", entries, Some("b.gif"), &font));
         assert!(!s.set_picker_entries("nope", Vec::new(), None, &font));
-        s.set_picker_gif("gifs", None, &font);
+        s.set_picker_gif("gifs", PickerShow::Icon, None, &font);
         let narrow = s.menus[0].open_rect.w;
         // Room for the widest thumbnail in each slot.
         assert!(narrow >= 52.0 + 2.0 * (80.0 + 16.0), "{narrow}");
@@ -2949,7 +2962,7 @@ mod tests {
         .unwrap()
         .into();
         assert!(gif.width() > 52 && gif.width() <= 76, "{}", gif.width());
-        s.set_picker_gif("gifs", Some((gif, Play::Always)), &font);
+        s.set_picker_gif("gifs", PickerShow::Gif(gif, Play::Always), None, &font);
         assert!(s.menus[0].open_rect.w > narrow);
         // Playing always: the bar wakes for its frames even while folded.
         s.advance(MS(3000), &live);
@@ -2993,7 +3006,7 @@ mod tests {
         let chosen = entries[0].0.clone();
         s.set_picker_entries("gifs", entries, Some(&chosen), &font);
         let gif: Gif = crate::gif::decode_fitted(&first, max_w, max_h, false).unwrap().into();
-        s.set_picker_gif("gifs", Some((gif, Play::Always)), &font);
+        s.set_picker_gif("gifs", PickerShow::Gif(gif, Play::Always), None, &font);
         let live = live();
         let mut canvas = Canvas::new(W, H).unwrap();
         let mut shot = |s: &mut Scene, t: Duration, name: &str| {

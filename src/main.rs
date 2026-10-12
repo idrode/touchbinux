@@ -297,6 +297,9 @@ struct App {
     finger: Option<(f32, f32)>,
     /// Dimming, sleeping and turning off, with an `[idle]` section.
     idle: IdleSide,
+    /// The scene on screen changed since the last frame (the Fn layer, the sleep
+    /// layer): the loop cross-fades over this long.
+    cross_fade: Option<Duration>,
 }
 
 /// The bar at rest (`[idle]`).
@@ -307,6 +310,8 @@ struct IdleSide {
     light_dir: Option<PathBuf>,
     /// Open while `[idle]` is configured; its Drop puts the normal brightness back.
     light: Option<BarLight>,
+    /// The sleep layer's scene, while asleep (or off after sleeping).
+    scene: Option<Scene>,
 }
 
 impl IdleSide {
@@ -337,8 +342,6 @@ struct FnSide {
     missing: Option<String>,
     /// The Fn layer's scene, while it is shown.
     scene: Option<Scene>,
-    /// The layer changed since the last frame: the loop cross-fades.
-    switched: bool,
 }
 
 impl FnSide {
@@ -1085,7 +1088,7 @@ impl App {
             return false;
         }
         eprintln!("idle: {from:?} -> {to:?}");
-        let Some(cfg) = &self.config.idle else {
+        let Some(cfg) = self.config.idle.clone() else {
             return true;
         };
         let level = match to {
@@ -1098,6 +1101,33 @@ impl App {
         let len = if to < from { cfg.fade().min(WAKE_FADE) } else { cfg.fade() };
         if let Some(l) = &mut self.idle.light {
             l.set(level, len, now);
+        }
+        let t = now.saturating_duration_since(self.epoch);
+        if from < Stage::Sleep && to >= Stage::Sleep {
+            // To rest: whatever was going on is cut short, without animating
+            // (unfolded items fold at once, a held key goes up).
+            let finger = self.finger;
+            self.scene.interrupt(finger, t, &self.font);
+            if let Some(s) = &mut self.fnl.scene {
+                s.interrupt(finger, t, &self.font);
+            }
+            if to == Stage::Sleep
+                && let Some(id) = cfg.sleep_layer.clone()
+            {
+                match self.bar_scene(Some(&id)) {
+                    Ok(scene) => {
+                        self.idle.scene = Some(scene);
+                        self.cross_fade = Some(cfg.fade());
+                    }
+                    Err(e) => eprintln!("idle: sleep layer {id:?}: {e:#}"),
+                }
+            }
+            self.sync_held_key();
+        } else if from >= Stage::Sleep && to < Stage::Sleep {
+            // Awake again: the layer from before (or the Fn layer, if Fn is held).
+            if self.idle.scene.take().is_some() && from == Stage::Sleep {
+                self.cross_fade = Some(len);
+            }
         }
         true
     }
@@ -1262,9 +1292,49 @@ impl App {
         changed
     }
 
-    /// The scene on the bar: the Fn layer's while it is shown, else the normal one.
+    /// The scene on the bar: the sleep layer's while asleep, the Fn layer's while
+    /// it is shown, else the normal one.
     fn shown(&self) -> &Scene {
-        self.fnl.scene.as_ref().unwrap_or(&self.scene)
+        self.idle.scene.as_ref().or(self.fnl.scene.as_ref()).unwrap_or(&self.scene)
+    }
+
+    /// The idle stage with a sleep layer's frame cap (`idle_gif_fps`), if any:
+    /// `Some(0)` draws it once, still.
+    fn sleep_fps(&self) -> Option<u32> {
+        let cfg = self.config.idle.as_ref()?;
+        (self.idle.stage() == Stage::Sleep && self.idle.scene.is_some()).then_some(cfg.idle_gif_fps)
+    }
+
+    /// The scene time a frame at `t` is drawn at: a still sleep layer always at
+    /// 0 (its GIFs on their first frame).
+    fn draw_time(&self, t: Duration) -> Duration {
+        if self.sleep_fps() == Some(0) { Duration::ZERO } else { t }
+    }
+
+    /// When the scene on screen wants its next frame after one at `t` (scene
+    /// time): never while off or still asleep, at most `idle_gif_fps` asleep.
+    fn scene_next_change(&self, t: Duration) -> Option<Duration> {
+        if self.idle.stage() == Stage::Off {
+            return None;
+        }
+        match self.sleep_fps() {
+            Some(0) => None,
+            Some(fps) => {
+                let min = Duration::from_secs(1) / fps;
+                self.shown().next_change(t).map(|nc| nc.max(t + min))
+            }
+            None => self.shown().next_change(t),
+        }
+    }
+
+    /// How often wall-clock widgets on screen tick (none while off).
+    fn wall_period(&self) -> Option<u64> {
+        (self.idle.stage() != Stage::Off).then(|| self.shown().wall_period()).flatten()
+    }
+
+    /// A battery icon on screen to keep up to date (none while off).
+    fn battery_shown(&self) -> bool {
+        self.idle.stage() != Stage::Off && self.shown().has_battery_icon() && self.battery.is_some()
     }
 
     /// Sets the Fn layer up for the current config: nothing without `[fn]`;
@@ -1454,7 +1524,11 @@ impl App {
                 self.scene.block_touch();
             }
         }
-        self.fnl.switched = true;
+        // Asleep, the sleep layer stays on screen: nothing to fade.
+        if !self.idle.stage().resting() {
+            let len = self.config.fn_layer.as_ref().map_or(Duration::ZERO, |f| f.transition());
+            self.cross_fade = Some(len);
+        }
         self.sync_held_key();
         true
     }
@@ -1719,6 +1793,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
             light_dir: p.touchbar_light,
             ..IdleSide::default()
         },
+        cross_fade: None,
     };
     app.sync_mpv();
     app.sync_recorder();
@@ -1924,7 +1999,7 @@ fn run(
         TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
     )?;
     epoll.add(&clock, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_CLOCK))?;
-    let mut clock_period = app.scene.wall_period();
+    let mut clock_period = app.wall_period();
     arm_clock(&clock, clock_period)?;
     // A builtin:battery icon re-reads the battery every battery::POLL (redrawing
     // only if it changed); without one, nothing is armed.
@@ -1989,6 +2064,8 @@ fn run(
     let mut idle_timer = OneShot::new(TOKEN_IDLE_TIMER);
     // The layer that was on screen when the Fn layer came or went, fading out.
     let mut fade: Option<Fade> = None;
+    // Off without a backlight: the black frame went out.
+    let mut blacked = false;
     let debug_touch = app.args.scene == "touch";
     let start = app.epoch;
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
@@ -2078,17 +2155,32 @@ fn run(
             monitor_watched = true;
         }
 
+        // Off: nothing is drawn or presented (the backlight is at 0; without one,
+        // a black frame went out once), and nothing asks for frames.
+        if app.idle.stage() == Stage::Off {
+            if app.idle.light.is_none() && !blacked {
+                drm.present(&Canvas::new(w, h)?)?;
+                blacked = true;
+            }
+            dirty = false;
+            next_anim = None;
+            fade = None;
+            app.cross_fade = None;
+        } else {
+            blacked = false;
+        }
+
         // Input-driven redraws are coalesced to the same frame cap as animations: the
         // first change after idling draws at once, a fast drag draws at most every FRAME.
         let earliest = last_frame.map_or(start, |l| l + FRAME);
         let frame_due = if dirty { Some(earliest) } else { next_anim };
         // The scene may have been rebuilt (config reload) with other widgets.
-        // Or the Fn layer came or went.
-        if app.shown().wall_period() != clock_period {
-            clock_period = app.shown().wall_period();
+        // Or the Fn or sleep layer came or went, or the bar is off.
+        if app.wall_period() != clock_period {
+            clock_period = app.wall_period();
             arm_clock(&clock, clock_period)?;
         }
-        let poll = app.shown().has_battery_icon() && app.battery.is_some();
+        let poll = app.battery_shown();
         if poll != battery_polled {
             battery_polled = poll;
             if poll {
@@ -2101,9 +2193,8 @@ fn run(
 
         if frame_due.is_some_and(|d| d <= now) {
             let t = now - start;
-            if std::mem::take(&mut app.fnl.switched) {
+            if let Some(len) = app.cross_fade.take() {
                 // From what is on screen now (maybe half a fade already).
-                let len = app.config.fn_layer.as_ref().map_or(Duration::ZERO, |f| f.transition());
                 fade = None;
                 if !len.is_zero() {
                     fade = Fade::new(&canvas, t, len)
@@ -2112,10 +2203,11 @@ fn run(
                 }
             }
             let live = app.live();
-            // Only the scene on screen moves: the hidden one costs nothing.
-            let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
-            scene.advance(t, &live);
-            scene.draw(&mut canvas, t, &app.font, &live)?;
+            let t_draw = app.draw_time(t);
+            // Only the scene on screen moves: the hidden ones cost nothing.
+            let scene = app.idle.scene.as_mut().or(app.fnl.scene.as_mut()).unwrap_or(&mut app.scene);
+            scene.advance(t_draw, &live);
+            scene.draw(&mut canvas, t_draw, &app.font, &live)?;
             if let Some(f) = &fade {
                 f.draw(&mut canvas, t);
             }
@@ -2129,7 +2221,7 @@ fn run(
             last_frame = Some(now);
 
             let fading = fade.as_ref().and_then(|f| f.next_change(t));
-            next_anim = [app.shown().next_change(t), fading]
+            next_anim = [app.scene_next_change(t), fading]
                 .into_iter()
                 .flatten()
                 .min()
@@ -2588,7 +2680,7 @@ mod tests {
 
     /// Draws a frame as the loop does, and says whether another one is wanted.
     fn settle(app: &mut App, t: Duration) -> Option<Duration> {
-        app.fnl.switched = false;
+        app.cross_fade = None;
         let live = app.live();
         let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
         scene.advance(t, &live);
@@ -2611,7 +2703,7 @@ mod tests {
         assert!(!app.on_fn_timer(t0 + MS(79)), "an early wake-up waits on");
         assert_eq!(app.fnl.deadline(), Some(t0 + MS(80)));
         assert!(app.on_fn_timer(t0 + MS(80)));
-        assert!(fn_shown(&app) && app.fnl.switched);
+        assert!(fn_shown(&app) && app.cross_fade.is_some());
         assert!(app.fnl.deadline().is_none(), "shown: no timer while held");
         assert!(app.shown().button_rect("f1").is_some());
         assert_eq!(app.shown().wall_period(), Some(60), "the clock ticks while shown");
@@ -2619,7 +2711,7 @@ mod tests {
         assert!(!app.on_fn_events(&[FnEvent::Pressed], t0 + MS(500)));
         // Fn up: back to the normal layer, and at rest again.
         assert!(app.on_fn_events(&[FnEvent::Released], t0 + MS(900)));
-        assert!(!fn_shown(&app) && app.fnl.switched && app.fnl.deadline().is_none());
+        assert!(!fn_shown(&app) && app.cross_fade.is_some() && app.fnl.deadline().is_none());
         assert_eq!(settle(&mut app, MS(2000)), None);
         assert_eq!(app.shown().wall_period(), None);
         fs::remove_dir_all(&dir).unwrap();
@@ -2632,7 +2724,7 @@ mod tests {
         let t0 = Instant::now();
         let events = [FnEvent::Pressed, FnEvent::Released];
         assert!(!app.on_fn_events(&events, t0));
-        assert!(!fn_shown(&app) && !app.fnl.switched);
+        assert!(!fn_shown(&app) && app.cross_fade.is_none());
         assert!(app.fnl.deadline().is_none());
         assert!(!app.on_fn_timer(t0 + MS(120)), "a stale wake-up shows nothing");
         fs::remove_dir_all(&dir).unwrap();
@@ -2788,7 +2880,7 @@ mod tests {
              [[layers.items]]\ntype = 'expandable'\nid = 'cap'\nicon = 'builtin:folder'\nlabel = 'Cap'\n\
              [[layers.items.children]]\nid = 'one'\nlabel = 'Uno'\naction = {{ type = 'socket' }}\n\
              [[layers]]\nid = 'idle'\n\
-             [[layers.items]]\ntype = 'gif'\nid = 'g'\npath = '{}'\n\
+             [[layers.items]]\ntype = 'gif'\nid = 'g'\npath = '{}'\nplay = 'always'\n\
              [[layers]]\nid = 'fn'\n\
              [[layers.items]]\ntype = 'button'\nid = 'f1'\nlabel = 'F1'\n\
              action = {{ type = 'key', key = 'KEY_F1', hold = true }}\n\
@@ -2938,5 +3030,56 @@ mod tests {
         fs::write(dir.join("config.toml"), toml.replace("dim_after_s = 5", "dim_after_s = 7")).unwrap();
         app.reload_config();
         assert!(app.idle.deadline().is_some_and(|d| d > Instant::now() + S(6)));
+    }
+
+
+    #[test]
+    fn asleep_the_sleep_layer_shows_with_its_gif_capped_and_off_draws_nothing() {
+        let dir = tmp("idle-sleep");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        let mut out = Vec::new();
+        // The dropdown open when the bar goes to sleep.
+        let r = app.scene.expandable_rect("cap").unwrap();
+        let cap = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        app.on_touch(Phase::Down, cap, MS(0), &mut out);
+        app.on_touch(Phase::Up, cap, MS(20), &mut out);
+        assert!(settle(&mut app, MS(20)).is_some(), "unfolding");
+        app.on_idle_timer(t0 + S(5));
+        assert!(app.idle.scene.is_none() && app.cross_fade.is_none(), "dim: same layer");
+        assert!(app.on_idle_timer(t0 + S(10)));
+        assert_eq!(app.idle.stage(), Stage::Sleep);
+        assert!(app.idle.scene.is_some() && app.cross_fade == Some(MS(250)));
+        // The GIF (20 fps of its own) at 8 frames a second at most.
+        let t = S(11);
+        let next = app.scene_next_change(t).unwrap();
+        assert!(next >= t + MS(125), "{next:?}");
+        // The normal layer underneath folded at once: nothing left to animate.
+        let live = app.live();
+        app.scene.advance(S(11), &live);
+        assert_eq!(app.scene.next_change(S(11)), None);
+        // Off: no frames, no clock ticks, no battery polls.
+        app.on_idle_timer(t0 + S(20));
+        assert_eq!(app.idle.stage(), Stage::Off);
+        assert_eq!((app.scene_next_change(S(21)), app.wall_period()), (None, None));
+        assert!(!app.battery_shown());
+        // Awake again: the normal layer, cross-faded quickly.
+        app.reload_config();
+        assert!(app.idle.scene.is_none());
+        assert!(std::ptr::eq(app.shown(), &app.scene), "the normal layer on screen");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_still_sleep_layer_is_drawn_once_on_the_gifs_first_frame() {
+        let dir = tmp("idle-still");
+        let (mut app, t0) = idle_app(&dir, &format!("{IDLE}\nidle_gif_fps = 0"));
+        app.on_idle_timer(t0 + S(10));
+        assert_eq!(app.idle.stage(), Stage::Sleep);
+        assert_eq!(app.draw_time(S(12)), Duration::ZERO);
+        assert_eq!(app.scene_next_change(S(12)), None, "no frames after the fade");
+        // Awake, time runs again.
+        app.reload_config();
+        assert_eq!(app.draw_time(S(12)), S(12));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

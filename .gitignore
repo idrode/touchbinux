@@ -1,1 +1,3 @@
 /target
+# Local config copies
+config.backup-*.toml

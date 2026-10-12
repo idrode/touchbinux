@@ -63,6 +63,7 @@ Sacado del código; entre paréntesis, dónde se usa.
 | `/dev/dri/cardN` del Touch Bar (`adp` / `appletbdrm`), `char-drm` | rw, maestro DRM (`acquire_master_lock`) | volcar el framebuffer (`display.rs`) |
 | `/dev/input/eventN` del digitalizador, `char-input` | rw, `EVIOCGRAB` (exclusivo) | toques (`touch.rs`) |
 | `/dev/uinput` | rw | teclado virtual (`keys.rs`) |
+| `/dev/input/eventN` del teclado interno, `char-input` | **solo lectura**, sin grab; solo con `[fn]` | la tecla Fn (`fnkey.rs`, ver [Tecla Fn](#tecla-fn)) |
 | `/sys/class/backlight/<pantalla>/brightness` | escritura | brillo (`levels.rs`) |
 | `/sys/class/backlight/*/actual_brightness`, `/sys/class/power_supply/*` | lectura | brillo y batería |
 
@@ -123,6 +124,59 @@ se sacan los comandos del servicio.
 | GIF de un `gif_picker` | el usuario | se leen con el fsuid del usuario (un enlace a un archivo de root falla). Se decodifican dentro del proceso root (crate `image`) con tamaño ajustado y como mucho 16 por carpeta |
 | Iconos y `.desktop` del `$HOME` | el usuario | se leen **como root** y se parsean como root (PNG con `image`; SVG con `usvg` y opciones por defecto) |
 | Táctil, batería, brillo | kernel | lectura de rangos (`absinfo`), números parseados |
+| Teclado interno (solo con `[fn]`) | kernel | solo `KEY_FN`: filtro del kernel y, por debajo, descarte en el propio daemon (ver [Tecla Fn](#tecla-fn)) |
+
+## Tecla Fn
+
+Con una sección `[fn]` en la configuración, el daemon (root) abre el teclado
+interno para saber cuándo está pulsada Fn. Es un teclado: lo que pasa por él es
+todo lo que el usuario escribe, contraseñas incluidas. Por eso lo que el daemon ve
+de él se reduce al mínimo (`src/fnkey.rs`):
+
+- **Se abre en solo lectura y sin `EVIOCGRAB`.** El teclado sigue funcionando para
+  el resto del sistema exactamente igual; el daemon no puede inyectar ni bloquear
+  nada por ese fd.
+- **Filtro del kernel (mecanismo principal).** Nada más abrirlo se pide al kernel,
+  con `EVIOCSMASK` (máscara de eventos por lector, desde Linux 4.4), que a este fd
+  solo le entregue `KEY_FN`. Los demás tipos (`EV_REL`, `EV_ABS`, `EV_MSC`, `EV_SW`,
+  `EV_LED`, `EV_SND`, `EV_FF`) se enmascaran enteros. `EV_SYN` se deja pasar para
+  enterarse de `SYN_DROPPED` (eventos perdidos); los informes que la máscara deja
+  vacíos el kernel no los entrega. Con el filtro, las demás teclas **no llegan al
+  proceso** y escribir ni siquiera lo despierta.
+- **Descarte en el daemon (respaldo).** Si el ioctl fallara, el daemon lee los
+  eventos con `read(2)` en un búfer de la pila, compara solo tipo y código con
+  `KEY_FN`, y para Fn mira el valor (1 pulsada, 0 soltada; 2, autorrepetición, se
+  ignora). Nada más se decodifica, guarda, cuenta ni registra, y el búfer se pone a
+  cero antes de volver. Este código corre también con el filtro activo.
+- **Estado de teclas (`EVIOCGKEY`)** solo en dos momentos: para saber si Fn está
+  pulsada (arranque, recarga, reanudación, eventos perdidos) y, al apoyar el dedo
+  en una tecla de la barra con `hold = true`, para saber qué modificadores (Ctrl,
+  Shift, Alt, Super) pulsar con ella. Del mapa solo se leen esos bits y se descarta.
+- **Mientras falta el teclado**, se vigila `/dev/input` con inotify: solo se ven
+  nombres de nodos, nada de los dispositivos.
+
+**Qué mecanismo se usa.** El daemon lo escribe en el journal cada vez que abre el
+teclado:
+
+```
+journalctl -u touchbinux | grep 'fn:'
+fn: kernel event filter on (EVIOCSMASK): only KEY_FN is read      # filtro del kernel
+fn: no kernel event filter (...); other keys are read and dropped here unseen   # respaldo
+```
+
+En este equipo se usa el **filtro del kernel**. Comprobado el 2026-10-12 (kernel
+7.1 de Asahi) sobre el teclado real, «Apple MTP keyboard» en `/dev/input/event1`:
+el ioctl se acepta (`cargo test this_machines_keyboard -- --ignored --nocapture`,
+con el grupo `input`, sin leer eventos). `EVIOCSMASK` existe desde Linux 4.4 y no
+depende del driver. Que el kernel deje fuera de verdad las demás teclas lo
+comprueba un test que necesita root: crea un teclado virtual con uinput, escribe
+`A` y Fn, y verifica que `A` no despierta al lector y Fn sí:
+
+```
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test the_kernel_filter_passes_fn_only -- --ignored
+```
+
+Sin `[fn]` no se abre ningún teclado.
 
 ## Endurecimiento: aplicado, descartado y por qué
 

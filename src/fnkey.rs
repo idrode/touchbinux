@@ -162,8 +162,12 @@ impl FnKeyboard {
 
     /// Follows `dev`, filtered down to KEY_FN by the kernel if it can.
     fn with(path: PathBuf, dev: RawDevice, name: String) -> FnKeyboard {
-        if let Err(e) = only_fn(&dev) {
-            eprintln!("fn: no kernel event filter ({e}); other keys are dropped here instead");
+        // Logged both ways: docs/SECURITY.md says how to tell which one is in use.
+        match only_fn(&dev) {
+            Ok(()) => eprintln!("fn: kernel event filter on (EVIOCSMASK): only KEY_FN is read"),
+            Err(e) => eprintln!(
+                "fn: no kernel event filter ({e}); other keys are read and dropped here unseen"
+            ),
         }
         FnKeyboard { dev, path, name }
     }

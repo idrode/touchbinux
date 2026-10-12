@@ -325,6 +325,7 @@ journalctl -u touchbinux -e            # ver el resultado
 | `run_as` | texto | — | usuario con el que corren los comandos cuando el daemon es un servicio. Ver [Seguridad](#8-seguridad). |
 | `default_layer` | texto | la primera `[[layers]]` | capa que se muestra. Debe existir. |
 | `[[layers]]` | lista | — | capas de elementos |
+| `[fn]` | tabla | — | capa que sale al mantener Fn (ver [Capa Fn](#capa-fn-fn)) |
 | `[[buttons]]` | lista | — | formato antiguo (ver al final) |
 
 ```toml
@@ -358,7 +359,53 @@ gap = 12
 type = "clock"
 ```
 
-Hoy solo se muestra una capa (`default_layer`); no hay acción para cambiar de capa.
+Se muestra una capa (`default_layer`), y la de `[fn]` mientras se mantiene la tecla
+Fn. No hay acción para cambiar de capa con un toque.
+
+### Capa Fn: `[fn]`
+
+Mientras mantienes la tecla **Fn** del teclado, la barra muestra otra capa (por
+ejemplo F1-F12); al soltarla vuelve la normal. Sin la sección `[fn]` no hay capa Fn
+y el daemon no abre el teclado.
+
+```toml
+[fn]
+layer = "fn"             # id de la [[layers]] que se muestra
+mode = "hold"            # hold | toggle
+delay_ms = 80            # solo hold: tiempo con Fn pulsada antes de mostrarla
+transition_ms = 120      # fundido entre capas (0 = al instante)
+# fn_device = "Apple MTP keyboard"
+```
+
+| Clave | Por defecto | Rango | Qué hace |
+|---|---|---|---|
+| `layer` | `"fn"` | id de una `[[layers]]` | la capa que sale con Fn. Nunca es la capa de inicio, aunque vaya primera en el archivo |
+| `mode` | `"hold"` | `hold`, `toggle` | `hold`: se ve mientras Fn está pulsada. `toggle`: cada pulsación de Fn la muestra o la oculta |
+| `delay_ms` | `80` | 0-1000 | solo `hold` (con `toggle` es un error): cuánto tiene que estar Fn pulsada antes de que salga, para que un toque rápido no la haga parpadear. `0`: al instante |
+| `transition_ms` | `120` | 0-1000 | fundido entre una capa y otra. `0`: cambio seco |
+| `fn_device` | — | 1-128 bytes | parte del nombre del teclado, si no quieres que lo busque solo (ver `journalctl -u touchbinux \| grep fn:`) |
+
+La capa Fn solo admite `button`, `text`, `clock`, `battery`, `gif` y `spacer`: nada
+que se despliegue ni siga estado en vivo, porque desaparece al soltar Fn.
+
+Para teclas de función, usa `hold = true` en la acción (ver [Acciones](#acciones)):
+la tecla queda pulsada mientras el dedo está encima, así que se repite y se combina
+con Ctrl, Alt, Shift o Super del teclado (Alt+F4 = Alt en el teclado y F4 en la
+barra). `config.example.toml` trae la capa F1-F12 completa.
+
+Cómo se comporta:
+
+- Si cambias de capa con un dedo en la barra, ese toque se cancela (no hace nada) y
+  la capa nueva lo ignora hasta que levantes el dedo. Una tecla mantenida se suelta.
+- Lo desplegado en la capa normal se pliega al instante al salir la capa Fn.
+- Al recargar el config, al reanudar tras suspender y si se pierden eventos, se
+  vuelve a leer el estado real de Fn: la capa nunca se queda pegada. Si el teclado
+  desaparece, la capa se quita y el daemon espera a que vuelva.
+- En reposo no cuesta nada: sin Fn pulsada no hay temporizadores ni fotogramas. El
+  temporizador de `delay_ms` solo existe mientras Fn está pulsada y la capa aún no
+  ha salido.
+- Del teclado solo se lee la tecla Fn (filtro del kernel); el detalle está en
+  [SECURITY.md](SECURITY.md#tecla-fn).
 
 ### Anchos: `width` y `stretch`
 
@@ -1492,6 +1539,15 @@ Nombres de `linux/input-event-codes.h` con código 1-255: `KEY_ESC`, `KEY_F1` ..
 `KEY_MUTE`, `KEY_BRIGHTNESSUP`, `KEY_MICMUTE`... Uno desconocido es un error de
 configuración. Hace lo que tu escritorio haga con esa tecla.
 
+Con `hold = true` (solo en botones de una capa, no en hijos ni con
+`drag_children`), la tecla **baja al apoyar el dedo y sube al levantarlo** (o al
+sacarlo del botón), como una tecla de verdad: se repite si la mantienes y se combina
+con los modificadores que tengas pulsados en el teclado. No avisa de un `tap`.
+
+```toml
+action = { type = "key", key = "KEY_F5", hold = true }
+```
+
 **`socket`**: no hace nada local; solo avisa por el socket (para que otro proceso,
 como Quickshell, decida).
 
@@ -1773,6 +1829,10 @@ acciones**. Límites: 32 clientes, líneas de 64 KiB, 1 MiB de salida pendiente.
 **Teclas virtuales.** El teclado virtual llega a tu sesión como cualquier teclado:
 una acción `key` puede hacer lo que haga esa tecla.
 
+**El teclado** (solo con `[fn]`). El daemon abre el teclado interno en solo lectura y
+sin capturarlo, y pide al kernel que solo le pase la tecla Fn: lo que escribes no le
+llega. El detalle y cómo comprobarlo, en [SECURITY.md](SECURITY.md#tecla-fn).
+
 **Archivos del usuario** (las carpetas de los `gif_picker`). Los lee un hilo del
 daemon que, solo para sí mismo, cambia su identidad de acceso a archivos (`setfsuid`
 y `setfsgid`, que en Linux son por hilo) a la del usuario de sesión: solo abre lo
@@ -1905,6 +1965,8 @@ una suspensión real.
 | `ipc.rs` | el socket JSON por líneas |
 | `runner.rs`, `user.rs` | lanzar comandos como el usuario de sesión |
 | `keys.rs` | teclado virtual (uinput) |
+| `fnkey.rs` | la tecla Fn del teclado interno: solo lectura, filtro del kernel |
+| `fnlayer.rs` | cuándo sale la capa Fn (máquina de estados) y el fundido |
 | `stats.rs` | estadísticas de fps/CPU en el log |
 
 Bucle: esperar evento (toque, socket, Hyprland, temporizador, señal) → actualizar
@@ -1931,6 +1993,13 @@ que miden tiempos: `cargo test --release -- --ignored --nocapture`.
 Carga y **valida** el config igual que el daemon, dibuja un fotograma de 2008x60 a un
 PNG y sale. No abre DRM ni el táctil: no hace falta root ni parar el servicio. Lee el
 brillo, la batería y tu Hyprland reales; el volumen sale siempre como 50.
+
+Con `--layer <id>` (solo `bar --png`) dibuja esa capa en lugar de la de inicio; por
+ejemplo, la capa Fn:
+
+```sh
+./target/debug/touchbinux bar --config config.example.toml --png /tmp/fn.png --layer fn
+```
 
 Para ver animaciones (desplegar, pulsar, abrir carpetas) fotograma a fotograma hay
 tests `#[ignore]` que escriben PNG en la carpeta que indiques:
@@ -1971,6 +2040,42 @@ coordenadas en el log, para calibrar), `demo`, `anim` (con `--gif <archivo>`),
    Con `sudo`, los comandos corren como tu usuario (`SUDO_UID`) y el socket es tuyo.
    Recargar: `sudo kill -HUP $(pidof touchbinux)`.
 4. Para instalar el binario nuevo: `./install.sh` y `sudo systemctl restart touchbinux`.
+
+### Probar la capa Fn
+
+Lo que se puede probar sin la barra:
+
+```sh
+cargo test fn                                     # máquina de estados, App, PNG
+cargo test this_machines_keyboard -- --ignored --nocapture   # qué teclado encuentra (grupo input)
+```
+
+El segundo abre los nodos de `/dev/input` en solo lectura, dice qué teclado eligió y
+si Fn está pulsada, y no lee eventos. En este equipo: `/dev/input/event1 "Apple MTP
+keyboard"`.
+
+Que el kernel deje fuera las demás teclas lo comprueba un test que necesita root
+(crea un teclado virtual con `/dev/uinput`):
+
+```sh
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test the_kernel_filter_passes_fn_only -- --ignored
+```
+
+En la barra:
+
+1. Añade `[fn]` y la capa al config, y compruébalo con `--png --layer fn`.
+2. `sudo systemctl stop touchbinux` y
+   `sudo ./target/debug/touchbinux bar --config <tu config>`. En el log debe salir
+   `fn: kernel event filter on (EVIOCSMASK): only KEY_FN is read` y
+   `fn: following the Fn key of /dev/input/event1 "Apple MTP keyboard"`.
+3. Mantén Fn: tras `delay_ms` sale la capa con fundido; suéltala y vuelve la normal.
+   Un toque rápido de Fn no debe mostrar nada.
+4. Con Fn mantenida, toca F5 en la barra: en el log `action: key KEY_F5 down` al
+   apoyar y `up` al levantar. Para ver qué llega a la sesión: `wev` o
+   `sudo evtest` sobre «touchbinux virtual keyboard».
+5. Con la barra quieta, `top -p $(pidof touchbinux)` debe marcar 0 % de CPU, con y
+   sin Fn pulsada (salvo durante el fundido).
+6. Ctrl+C y `sudo systemctl start touchbinux`.
 
 ### Añadir un tipo de elemento
 

@@ -3336,12 +3336,11 @@ mod tests {
         assert!(matches!(nvim, Action::Command { argv, detach: true, .. } if argv[4] == "/usr/bin/nvim"));
     }
 
-    /// A real 2-frame GIF (6x3) in a fresh temporary directory.
-    fn temp_gif(name: &str) -> std::path::PathBuf {
+    /// A real 2-frame GIF (6x3) in a fresh temporary directory (removed when the
+    /// returned folder is dropped).
+    fn temp_gif(name: &str) -> (crate::testdir::TestDir, std::path::PathBuf) {
         use image::{Delay, Frame, RgbaImage, codecs::gif::GifEncoder};
-        let dir =
-            std::env::temp_dir().join(format!("touchbinux-test-{}-{name}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testdir::new(&format!("test-{name}"));
         let path = dir.join("a.gif");
         let file = fs::File::create(&path).unwrap();
         let mut enc = GifEncoder::new(file);
@@ -3352,12 +3351,12 @@ mod tests {
                 .unwrap();
         }
         drop(enc);
-        path
+        (dir, path)
     }
 
     #[test]
     fn gif_files_are_checked_and_shared_on_load() {
-        let gif = temp_gif("load");
+        let (_dir, gif) = temp_gif("load");
         let dir = gif.parent().unwrap();
         let conf = dir.join("config.toml");
         let item = |id: &str, path: &str| {

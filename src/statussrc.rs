@@ -407,10 +407,8 @@ mod tests {
     use super::*;
     use std::{fs::File, io::Write, process::Command};
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("touchbinux-status-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        d
+    fn tmp(name: &str) -> crate::testdir::TestDir {
+        crate::testdir::new(&format!("status-{name}"))
     }
 
     #[test]
@@ -451,7 +449,7 @@ mod tests {
     fn a_file_written_in_the_folder_is_a_screenshot() {
         let d = tmp("watch");
         fs::create_dir_all(&d).unwrap();
-        let mut w = ShotWatch::new(&[d.clone(), d.clone()]).unwrap();
+        let mut w = ShotWatch::new(&[d.to_path_buf(), d.to_path_buf()]).unwrap();
         assert_eq!(w.folders.len(), 1, "duplicates once");
         assert!(!w.read(), "nothing yet");
         // Temporary and hidden files: nothing.

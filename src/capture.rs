@@ -533,8 +533,7 @@ mod tests {
     /// processes only, stopped with SIGINT, noticed when gone.
     #[test]
     fn follows_and_stops_a_recorder() {
-        let dir = std::env::temp_dir().join(format!("touchbinux-rec-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testdir::new("rec");
         let fake = dir.join(RECORDER);
         let _ = fs::remove_file(&fake);
         std::os::unix::fs::symlink("/usr/bin/sleep", &fake).unwrap();

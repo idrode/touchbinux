@@ -580,16 +580,16 @@ pub mod fake {
 
     pub struct FakeHypr {
         pub dir: PathBuf,
+        /// Holds `dir`; removed with it when the fake is dropped.
+        _root: crate::testdir::TestDir,
         pub requests: Arc<Mutex<Vec<String>>>,
         events: UnixListener,
     }
 
     impl FakeHypr {
         pub fn new(name: &str, state: &HyprState, reply: &'static str) -> FakeHypr {
-            let dir = std::env::temp_dir()
-                .join(format!("touchbinux-hypr-{}-{name}", std::process::id()))
-                .join("abc_1_2");
-            let _ = fs::remove_dir_all(&dir);
+            let root = crate::testdir::new(&format!("hypr-{name}"));
+            let dir = root.join("abc_1_2");
             fs::create_dir_all(&dir).unwrap();
             let control = UnixListener::bind(dir.join(".socket.sock")).unwrap();
             let events = UnixListener::bind(dir.join(".socket2.sock")).unwrap();
@@ -609,6 +609,7 @@ pub mod fake {
             });
             FakeHypr {
                 dir,
+                _root: root,
                 requests,
                 events,
             }

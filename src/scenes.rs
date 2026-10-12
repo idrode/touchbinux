@@ -2868,12 +2868,10 @@ mod tests {
         assert!(!s.menus[0].fold.is_open());
 
         // A wide GIF in the bar widens the header, and the unfolded row with it.
+        let d = crate::gifpick::tests::temp_dir("scene");
+        crate::gifpick::tests::write_gif(&d.join("w.gif"), 300, 100, 2);
         let gif: Gif = crate::gif::decode_fitted(
-            &{
-                let d = crate::gifpick::tests::temp_dir("scene");
-                crate::gifpick::tests::write_gif(&d.join("w.gif"), 300, 100, 2);
-                d.join("w.gif")
-            },
+            &d.join("w.gif"),
             76,
             50,
             false,
@@ -2899,12 +2897,12 @@ mod tests {
     #[ignore]
     fn dump_gif_picker() {
         let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let generated = crate::gifpick::tests::temp_dir("dump");
         let gifs = std::env::var("TOUCHBINUX_GIFS").map(PathBuf::from).unwrap_or_else(|_| {
-            let d = crate::gifpick::tests::temp_dir("dump");
             for (i, (w, h)) in [(40, 40), (90, 30), (30, 60)].iter().enumerate() {
-                crate::gifpick::tests::write_gif(&d.join(format!("{i}.gif")), *w, *h, 3);
+                crate::gifpick::tests::write_gif(&generated.join(format!("{i}.gif")), *w, *h, 3);
             }
-            d
+            generated.to_path_buf()
         });
         let font = font().unwrap();
         let mut s = menu_scene(&font, &PICKER.replace("/nonexistent", &gifs.display().to_string()));

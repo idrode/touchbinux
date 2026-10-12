@@ -354,11 +354,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn temp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("touchbinux-pick-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+    pub(crate) fn temp_dir(name: &str) -> crate::testdir::TestDir {
+        crate::testdir::new(&format!("pick-{name}"))
     }
 
     #[test]

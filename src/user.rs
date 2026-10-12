@@ -207,10 +207,8 @@ mod tests {
     use std::os::unix::{fs::symlink, net::UnixListener};
 
     /// An empty fake runtime directory, private like logind's.
-    fn runtime(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("touchbinux-env-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
+    fn runtime(name: &str) -> crate::testdir::TestDir {
+        let d = crate::testdir::new(&format!("env-{name}"));
         fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
         d
     }

@@ -412,11 +412,8 @@ mod tests {
         nix::unistd::Uid::current().as_raw()
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("touchbinux-mpv-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn temp_dir(name: &str) -> crate::testdir::TestDir {
+        crate::testdir::new(&format!("mpv-{name}"))
     }
 
     /// Waits until `fd` is readable (or 2 s).

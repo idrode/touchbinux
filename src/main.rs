@@ -25,6 +25,8 @@ mod state;
 mod stats;
 mod status;
 mod statussrc;
+#[cfg(test)]
+mod testdir;
 mod touch;
 mod user;
 mod widgets;
@@ -1851,11 +1853,8 @@ mod tests {
     use std::{fs, io::Write};
 
     /// A temporary folder for one test.
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("touchbinux-app-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp(name: &str) -> crate::testdir::TestDir {
+        crate::testdir::new(&format!("app-{name}"))
     }
 
     /// The daemon's App for the bar scene with `status` (TOML) between two

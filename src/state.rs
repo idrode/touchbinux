@@ -95,8 +95,7 @@ mod tests {
 
     #[test]
     fn saves_and_reads_back() {
-        let dir = std::env::temp_dir().join(format!("touchbinux-state-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::testdir::new("state");
         let path = dir.join("sub").join(FILE);
         let mut s = StateFile::at(path.clone(), true);
         assert_eq!(s.state, State::default());

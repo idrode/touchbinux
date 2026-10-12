@@ -173,8 +173,7 @@ mod tests {
     /// battery. Only the one of type Battery counts, whatever its name.
     #[test]
     fn finds_the_battery_by_type() {
-        let root = std::env::temp_dir().join(format!("touchbinux-psy-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::testdir::new("psy");
         let supply = |name: &str, ty: &str, extra: &[(&str, &str)]| {
             let d = root.join(name);
             fs::create_dir_all(&d).unwrap();

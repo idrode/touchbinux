@@ -26,7 +26,7 @@ const HANDLE_GAP: f32 = 8.0;
 /// The least a button with only an icon takes; one with a label, its text and
 /// this much padding either side.
 const MIN_ICON_BUTTON: f32 = 40.0;
-const LABEL_PADDING: f32 = 2.0 * PADDING;
+const LABEL_PADDING: f32 = PADDING;
 /// How far the row slides in from the handle as it unfolds.
 const SLIDE: f32 = 24.0;
 

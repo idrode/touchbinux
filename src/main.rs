@@ -3387,4 +3387,193 @@ mod tests {
         assert_eq!((app.idle.stage(), app.idle.deadline()), (Stage::Sleep, None));
         assert_eq!(app.scene_next_change(S(30)), None);
     }
+
+
+    /// The daemon's App with a gif_picker over `dir` (a.gif and b.gif in it) and
+    /// `extra` (TOML) on it, its own state file, and a real loader thread.
+    fn picker_app(dir: &Path, extra: &str) -> App {
+        let gifs = dir.join("gifs");
+        fs::create_dir(&gifs).unwrap();
+        crate::gifpick::tests::write_gif(&gifs.join("a.gif"), 30, 30, 3);
+        crate::gifpick::tests::write_gif(&gifs.join("b.gif"), 30, 30, 5);
+        let toml = format!(
+            "[[layers]]\nid = 'main'\n\
+             [[layers.items]]\ntype = 'gif_picker'\ndir = '{}'\n{extra}\n",
+            gifs.display()
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+                layer: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: Some(Loader::start().unwrap()),
+            follow_fn: false,
+            touchbar_light: None,
+        };
+        let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
+        app.state = state::StateFile::at(dir.join("state.toml"), false);
+        pump(&mut app, |a| !a.pickers["gif_picker"].entries.is_empty());
+        app
+    }
+
+    /// What a loader reply was, for the tests.
+    #[derive(Debug, PartialEq)]
+    enum Got {
+        Listed,
+        Decoded(String),
+        Cached(String),
+        Failed(String),
+    }
+
+    /// Hands the loader's replies to the App, as the loop does, until `done`
+    /// (5 s at most). Returns what came.
+    fn pump(app: &mut App, done: impl Fn(&App) -> bool) -> Vec<Got> {
+        let mut got = Vec::new();
+        let end = Instant::now() + S(5);
+        while !done(app) {
+            assert!(Instant::now() < end, "the loader didn't answer: {got:?}");
+            {
+                let fd = app.loader.as_ref().unwrap().fd();
+                let mut fds = [nix::poll::PollFd::new(std::os::fd::AsFd::as_fd(&fd), nix::poll::PollFlags::POLLIN)];
+                nix::poll::poll(&mut fds, 100u16).unwrap();
+            }
+            let replies = app.loader.as_ref().unwrap().drain();
+            for r in replies {
+                let name = |p: &Path| p.file_name().unwrap().to_string_lossy().to_string();
+                got.push(match &r {
+                    Reply::Scanned { .. } => Got::Listed,
+                    Reply::Loaded { path, result: Ok((_, Fresh::Decoded(_))), .. } => Got::Decoded(name(path)),
+                    Reply::Loaded { path, result: Ok((_, Fresh::Unchanged)), .. } => Got::Cached(name(path)),
+                    Reply::Loaded { path, result: Err(_), .. } => Got::Failed(name(path)),
+                });
+                app.on_reply(r);
+            }
+        }
+        got
+    }
+
+    /// The file gif_picker shows (`None`: the icon or nothing).
+    fn showing(app: &App) -> Option<String> {
+        match app.picker_show("gif_picker") {
+            PickerShow::Gif(..) => {
+                let (path, _, _) = app.pickers["gif_picker"].gif.as_ref().unwrap();
+                Some(path.file_name().unwrap().to_string_lossy().to_string())
+            }
+            PickerShow::Icon => None,
+            PickerShow::Blank => Some("blank".into()),
+        }
+    }
+
+    fn loaded(app: &App) -> bool {
+        app.pickers["gif_picker"].loading.is_none()
+    }
+
+    #[test]
+    fn a_picked_gif_loads_in_the_background_and_the_old_one_stays_meanwhile() {
+        let dir = tmp("pick-keep");
+        let mut app = picker_app(&dir, "");
+        assert_eq!(showing(&app), None, "nothing chosen yet: the icon");
+        app.on_pick("gif_picker", "a.gif");
+        assert!(!loaded(&app));
+        assert_eq!(pump(&mut app, loaded), vec![Got::Decoded("a.gif".into())]);
+        assert_eq!(showing(&app).as_deref(), Some("a.gif"));
+        // The next one: a stays on the bar until b is ready, then cross-fades.
+        app.on_pick("gif_picker", "b.gif");
+        assert_eq!(showing(&app).as_deref(), Some("a.gif"), "keep: not the loading icon");
+        pump(&mut app, loaded);
+        assert_eq!(showing(&app).as_deref(), Some("b.gif"));
+        // Nothing animates once the fade is done (play = on_tap).
+        let t = app.epoch.elapsed() + S(1);
+        let live = app.live();
+        app.scene.advance(t, &live);
+        assert_eq!(app.scene.next_change(t), None);
+    }
+
+    #[test]
+    fn of_two_quick_picks_only_the_last_one_ever_shows() {
+        let dir = tmp("pick-quick");
+        let mut app = picker_app(&dir, "");
+        app.on_pick("gif_picker", "a.gif");
+        app.on_pick("gif_picker", "b.gif");
+        let end = Instant::now() + S(5);
+        while !loaded(&app) {
+            assert!(Instant::now() < end);
+            pump(&mut app, |a| loaded(a) || a.pickers["gif_picker"].gif.is_some());
+            assert_ne!(showing(&app).as_deref(), Some("a.gif"), "a is no longer the chosen one");
+        }
+        assert_eq!(showing(&app).as_deref(), Some("b.gif"));
+    }
+
+    #[test]
+    fn a_broken_gif_leaves_the_old_one_and_is_not_asked_for_again() {
+        let dir = tmp("pick-broken");
+        let mut app = picker_app(&dir, "");
+        app.on_pick("gif_picker", "a.gif");
+        pump(&mut app, loaded);
+        // Chosen, then broken before it loads (as if changed on disk).
+        let bad = dir.join("gifs/a.gif").with_file_name("c.gif");
+        fs::write(&bad, b"GIF89a not a gif at all").unwrap();
+        app.state.state.gif_picker.insert("gif_picker".into(), bad.clone());
+        app.sync_pickers();
+        assert_eq!(pump(&mut app, loaded), vec![Got::Failed("c.gif".into())]);
+        assert_eq!(showing(&app).as_deref(), Some("a.gif"), "what was there stays");
+        assert_eq!(app.pickers["gif_picker"].failed.as_ref(), Some(&bad));
+        // A rebuild (or anything else) doesn't ask for it again.
+        app.sync_pickers();
+        assert!(loaded(&app));
+    }
+
+    #[test]
+    fn a_gif_picked_again_comes_from_the_cache_until_its_file_changes() {
+        let dir = tmp("pick-cache");
+        let mut app = picker_app(&dir, "");
+        for (name, want) in [
+            ("a.gif", Got::Decoded("a.gif".into())),
+            ("b.gif", Got::Decoded("b.gif".into())),
+            ("a.gif", Got::Cached("a.gif".into())),
+        ] {
+            app.on_pick("gif_picker", name);
+            assert_eq!(pump(&mut app, loaded), vec![want]);
+            assert_eq!(showing(&app).as_deref(), Some(name));
+        }
+        // Both kept, a once: frames fitted to the slot's box.
+        let (_, size, _) = app.pickers["gif_picker"].gif.as_ref().unwrap();
+        let px = size.1 as usize * size.1 as usize * 4;
+        assert_eq!(app.gif_cache.bytes(), (3 + 5) * px);
+        // Rewritten: decoded again, and shown as it is now.
+        crate::gifpick::tests::write_gif(&dir.join("gifs/a.gif"), 30, 30, 7);
+        app.on_pick("gif_picker", "b.gif");
+        assert_eq!(pump(&mut app, loaded), vec![Got::Cached("b.gif".into())]);
+        app.on_pick("gif_picker", "a.gif");
+        assert_eq!(pump(&mut app, loaded), vec![Got::Decoded("a.gif".into())]);
+        let (_, _, gif) = app.pickers["gif_picker"].gif.as_ref().unwrap();
+        assert_eq!(gif.frame_count(), 7);
+    }
+
+    #[test]
+    fn loading_icon_and_none_show_the_icon_or_nothing_meanwhile() {
+        for (loading, meanwhile) in [("icon", None), ("none", Some("blank")), ("keep", Some("a.gif"))] {
+            let dir = tmp(&format!("pick-loading-{loading}"));
+            let mut app = picker_app(&dir, &format!("loading = '{loading}'"));
+            app.on_pick("gif_picker", "a.gif");
+            pump(&mut app, loaded);
+            app.on_pick("gif_picker", "b.gif");
+            assert_eq!(showing(&app).as_deref(), meanwhile, "loading = {loading}");
+            pump(&mut app, loaded);
+            assert_eq!(showing(&app).as_deref(), Some("b.gif"), "loading = {loading}");
+        }
+    }
 }

@@ -1804,6 +1804,9 @@ fn run(
     // The same for the Fn keyboard and the watch for it while it is missing.
     let mut fn_keys: Option<u64> = None;
     let mut fn_nodes: Option<u64> = None;
+    // The Fn layer's delay: a one-shot timer that only exists while Fn is held and
+    // the layer waits to show, with the deadline it is armed for.
+    let mut fn_timer: Option<(TimerFd, Instant)> = None;
     let debug_touch = app.args.scene == "touch";
     let start = app.epoch;
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
@@ -1847,6 +1850,25 @@ fn run(
         {
             epoll.add(w, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_NODES))?;
             fn_nodes = Some(app.fnl.watch_id);
+        }
+        match app.fnl.deadline() {
+            None => fn_timer = None,
+            Some(at) if fn_timer.as_ref().is_some_and(|(_, armed)| *armed == at) => {}
+            Some(at) => {
+                let t = match fn_timer.take() {
+                    Some((t, _)) => t,
+                    None => {
+                        let t = TimerFd::new(
+                            ClockId::CLOCK_MONOTONIC,
+                            TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
+                        )?;
+                        epoll.add(&t, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_TIMER))?;
+                        t
+                    }
+                };
+                arm_once(&t, at.saturating_duration_since(now))?;
+                fn_timer = Some((t, at));
+            }
         }
         // A hidden status item appears or goes: the others move up or make room.
         if app.status_layout_changed() {
@@ -1998,6 +2020,13 @@ fn run(
                 TOKEN_TIMER => drain_timer(&timer)?,
                 TOKEN_FN_KEYS => dirty |= app.on_fn_readable(),
                 TOKEN_FN_NODES => dirty |= app.on_fn_nodes(),
+                TOKEN_FN_TIMER => {
+                    if let Some((t, _)) = &fn_timer {
+                        drain_timer(t)?;
+                    }
+                    // Early or stale wake-ups change nothing (see FnMachine::fire).
+                    dirty |= app.on_fn_timer(Instant::now());
+                }
                 TOKEN_STATUS_SHOTS => {
                     let at = app.scene_now();
                     if app.shot_watch.as_mut().is_some_and(ShotWatch::read) {

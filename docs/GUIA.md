@@ -1057,6 +1057,7 @@ GIF actual queda a la izquierda (tocarlo pliega) y su miniatura aparece sobre
 | `dir` | **obligatorio** | ruta **absoluta** de la carpeta, p. ej. `"/home/ana/Pictures/gifs"` |
 | `id` | `"gif_picker"` | |
 | `play` | `"on_tap"` | como en `gif`: `"on_tap"` (una vez por toque) o `"always"` (siempre animado, gasta CPU continuamente) |
+| `loading` | `"keep"` | qué se ve mientras carga el GIF recién elegido: `"keep"`, lo que había (el GIF anterior) hasta que el nuevo está listo, y entonces un fundido de 150 ms; `"icon"`, el marco de foto; `"none"`, el hueco vacío |
 | `thumb_size` | lo que permita la fila | alto de las miniaturas en px (8-200; nunca más que la fila desplegada, 44 px en el M2 con `margin = 4`) |
 | `width` / `stretch` | `80` | el GIF elegido se ajusta a su hueco (2 px de margen), manteniendo la proporción |
 | `expand_width` | lo justo | ancho desplegado. Mejor no fijarlo: si es pequeño, las miniaturas se solapan |
@@ -1089,6 +1090,20 @@ width = 80
   (`gif_picker "gif_picker": reading ...: No such file or directory; disabled`).
   Tocarlo vuelve a mirar la carpeta.
 - **Mientras no se ha elegido ninguno** muestra un marco de foto blanco.
+- **Al elegir uno**, se decodifica y se reduce al tamaño de la barra en el hilo
+  aparte (tocar y redibujar siguen al momento) y se cambia con un fundido corto.
+  Si eliges otro antes de que acabe, el primero no se llega a mostrar (y si aún
+  no había empezado, ni se decodifica). En este equipo, en release, el GIF más
+  lento de decodificar (1080×1080, 40 fotogramas) tarda ~290 ms; la mayoría,
+  menos de 50 ms.
+- **Caché**: los GIF ya reducidos se guardan en memoria (32 MiB como mucho; sale
+  el usado hace más tiempo), así que **volver a elegir uno es instantáneo**. Si el
+  archivo cambia (fecha o tamaño, que el hilo comprueba como el usuario), se
+  vuelve a decodificar. No hay caché en disco: tras reiniciar el daemon, la
+  primera elección de cada GIF vuelve a decodificarse.
+- **Si el elegido no se puede leer o está corrupto**, se queda lo que había, el log
+  lo dice una vez (`gif_picker "gif_picker": decoding ...`) y no se reintenta
+  hasta que lo vuelvas a elegir.
 - **La elección se guarda** en `/var/lib/touchbinux/state.toml` (lo crea systemd con
   `StateDirectory=`), así que sobrevive a reinicios y recargas. **El config de
   `/etc` no se modifica.** Si el archivo elegido ya no está en `dir` (o cambias

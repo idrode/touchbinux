@@ -330,6 +330,8 @@ format = "%H:%M"
 # type = "gif_picker"
 # dir = "/home/your-user/Pictures/gifs"   # required, absolute
 # play = "on_tap"                  # or "always" (redraws all the time: costs CPU)
+# loading = "keep"                 # while a new pick loads: the old GIF ("keep"),
+#                                  # the empty picture ("icon") or nothing ("none")
 # width = 80                       # the GIF is fitted to this slot
 # thumb_size = 44                  # thumbnails' height, px (default: the row's)
 # active_color = "#00ffb750"       # behind the chosen GIF's thumbnail

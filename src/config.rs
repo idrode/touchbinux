@@ -141,6 +141,20 @@ pub enum WakeOn {
     Fn,
 }
 
+/// `loading` of a gif_picker: what shows while a newly chosen GIF loads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Loading {
+    /// What was there (the previous GIF) until the new one is ready, then a short
+    /// cross-fade.
+    #[default]
+    Keep,
+    /// The empty-picture icon.
+    Icon,
+    /// Nothing: the slot stays empty.
+    None,
+}
+
 /// `[idle]`: normal -> dim -> sleep -> off after so long without activity.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -539,6 +553,9 @@ pub struct ItemConfig {
     /// gif, gif_picker: "on_tap" (default) or "always".
     #[serde(default)]
     pub play: Option<Play>,
+    /// gif_picker: what shows while a newly chosen GIF loads.
+    #[serde(default)]
+    pub loading: Option<Loading>,
     /// The item's box (see `frame`); unset ones come from the layer's `item_*`.
     #[serde(default)]
     pub shape: Option<Shape>,
@@ -1031,6 +1048,7 @@ impl ItemConfig {
                 "id",
                 "dir",
                 "play",
+                "loading",
                 "thumb_size",
                 "action",
                 "anim_ms",
@@ -1124,6 +1142,7 @@ impl ItemConfig {
             ("collapse_after_ms", self.collapse_after_ms.is_some()),
             ("path", self.path.is_some()),
             ("play", self.play.is_some()),
+            ("loading", self.loading.is_some()),
             ("key", self.key.is_some()),
             ("shape", self.shape.is_some()),
             ("radius", self.radius.is_some()),
@@ -2066,6 +2085,7 @@ impl Config {
                 collapse_after_ms: None,
                 path: None,
                 play: None,
+                loading: None,
                 key: None,
                 children: None,
                 drag_children: None,
@@ -3315,6 +3335,14 @@ mod tests {
         let plain = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif_picker'\ndir='/g'")
             .unwrap();
         assert_eq!(plain.layers[0].items[0].size(), Size::Fixed(80.0));
+        assert_eq!(plain.layers[0].items[0].loading, None, "keep, by default");
+        for (body, want) in [("keep", Loading::Keep), ("icon", Loading::Icon), ("none", Loading::None)] {
+            let c = parse(&format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='gif_picker'\ndir='/g'\nloading='{body}'"
+            ))
+            .unwrap();
+            assert_eq!(c.layers[0].items[0].loading, Some(want));
+        }
         let item = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif_picker'\n{body}");
         for body in [
             "",
@@ -3329,11 +3357,14 @@ mod tests {
             "dir='/g'\npressed_scale=0.9",
             "dir='/g'\nchildren=[]",
             "dir='/g'\ndirectory='/h'",
+            "dir='/g'\nloading='spinner'",
         ] {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");
         }
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\ndir='/g'").is_err());
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='gif'\npath='/a.gif'\nthumb_size=40").is_err());
+        let err = format!("{:#}", parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nloading='keep'").unwrap_err());
+        assert!(err.contains("`loading` is not valid for a clock"), "{err}");
         let err = format!("{:#}", parse(&item("")).unwrap_err());
         assert!(err.contains("a gif_picker needs `dir`"), "{err}");
     }

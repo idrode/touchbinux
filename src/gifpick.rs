@@ -354,6 +354,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// Not a check: how long each GIF in $TOUCHBINUX_GIFS takes to decode and
+    /// scale to the bar (76x56, an 80 px gif_picker), as a pick does. In release:
+    /// TOUCHBINUX_GIFS=~/Pictures/gifs cargo test --release time_gif_loads -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn time_gif_loads() {
+        let Some(dir) = std::env::var_os("TOUCHBINUX_GIFS") else {
+            return;
+        };
+        let mut files: Vec<_> = fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort_by_key(|p| std::cmp::Reverse(fs::metadata(p).map_or(0, |m| m.len())));
+        for path in files.iter().filter(|p| p.extension().is_some_and(|x| x == "gif")) {
+            let t = std::time::Instant::now();
+            let res = decode_fitted(path, 76, 56, false);
+            let took = t.elapsed();
+            let len = fs::metadata(path).unwrap().len();
+            match res {
+                Ok(f) => {
+                    let bytes: usize = f.frames.iter().map(|i| (i.width() * i.height() * 4) as usize).sum();
+                    eprintln!(
+                        "{:>8.1} ms  {:>8} B  {:>4} frames  {:>8} B scaled  {}",
+                        took.as_secs_f64() * 1000.0,
+                        len,
+                        f.frames.len(),
+                        bytes,
+                        path.display()
+                    );
+                }
+                Err(e) => eprintln!("{:>8.1} ms  {e:#}", took.as_secs_f64() * 1000.0),
+            }
+        }
+    }
+
     pub(crate) fn temp_dir(name: &str) -> crate::testdir::TestDir {
         crate::testdir::new(&format!("pick-{name}"))
     }

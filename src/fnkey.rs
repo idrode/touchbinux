@@ -5,6 +5,9 @@
 //!
 //! - The device is opened read-only and never grabbed: the keyboard keeps working
 //!   for the rest of the system exactly as before.
+//! - The kernel is asked (EVIOCSMASK, a per-reader filter) to give this reader
+//!   KEY_FN and nothing else: other keys never reach the daemon, and typing
+//!   doesn't even wake it up. Should that fail, the filtering below still holds.
 //! - Its events are read with plain `read(2)` into a buffer on the stack. Of each
 //!   event only the type and code are compared with KEY_FN; for KEY_FN the value
 //!   tells press (1) from release (0), and auto-repeat (2) is skipped. Nothing else
@@ -35,6 +38,11 @@ pub const INPUT_DIR: &str = "/dev/input";
 
 const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
+/// The event types besides EV_SYN and EV_KEY that a reader can mask: REL, ABS,
+/// MSC, SW, LED, SND, FF.
+const MASKED_TYPES: [u32; 7] = [0x02, 0x03, 0x04, 0x05, 0x11, 0x12, 0x15];
+/// KEY_CNT bits.
+const KEY_WORDS: usize = 0x300 / 64;
 const SYN_DROPPED: u16 = 3;
 /// `struct input_event`: a `struct timeval`, then type (u16), code (u16) and value
 /// (i32), whatever the size of the timeval.
@@ -149,11 +157,15 @@ impl FnKeyboard {
             });
         };
         let (path, dev, c) = opened.swap_remove(i);
-        Ok(FnKeyboard {
-            dev,
-            path,
-            name: c.name,
-        })
+        Ok(FnKeyboard::with(path, dev, c.name))
+    }
+
+    /// Follows `dev`, filtered down to KEY_FN by the kernel if it can.
+    fn with(path: PathBuf, dev: RawDevice, name: String) -> FnKeyboard {
+        if let Err(e) = only_fn(&dev) {
+            eprintln!("fn: no kernel event filter ({e}); other keys are dropped here instead");
+        }
+        FnKeyboard { dev, path, name }
     }
 
     /// Whether Fn is down now.
@@ -223,6 +235,30 @@ fn scan(buf: &mut [u8], n: usize, out: &mut Vec<FnEvent>) {
     buf.fill(0);
     // So the zeroing isn't optimised away as a dead store.
     std::hint::black_box(&buf);
+}
+
+nix::ioctl_write_ptr!(eviocsmask, b'E', 0x93, libc::input_mask);
+
+/// Asks the kernel to pass this reader KEY_FN only (EV_SYN stays, for
+/// SYN_DROPPED; reports left empty by the mask are dropped by the kernel).
+fn only_fn(dev: &RawDevice) -> nix::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut keys = [0u64; KEY_WORDS];
+    let code = KeyCode::KEY_FN.code() as usize;
+    keys[code / 64] |= 1 << (code % 64);
+    let masks = std::iter::once((EV_KEY as u32, &keys[..])).chain(MASKED_TYPES.map(|t| (t, &[][..])));
+    for (ty, bits) in masks {
+        let mask = libc::input_mask {
+            type_: ty,
+            codes_size: std::mem::size_of_val(bits) as u32,
+            codes_ptr: bits.as_ptr() as u64,
+        };
+        // SAFETY: EVIOCSMASK only reads `mask` and the `codes_size` bytes at
+        // `codes_ptr`, both alive on this stack frame for the call; the fd is open
+        // (owned by `dev`). There is no safe wrapper for this ioctl.
+        unsafe { eviocsmask(dev.as_raw_fd(), &mask) }?;
+    }
+    Ok(())
 }
 
 fn open_read_only(path: &Path) -> std::io::Result<RawDevice> {
@@ -438,6 +474,54 @@ mod tests {
             }
             Err(e) => eprintln!("{e}"),
         }
+    }
+
+    /// Needs root (creates a uinput keyboard; see docs/GUIA.md, "Probar la capa
+    /// Fn"): other keys never reach the reader, not even as a wake-up, and Fn's
+    /// auto-repeat is dropped.
+    #[test]
+    #[ignore]
+    fn the_kernel_filter_passes_fn_only() {
+        use evdev::{AttributeSet, EventType, InputEvent, uinput::VirtualDevice};
+        use nix::poll::{PollFd, PollFlags, poll};
+        let mut keys = AttributeSet::<KeyCode>::new();
+        keys.insert(KeyCode::KEY_A);
+        keys.insert(KeyCode::KEY_FN);
+        let mut v = VirtualDevice::builder()
+            .unwrap()
+            .name("touchbinux fn filter test")
+            .with_keys(&keys)
+            .unwrap()
+            .build()
+            .unwrap();
+        let path = v.enumerate_dev_nodes_blocking().unwrap().flatten().next().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300)); // udev's node
+        let mut kb = FnKeyboard::with(path.clone(), open_read_only(&path).unwrap(), "test".into());
+        let key = |k: KeyCode, value| InputEvent::new(EventType::KEY.0, k.code(), value);
+        let readable = |kb: &FnKeyboard| {
+            let mut fds = [PollFd::new(kb.as_fd(), PollFlags::POLLIN)];
+            poll(&mut fds, 200u16).unwrap() > 0
+        };
+        v.emit(&[key(KeyCode::KEY_A, 1)]).unwrap();
+        v.emit(&[key(KeyCode::KEY_A, 0)]).unwrap();
+        assert!(!readable(&kb), "typing doesn't wake the reader");
+        assert_eq!(kb.fn_pressed(), Ok(false));
+        v.emit(&[key(KeyCode::KEY_FN, 1)]).unwrap();
+        assert!(readable(&kb));
+        let mut out = Vec::new();
+        kb.read(&mut out).unwrap();
+        assert_eq!(out, vec![FnEvent::Pressed]);
+        assert_eq!(kb.fn_pressed(), Ok(true));
+        v.emit(&[key(KeyCode::KEY_FN, 2), key(KeyCode::KEY_A, 1)]).unwrap();
+        v.emit(&[key(KeyCode::KEY_A, 0), key(KeyCode::KEY_FN, 0)]).unwrap();
+        assert!(readable(&kb));
+        out.clear();
+        kb.read(&mut out).unwrap();
+        assert_eq!(out, vec![FnEvent::Released]);
+        // The device goes away: lost.
+        drop(v);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(kb.read(&mut out).is_err() || kb.fn_pressed().is_err());
     }
 
     #[test]

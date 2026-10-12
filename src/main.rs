@@ -1807,6 +1807,8 @@ fn run(
     // The Fn layer's delay: a one-shot timer that only exists while Fn is held and
     // the layer waits to show, with the deadline it is armed for.
     let mut fn_timer: Option<(TimerFd, Instant)> = None;
+    // The layer that was on screen when the Fn layer came or went, fading out.
+    let mut fade: Option<Fade> = None;
     let debug_touch = app.args.scene == "touch";
     let start = app.epoch;
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
@@ -1883,7 +1885,7 @@ fn run(
         }
         // mpv: connection retries, and its fds (they change with each connection,
         // and with the client on a reload; closed ones leave epoll by themselves).
-        let player_open = app.scene.player_open();
+        let player_open = app.shown().player_open();
         if let Some(m) = &mut app.mpv {
             dirty |= m.poll(now);
             // The position only while the seek bar is on screen with something
@@ -1915,11 +1917,12 @@ fn run(
         let earliest = last_frame.map_or(start, |l| l + FRAME);
         let frame_due = if dirty { Some(earliest) } else { next_anim };
         // The scene may have been rebuilt (config reload) with other widgets.
-        if app.scene.wall_period() != clock_period {
-            clock_period = app.scene.wall_period();
+        // Or the Fn layer came or went.
+        if app.shown().wall_period() != clock_period {
+            clock_period = app.shown().wall_period();
             arm_clock(&clock, clock_period)?;
         }
-        let poll = app.scene.has_battery_icon() && app.battery.is_some();
+        let poll = app.shown().has_battery_icon() && app.battery.is_some();
         if poll != battery_polled {
             battery_polled = poll;
             if poll {
@@ -1932,18 +1935,38 @@ fn run(
 
         if frame_due.is_some_and(|d| d <= now) {
             let t = now - start;
+            if std::mem::take(&mut app.fnl.switched) {
+                // From what is on screen now (maybe half a fade already).
+                let len = app.config.fn_layer.as_ref().map_or(Duration::ZERO, |f| f.transition());
+                fade = None;
+                if !len.is_zero() {
+                    fade = Fade::new(&canvas, t, len)
+                        .inspect_err(|e| eprintln!("fn: no cross-fade: {e:#}"))
+                        .ok();
+                }
+            }
             let live = app.live();
-            app.scene.advance(t, &live);
-            app.scene.draw(&mut canvas, t, &app.font, &live)?;
+            // Only the scene on screen moves: the hidden one costs nothing.
+            let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
+            scene.advance(t, &live);
+            scene.draw(&mut canvas, t, &app.font, &live)?;
+            if let Some(f) = &fade {
+                f.draw(&mut canvas, t);
+            }
+            if fade.as_ref().is_some_and(|f| f.done(t)) {
+                fade = None;
+            }
             let drawn = Instant::now();
             drm.present(&canvas)?;
             stats.record(drawn - now, drawn.elapsed());
             dirty = false;
             last_frame = Some(now);
 
-            next_anim = app
-                .scene
-                .next_change(t)
+            let fading = fade.as_ref().and_then(|f| f.next_change(t));
+            next_anim = [app.shown().next_change(t), fading]
+                .into_iter()
+                .flatten()
+                .min()
                 .map(|nc| (start + nc).max(now + FRAME));
             if next_anim.is_none() {
                 stats.report();

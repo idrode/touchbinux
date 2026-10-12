@@ -3576,4 +3576,49 @@ mod tests {
             assert_eq!(showing(&app).as_deref(), Some("b.gif"), "loading = {loading}");
         }
     }
+
+
+    /// Not a check: from a pick to the GIF ready, the first time (decoded) and
+    /// again (cached), for the GIFs in $TOUCHBINUX_GIFS in an 80 px gif_picker.
+    /// TOUCHBINUX_GIFS=~/Pictures/gifs cargo test --release time_picks -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn time_picks() {
+        let Some(gifs) = std::env::var_os("TOUCHBINUX_GIFS") else {
+            return;
+        };
+        let dir = tmp("time-picks");
+        let path = dir.join("config.toml");
+        let toml = format!(
+            "[[layers]]\nid = 'main'\n[[layers.items]]\ntype = 'gif_picker'\ndir = '{}'\nwidth = 80\n",
+            Path::new(&gifs).display()
+        );
+        fs::write(&path, toml).unwrap();
+        let parts = AppParts {
+            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: Some(Loader::start().unwrap()),
+            follow_fn: false,
+            touchbar_light: None,
+        };
+        let mut app = new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap();
+        app.state = state::StateFile::at(dir.join("state.toml"), false);
+        pump(&mut app, |a| !a.pickers["gif_picker"].entries.is_empty());
+        let names: Vec<String> = app.pickers["gif_picker"].entries.iter().map(|(n, _, _)| n.clone()).collect();
+        for round in ["first", "again"] {
+            for name in &names {
+                let t = Instant::now();
+                app.on_pick("gif_picker", name);
+                let got = pump(&mut app, loaded);
+                eprintln!("{round:>5} {:>8.2} ms  {name}  {got:?}", t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        eprintln!("cache: {} bytes", app.gif_cache.bytes());
+    }
 }

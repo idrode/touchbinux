@@ -1,6 +1,7 @@
 //! TOML configuration: buttons, layers of bar items, and their actions.
 
 use crate::{
+    border::Border,
     canvas::Rgba,
     capture::CaptureMode,
     fnlayer::FnMode,
@@ -395,6 +396,11 @@ pub struct LayerConfig {
     pub item_pressed_scale: Option<f32>,
     #[serde(default)]
     pub item_text_color: Option<Color>,
+    /// Defaults for the items' `border_color` and `border_width`.
+    #[serde(default)]
+    pub item_border_color: Option<Color>,
+    #[serde(default)]
+    pub item_border_width: Option<f32>,
     /// Default diameter of the layer's circles (`size` on an item).
     #[serde(default)]
     pub item_size: Option<f32>,
@@ -576,6 +582,15 @@ pub struct ItemConfig {
     /// Colour of the item's text and numbers (not for gifs and spacers: they have none).
     #[serde(default)]
     pub text_color: Option<Color>,
+    /// A border inside the box's outline (see `border`): its colour and width,
+    /// both needed (here or the layer's `item_border_*`).
+    #[serde(default)]
+    pub border_color: Option<Color>,
+    #[serde(default)]
+    pub border_width: Option<f32>,
+    /// The border's colour while pressed (items with a pressed look).
+    #[serde(default)]
+    pub pressed_border_color: Option<Color>,
     /// Drawn this much bigger/smaller while pressed (1.0: no effect).
     #[serde(default)]
     pub pressed_scale: Option<f32>,
@@ -794,6 +809,13 @@ pub struct ChildConfig {
     pub pressed_scale: Option<f32>,
     #[serde(default)]
     pub text_color: Option<Color>,
+    /// Its own border, as on a layer's items (no defaults from the parent).
+    #[serde(default)]
+    pub border_color: Option<Color>,
+    #[serde(default)]
+    pub border_width: Option<f32>,
+    #[serde(default)]
+    pub pressed_border_color: Option<Color>,
 }
 
 /// One of an app_keys item's sets: its buttons, for windows of these classes.
@@ -861,6 +883,12 @@ impl ChildConfig {
             || self.pressed_background.is_some()
             || self.pressed_scale.is_some()
             || self.text_color.is_some()
+            || self.border_width.is_some()
+    }
+
+    /// Its border, if it has one.
+    pub fn border(&self) -> Option<Border> {
+        border_of(self.border_color, self.border_width, self.pressed_border_color)
     }
 
     /// Its own box, if it has one: its fields, else the defaults of a layer's items
@@ -1089,6 +1117,9 @@ impl ItemConfig {
             diameter: None,
             pressed_scale: None,
             text_color: None,
+            border_color: None,
+            border_width: None,
+            pressed_border_color: None,
             gif: None,
         }
     }
@@ -1177,7 +1208,9 @@ impl ItemConfig {
             // Its buttons have their own boxes.
             ItemKind::AppKeys => &[],
             // They unfold instead of showing a pressed highlight.
-            ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
+            ItemKind::Volume | ItemKind::Brightness => {
+                &["shape", "radius", "background", "size", "border_color", "border_width"]
+            }
             // Its pressed_background is its children's highlight.
             ItemKind::Expandable | ItemKind::GifPicker | ItemKind::Player | ItemKind::Capture => &[
                 "shape",
@@ -1185,6 +1218,8 @@ impl ItemConfig {
                 "background",
                 "size",
                 "pressed_background",
+                "border_color",
+                "border_width",
             ],
             _ => &[
                 "shape",
@@ -1193,6 +1228,9 @@ impl ItemConfig {
                 "pressed_background",
                 "pressed_scale",
                 "size",
+                "border_color",
+                "border_width",
+                "pressed_border_color",
             ],
         };
         let allowed: &[&str] = match self.kind {
@@ -1352,6 +1390,9 @@ impl ItemConfig {
             ("size", self.diameter.is_some()),
             ("pressed_scale", self.pressed_scale.is_some()),
             ("text_color", self.text_color.is_some()),
+            ("border_color", self.border_color.is_some()),
+            ("border_width", self.border_width.is_some()),
+            ("pressed_border_color", self.pressed_border_color.is_some()),
             ("children", self.children.is_some()),
             ("drag_children", self.drag_children.is_some()),
             ("drag_px", self.drag_px.is_some()),
@@ -1404,8 +1445,21 @@ impl ItemConfig {
         ];
         for (field, set) in present {
             if set && !allowed.contains(&field) && !frame.contains(&field) {
+                // workspaces' own border keys, on another item: say what it takes.
+                let ws_border = ["strip_border", "bar_border", "active_border"]
+                    .iter()
+                    .any(|p| field.starts_with(p));
+                if ws_border && frame.contains(&"border_width") {
+                    bail!(
+                        "{what}: `{field}` is not valid for a {kind} (it is a workspaces key); \
+                         for a border around it use border_color and border_width"
+                    );
+                }
                 bail!("{what}: `{field}` is not valid for a {kind}");
             }
+        }
+        if self.border_width.is_some_and(|w| !WS_BORDER.contains(&w)) {
+            bail!("{what}: border_width must be in {WS_BORDER:?} px");
         }
         match (self.width, self.stretch) {
             (Some(_), Some(_)) => bail!("{what}: use either `width` or `stretch`, not both"),
@@ -1868,6 +1922,9 @@ fn validate_child(what: &str, child: &ChildConfig, player: bool, boxed: bool) ->
             ("pressed_background", child.pressed_background.is_some()),
             ("pressed_scale", child.pressed_scale.is_some()),
             ("text_color", child.text_color.is_some()),
+            ("border_color", child.border_color.is_some()),
+            ("border_width", child.border_width.is_some()),
+            ("pressed_border_color", child.pressed_border_color.is_some()),
         ];
         if let Some((field, _)) = boxed_only.iter().find(|(_, set)| *set) {
             bail!("{what}: `{field}` is only for a player's children or drag_children");
@@ -1913,7 +1970,62 @@ fn validate_child(what: &str, child: &ChildConfig, player: bool, boxed: bool) ->
     if child.pressed_scale.is_some_and(|k| !PRESSED_SCALE.contains(&k)) {
         bail!("{what}: pressed_scale must be in {PRESSED_SCALE:?}");
     }
+    let shape = child.shape.unwrap_or_default();
+    validate_border(
+        what,
+        (child.border_color.is_some(), child.border_width),
+        (child.border_color.is_some(), child.border_width),
+        child.pressed_border_color.is_some(),
+        shape,
+        "",
+    )
+}
+
+/// A border's keys: the colour and width set on the item itself (`own`), and
+/// with the layer's defaults (`effective`); `pressed` (pressed_border_color);
+/// the item's shape. `layer` names where defaults come from, for messages.
+fn validate_border(
+    what: &str,
+    own: (bool, Option<f32>),
+    effective: (bool, Option<f32>),
+    pressed: bool,
+    shape: Shape,
+    layer: &str,
+) -> Result<()> {
+    if let Some(w) = own.1
+        && !WS_BORDER.contains(&w)
+    {
+        bail!("{what}: border_width must be in {WS_BORDER:?} px");
+    }
+    let (color, width) = effective;
+    if own.0 && width.is_none() {
+        bail!("{what}: border_color needs border_width{layer} (a border needs both)");
+    }
+    if own.1.is_some() && !color {
+        bail!("{what}: border_width needs border_color{layer} (a border needs both)");
+    }
+    if pressed && !(color && width.is_some_and(|w| w > 0.0)) {
+        bail!("{what}: pressed_border_color needs a border (border_color and border_width > 0)");
+    }
+    if (own.0 || own.1.is_some()) && shape == Shape::None && width.is_some_and(|w| w > 0.0) {
+        bail!(
+            "{what}: shape = \"none\" has no outline to put a border on; \
+             remove border_color/border_width or use shape \"rounded\" or \"circle\""
+        );
+    }
     Ok(())
+}
+
+/// A border from its keys, if it has one (both, and a width above 0).
+fn border_of(color: Option<Color>, width: Option<f32>, pressed: Option<Color>) -> Option<Border> {
+    match (color, width) {
+        (Some(c), Some(w)) if w > 0.0 => Some(Border {
+            color: c.0,
+            width: w,
+            pressed: pressed.map(|c| c.0),
+        }),
+        _ => None,
+    }
 }
 
 fn validate_icon(what: &str, icon: &str) -> Result<()> {
@@ -1947,9 +2059,36 @@ impl LayerConfig {
                 self.id
             );
         }
+        if let Some(w) = self.item_border_width
+            && !WS_BORDER.contains(&w)
+        {
+            bail!("layer {:?}: item_border_width must be in {WS_BORDER:?} px", self.id);
+        }
+        match (self.item_border_color.is_some(), self.item_border_width.is_some()) {
+            (true, false) => bail!("layer {:?}: item_border_color needs item_border_width", self.id),
+            (false, true) => bail!("layer {:?}: item_border_width needs item_border_color", self.id),
+            _ => {}
+        }
         for item in &self.items {
             item.validate()
                 .with_context(|| format!("layer {:?}", self.id))?;
+            let what = format!(
+                "layer {:?}: {} {:?}",
+                self.id,
+                item.kind.name(),
+                item.id().unwrap_or("")
+            );
+            validate_border(
+                &what,
+                (item.border_color.is_some(), item.border_width),
+                (
+                    item.border_color.or(self.item_border_color).is_some(),
+                    item.border_width.or(self.item_border_width),
+                ),
+                item.pressed_border_color.is_some(),
+                self.frame_for(item).shape,
+                " (here or the layer's item_border_*)",
+            )?;
             if item.diameter.is_some() && !self.is_circle(item) {
                 bail!(
                     "layer {:?}: {} {:?}: `size` only applies to shape = \"circle\" \
@@ -1987,6 +2126,24 @@ impl LayerConfig {
         self.is_circle(item)
             .then(|| item.diameter.or(self.item_size))
             .flatten()
+    }
+
+    /// `item`'s border: its own `border_*`, else the layer's `item_border_*`. None
+    /// for items without a box of their own, or with shape = "none" (the layer's
+    /// default border passes them by).
+    pub fn border_for(&self, item: &ItemConfig) -> Option<Border> {
+        let boxed = !matches!(
+            item.kind,
+            ItemKind::Spacer | ItemKind::Workspaces | ItemKind::Status | ItemKind::AppKeys
+        );
+        if !boxed || self.frame_for(item).shape == Shape::None {
+            return None;
+        }
+        border_of(
+            item.border_color.or(self.item_border_color),
+            item.border_width.or(self.item_border_width),
+            item.pressed_border_color,
+        )
     }
 
     /// `item`'s box: its own `shape`/`radius`/`background`, else the layer's
@@ -2305,6 +2462,8 @@ impl Config {
             item_size: None,
             item_pressed_scale: None,
             item_text_color: None,
+            item_border_color: None,
+            item_border_width: None,
             items,
         }))
     }
@@ -4322,6 +4481,116 @@ mod tests {
             .unwrap_err()
         );
         assert!(err.contains("id \"dup\" is empty or repeated"), "{err}");
+    }
+
+    fn one_item(layer: &str, item: &str) -> Result<Config> {
+        parse(&format!("[[layers]]\nid='m'\n{layer}\n[[layers.items]]\n{item}"))
+    }
+
+    const BTN: &str = "type='button'\nid='b'\nlabel='B'\naction={type='socket'}";
+
+    #[test]
+    fn borders_parse_and_come_from_the_item_or_the_layer() {
+        let c = one_item(
+            "",
+            &format!("{BTN}\nborder_color='#00ffb766'\nborder_width=1.5\npressed_border_color='#00ffb7'"),
+        )
+        .unwrap();
+        let l = &c.layers[0];
+        let b = l.border_for(&l.items[0]).unwrap();
+        assert_eq!(b.color, Rgba(0, 0xff, 0xb7, 0x66));
+        assert_eq!((b.width, b.pressed), (1.5, Some(Rgba(0, 0xff, 0xb7, 0xff))));
+        // No border keys: no border.
+        let c = one_item("", BTN).unwrap();
+        assert!(c.layers[0].border_for(&c.layers[0].items[0]).is_none());
+        // The layer's defaults, overridden item by item; 0 = no border.
+        let c = parse(&format!(
+            "[[layers]]\nid='m'\nitem_border_color='#ffffff'\nitem_border_width=2\n\
+             [[layers.items]]\n{BTN}\n\
+             [[layers.items]]\ntype='volume'\nborder_color='#ff0000'\n\
+             [[layers.items]]\ntype='brightness'\nborder_width=0\n\
+             [[layers.items]]\ntype='clock'\nshape='none'\n\
+             [[layers.items]]\ntype='spacer'"
+        ))
+        .unwrap();
+        let l = &c.layers[0];
+        let b = |i: usize| l.border_for(&l.items[i]).map(|b| (b.color, b.width));
+        assert_eq!(b(0), Some((Rgba::WHITE, 2.0)));
+        assert_eq!(b(1), Some((Rgba(0xff, 0, 0, 0xff), 2.0)));
+        assert_eq!(b(2), None);
+        assert_eq!(b(3), None, "the layer's border passes shapeless items by");
+        assert_eq!(b(4), None);
+        // Children (boxed ones) have their own, and only their own.
+        let c = parse(
+            "[[layers]]\nid='m'\nitem_border_color='#ffffff'\nitem_border_width=2\n\
+             [[layers.items]]\ntype='player'\n\
+             [[layers.items.children]]\nlabel='<'\nrole='prev'\nborder_color='#0000ff'\nborder_width=1\n\
+             [[layers.items.children]]\nlabel='>'\nrole='next'",
+        )
+        .unwrap();
+        let p = &c.layers[0].items[0];
+        let kids = p.children();
+        assert_eq!(kids[0].border().map(|b| b.width), Some(1.0));
+        assert!(kids[0].frame(&Frame::default()).is_some(), "a border alone gives it a box");
+        assert!(kids[1].border().is_none());
+    }
+
+    #[test]
+    fn bad_borders_say_which_key() {
+        for (layer, item, want) in [
+            ("", format!("{BTN}\nborder_color='#ffffff'"), "border_color needs border_width"),
+            ("", format!("{BTN}\nborder_width=2"), "border_width needs border_color"),
+            ("", format!("{BTN}\nborder_color='#ffffff'\nborder_width=6.5"), "border_width must be in 0.0..=6.0 px"),
+            ("", format!("{BTN}\nborder_color='#ffffff'\nborder_width=-1"), "border_width must be in 0.0..=6.0 px"),
+            ("", format!("{BTN}\nborder_color='white'\nborder_width=1"), "white"),
+            ("", format!("{BTN}\npressed_border_color='#ffffff'"), "pressed_border_color needs a border"),
+            ("", format!("{BTN}\nshape='none'\nborder_color='#ffffff'\nborder_width=1"), "shape = \"none\" has no outline"),
+            ("item_shape='none'", format!("{BTN}\nborder_color='#ffffff'\nborder_width=1"), "shape = \"none\" has no outline"),
+            ("", format!("{BTN}\nborder_colour='#ffffff'"), "unknown field `border_colour`"),
+            ("", "type='volume'\npressed_border_color='#ffffff'".into(), "`pressed_border_color` is not valid for a volume"),
+            ("", "type='workspaces'\nborder_color='#ffffff'\nborder_width=1".into(), "`border_color` is not valid for a workspaces"),
+            ("", "type='spacer'\nborder_width=1".into(), "`border_width` is not valid for a spacer"),
+            ("item_border_color='#ffffff'", BTN.into(), "item_border_color needs item_border_width"),
+            ("item_border_width=7\nitem_border_color='#ffffff'", BTN.into(), "item_border_width must be in 0.0..=6.0 px"),
+            ("item_border_width=1", BTN.into(), "item_border_width needs item_border_color"),
+        ] {
+            let err = format!("{:#}", one_item(layer, &item).expect_err(&item));
+            assert!(err.contains(want), "{layer} / {item}: {err}");
+        }
+        // A colour from the layer and the width on the item is a border.
+        assert!(one_item("item_border_color='#ffffff'\nitem_border_width=0", &format!("{BTN}\nborder_width=2")).is_ok());
+        // A child: the same rules, only on boxed children.
+        let child = |kind: &str, body: &str| {
+            parse(&format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='{kind}'\nid='x'\n{}\n\
+                 [[layers.items.children]]\nlabel='c'\naction={{type='socket'}}\n{body}",
+                if kind == "expandable" { "icon='builtin:folder'" } else { "" }
+            ))
+        };
+        let err = format!("{:#}", child("player", "border_color='#ffffff'").unwrap_err());
+        assert!(err.contains("border_color needs border_width"), "{err}");
+        let err = format!("{:#}", child("player", "shape='none'\nborder_color='#ffffff'\nborder_width=1").unwrap_err());
+        assert!(err.contains("has no outline"), "{err}");
+        let err = format!("{:#}", child("expandable", "border_color='#ffffff'\nborder_width=1").unwrap_err());
+        assert!(err.contains("`border_color` is only for a player's children or drag_children"), "{err}");
+        assert!(child("player", "border_color='#ffffff'\nborder_width=1\npressed_border_color='#00ff00'").is_ok());
+    }
+
+    #[test]
+    fn workspaces_border_keys_elsewhere_point_to_the_new_ones() {
+        for key in ["strip_border_color = '#ffffff'", "bar_border_width = 2", "active_border_color = '#ffffff'"] {
+            let err = format!("{:#}", one_item("", &format!("type='brightness'\n{key}")).unwrap_err());
+            let field = key.split(' ').next().unwrap();
+            assert!(
+                err.contains(&format!("`{field}` is not valid for a brightness (it is a workspaces key)"))
+                    && err.contains("use border_color and border_width"),
+                "{err}"
+            );
+        }
+        // On workspaces they stay as they were.
+        assert!(one_item("", "type='workspaces'\nstrip_border_color='#ffffff'\nstrip_border_width=2").is_ok());
+        let err = format!("{:#}", one_item("", "type='workspaces'\nstrip_border_color='#ffffff'").unwrap_err());
+        assert!(err.contains("strip_border_color needs strip_border_width > 0"), "{err}");
     }
 }
 

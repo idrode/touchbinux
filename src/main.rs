@@ -2,6 +2,7 @@ mod anim;
 mod appkeys;
 mod barlight;
 mod battery;
+mod border;
 mod canvas;
 mod capture;
 mod config;

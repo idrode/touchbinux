@@ -5125,5 +5125,121 @@ mod tests {
         let b = s.button_rect("b").unwrap();
         assert_eq!(tap(&mut s, mid(b), MS(70), &font).1, vec![UiEvent::Tap("b".into())]);
     }
+
+    /// A bit of everything with a box, no border keys anywhere.
+    const UNBORDERED: &str = r##"
+        [[layers]]
+        id = "m"
+        item_radius = 10
+        [[layers.items]]
+        type = "button"
+        id = "plain"
+        label = "Plain"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "button"
+        id = "green"
+        label = "G"
+        pressed_background = "#00ff00"
+        pressed_scale = 0.9
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "button"
+        id = "round"
+        shape = "circle"
+        label = "O"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "text"
+        id = "t"
+        key = "weather"
+        background = "#203040"
+        [[layers.items]]
+        type = "volume"
+        [[layers.items]]
+        type = "brightness"
+        shape = "circle"
+        [[layers.items]]
+        type = "expandable"
+        id = "menu"
+        icon = "builtin:folder"
+        label = "Menu"
+        [[layers.items.children]]
+        label = "One"
+        action = { type = "socket" }
+        [[layers.items.children]]
+        label = "Two"
+        action = { type = "socket" }
+        [[layers.items]]
+        type = "player"
+        [[layers.items.children]]
+        label = "<"
+        role = "prev"
+        shape = "circle"
+        background = "#444444"
+        [[layers.items.children]]
+        label = ">"
+        role = "next"
+        background = "#444444"
+        pressed_background = "#ff0000"
+    "##;
+
+    /// FNV-1a of a canvas's bytes.
+    fn fnv(c: &Canvas) -> u64 {
+        c.data().iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+    }
+
+    /// The UNBORDERED scene at rest, with a button pressed, and with the menu and
+    /// the player unfolded (one of its children pressed): one hash per frame.
+    fn unbordered_frames(font: &Font, toml: &str) -> Vec<u64> {
+        let mut live = live();
+        live.now = chrono::DateTime::from_timestamp(0, 0).unwrap().with_timezone(&chrono::Local);
+        let mut s = menu_scene(font, toml);
+        let mut c = Canvas::new(W, H).unwrap();
+        let mut hashes = Vec::new();
+        let mut frame = |s: &mut Scene, t: Duration| {
+            s.advance(t, &live);
+            s.draw(&mut c, t, font, &live).unwrap();
+            fnv(&c)
+        };
+        hashes.push(frame(&mut s, MS(0)));
+        let mut out = Vec::new();
+        let green = s.button_rect("green").unwrap();
+        s.handle_touch(Phase::Down, mid(green), MS(10), font, &mut out);
+        hashes.push(frame(&mut s, MS(10)));
+        s.handle_touch(Phase::Up, mid(green), MS(20), font, &mut out);
+        let menu = s.menus.iter().position(|m| m.id == "menu").unwrap();
+        let at = mid(s.menus[menu].rect);
+        tap(&mut s, at, MS(30), font);
+        hashes.push(frame(&mut s, MS(600)));
+        s.interrupt(None, MS(700), font);
+        let player = s.menus.iter().position(|m| m.id == "player").unwrap();
+        let at = mid(s.menus[player].rect);
+        tap(&mut s, at, MS(800), font);
+        s.advance(MS(1400), &live);
+        let kid = s.menus[player].children.len() - 1;
+        let m = &s.menus[player];
+        let r = m.open_rect;
+        let xs: Vec<f32> = (r.x as i32..(r.x + r.w) as i32)
+            .map(|x| x as f32)
+            .filter(|&x| m.part_at(x, r.y + r.h / 2.0) == Part::Child(kid))
+            .collect();
+        let at = ((xs[0] + xs[xs.len() - 1]) / 2.0, r.y + r.h / 2.0);
+        s.handle_touch(Phase::Down, at, MS(1400), font, &mut out);
+        hashes.push(frame(&mut s, MS(1400)));
+        hashes
+    }
+
+    /// Without border keys the bar is drawn exactly as before borders existed:
+    /// these hashes were taken from the code before them.
+    #[test]
+    fn without_borders_the_render_is_unchanged() {
+        let Some(font) = font() else { return };
+        let hashes = unbordered_frames(&font, UNBORDERED);
+        assert_eq!(hashes, GOLDEN, "{hashes:#x?}");
+    }
+
+    /// Taken with the code before borders (commit 60ddd81's drawing).
+    const GOLDEN: [u64; 4] = [0xb65109bb21a16c0a, 0xd0168b46c5a34ceb, 0xc56548f24cba886e, 0xda1410cde6d6d606];
 }
 

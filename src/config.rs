@@ -1633,76 +1633,83 @@ impl ItemConfig {
         if !(min..=MAX_CHILDREN).contains(&n) {
             bail!("{what}: a {kind} needs {min} to {MAX_CHILDREN} `{field}`, it has {n}");
         }
+        let player = self.kind == ItemKind::Player;
         for (id, child) in self.child_ids() {
-            let what = format!("{what}: child {id:?}");
-            if self.kind != ItemKind::Player {
-                let player_only = [
-                    ("role", child.role.is_some()),
-                    ("icon_playing", child.icon_playing.is_some()),
-                    ("icon_paused", child.icon_paused.is_some()),
-                ];
-                if let Some((field, _)) = player_only.iter().find(|(_, set)| *set) {
-                    bail!("{what}: `{field}` is only for a player's children");
-                }
-            }
-            // A drag row's children have the player's boxes too.
-            if self.kind != ItemKind::Player && !self.drags() {
-                let boxed_only = [
-                    ("shape", child.shape.is_some()),
-                    ("radius", child.radius.is_some()),
-                    ("size", child.diameter.is_some()),
-                    ("background", child.background.is_some()),
-                    ("pressed_background", child.pressed_background.is_some()),
-                    ("pressed_scale", child.pressed_scale.is_some()),
-                    ("text_color", child.text_color.is_some()),
-                ];
-                if let Some((field, _)) = boxed_only.iter().find(|(_, set)| *set) {
-                    bail!("{what}: `{field}` is only for a player's children or drag_children");
-                }
-            }
-            match (&child.action, child.role) {
-                (Some(action), _) if action.held_key().is_some() => {
-                    bail!("{what}: `hold` only works on a layer's buttons, not on children")
-                }
-                (Some(action), _) => validate_action(&what, action)?,
-                (None, Some(_)) => {}
-                (None, None) if self.kind == ItemKind::Player => {
-                    bail!("{what}: a child needs an `action` or a `role`")
-                }
-                (None, None) => bail!("{what}: a child needs an `action`"),
-            }
-            let states = child.icon_playing.is_some() || child.icon_paused.is_some();
-            if states && child.role != Some(Role::Playpause) {
-                bail!("{what}: `icon_playing`/`icon_paused` only apply to role = \"playpause\"");
-            }
-            let set = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
-            let both_states = set(&child.icon_playing) && set(&child.icon_paused);
-            if !set(&child.icon) && !set(&child.label) && !both_states {
-                bail!(
-                    "{what}: a child needs an `icon`, a `label` or both \
-                     (or `icon_playing` and `icon_paused`)"
-                );
-            }
-            for icon in [&child.icon, &child.icon_playing, &child.icon_paused] {
-                if let Some(icon) = icon.as_deref() {
-                    validate_icon(&what, icon)?;
-                    if icon == BUILTIN_BATTERY {
-                        bail!("{what}: icon = \"{BUILTIN_BATTERY}\" is only for buttons");
-                    }
-                }
-            }
-            if child.diameter.is_some() && child.shape != Some(Shape::Circle) {
-                bail!("{what}: `size` only applies to shape = \"circle\"");
-            }
-            if child.diameter.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
-                bail!("{what}: size must be a diameter in px, in (0, {MAX_PX}]");
-            }
-            if child.pressed_scale.is_some_and(|k| !PRESSED_SCALE.contains(&k)) {
-                bail!("{what}: pressed_scale must be in {PRESSED_SCALE:?}");
-            }
+            validate_child(&format!("{what}: child {id:?}"), child, player, player || self.drags())?;
         }
         Ok(())
     }
+}
+
+/// A child of an expandable, player, drag row or app_keys set: its action (or
+/// role, for a `player`'s), icon or label, and the box fields where `boxed`.
+fn validate_child(what: &str, child: &ChildConfig, player: bool, boxed: bool) -> Result<()> {
+    if !player {
+        let player_only = [
+            ("role", child.role.is_some()),
+            ("icon_playing", child.icon_playing.is_some()),
+            ("icon_paused", child.icon_paused.is_some()),
+        ];
+        if let Some((field, _)) = player_only.iter().find(|(_, set)| *set) {
+            bail!("{what}: `{field}` is only for a player's children");
+        }
+    }
+    // A drag row's children have the player's boxes too.
+    if !boxed {
+        let boxed_only = [
+            ("shape", child.shape.is_some()),
+            ("radius", child.radius.is_some()),
+            ("size", child.diameter.is_some()),
+            ("background", child.background.is_some()),
+            ("pressed_background", child.pressed_background.is_some()),
+            ("pressed_scale", child.pressed_scale.is_some()),
+            ("text_color", child.text_color.is_some()),
+        ];
+        if let Some((field, _)) = boxed_only.iter().find(|(_, set)| *set) {
+            bail!("{what}: `{field}` is only for a player's children or drag_children");
+        }
+    }
+    match (&child.action, child.role) {
+        (Some(action), _) if action.held_key().is_some() => {
+            bail!("{what}: `hold` only works on a layer's buttons, not on children")
+        }
+        (Some(action), _) => validate_action(what, action)?,
+        (None, Some(_)) => {}
+        (None, None) if player => {
+            bail!("{what}: a child needs an `action` or a `role`")
+        }
+        (None, None) => bail!("{what}: a child needs an `action`"),
+    }
+    let states = child.icon_playing.is_some() || child.icon_paused.is_some();
+    if states && child.role != Some(Role::Playpause) {
+        bail!("{what}: `icon_playing`/`icon_paused` only apply to role = \"playpause\"");
+    }
+    let set = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
+    let both_states = set(&child.icon_playing) && set(&child.icon_paused);
+    if !set(&child.icon) && !set(&child.label) && !both_states {
+        bail!(
+            "{what}: a child needs an `icon`, a `label` or both \
+             (or `icon_playing` and `icon_paused`)"
+        );
+    }
+    for icon in [&child.icon, &child.icon_playing, &child.icon_paused] {
+        if let Some(icon) = icon.as_deref() {
+            validate_icon(what, icon)?;
+            if icon == BUILTIN_BATTERY {
+                bail!("{what}: icon = \"{BUILTIN_BATTERY}\" is only for buttons");
+            }
+        }
+    }
+    if child.diameter.is_some() && child.shape != Some(Shape::Circle) {
+        bail!("{what}: `size` only applies to shape = \"circle\"");
+    }
+    if child.diameter.is_some_and(|d| !(d > 0.0 && d <= MAX_PX)) {
+        bail!("{what}: size must be a diameter in px, in (0, {MAX_PX}]");
+    }
+    if child.pressed_scale.is_some_and(|k| !PRESSED_SCALE.contains(&k)) {
+        bail!("{what}: pressed_scale must be in {PRESSED_SCALE:?}");
+    }
+    Ok(())
 }
 
 fn validate_icon(what: &str, icon: &str) -> Result<()> {

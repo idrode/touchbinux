@@ -94,6 +94,11 @@ pub const DEFAULT_FN_DELAY_MS: u64 = 80;
 pub const DEFAULT_FN_TRANSITION_MS: u64 = 120;
 const FN_MS: std::ops::RangeInclusive<u64> = 0..=1000;
 const MAX_FN_DEVICE_LEN: usize = 128;
+/// `[idle]`: the stages' times (s), the fade between them (ms) and the sleep GIF's
+/// frame cap.
+const IDLE_AFTER_S: std::ops::RangeInclusive<u64> = 0..=86_400;
+const IDLE_FADE_MS: std::ops::RangeInclusive<u64> = 0..=2000;
+const IDLE_GIF_FPS: std::ops::RangeInclusive<u32> = 0..=30;
 /// What a layer shown only while Fn is held may have: nothing that unfolds or
 /// lists live state (it would be cut off when Fn is released).
 const FN_LAYER_KINDS: &[ItemKind] = &[
@@ -121,6 +126,147 @@ pub struct Config {
     /// The layer shown while Fn is held; none without this section.
     #[serde(default, rename = "fn")]
     pub fn_layer: Option<FnConfig>,
+    /// Dimming, sleeping and turning the bar off when unused; none without it.
+    #[serde(default)]
+    pub idle: Option<IdleConfig>,
+}
+
+/// What wakes the bar from sleep or off (`[idle] wake_on`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WakeOn {
+    /// Any touch on the bar.
+    Touch,
+    /// The Fn key going down or up (the only key the daemon reads).
+    Fn,
+}
+
+/// `[idle]`: normal -> dim -> sleep -> off after so long without activity.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdleConfig {
+    /// Seconds without activity before each stage; 0 leaves the stage out.
+    #[serde(default)]
+    pub dim_after_s: u64,
+    #[serde(default)]
+    pub sleep_after_s: u64,
+    #[serde(default)]
+    pub off_after_s: u64,
+    /// Brightness while dimmed and asleep, as a fraction of the normal one.
+    #[serde(default = "default_dim_level")]
+    pub dim_level: f64,
+    #[serde(default = "default_sleep_level")]
+    pub sleep_level: f64,
+    /// The layer shown asleep; without it, sleep_after_s turns the bar off.
+    #[serde(default)]
+    pub sleep_layer: Option<String>,
+    #[serde(default = "default_wake_on")]
+    pub wake_on: Vec<WakeOn>,
+    /// The touch that wakes the bar from sleep or off does nothing else.
+    #[serde(default = "default_true")]
+    pub swallow_wake_touch: bool,
+    /// The brightness ramp between stages (waking takes at most WAKE_FADE).
+    #[serde(default = "default_idle_fade_ms")]
+    pub fade_ms: u64,
+    /// The sleep layer's frames per second at most (0: drawn once, GIFs on their
+    /// first frame).
+    #[serde(default = "default_idle_gif_fps")]
+    pub idle_gif_fps: u32,
+}
+
+fn default_dim_level() -> f64 {
+    0.25
+}
+
+fn default_sleep_level() -> f64 {
+    0.10
+}
+
+fn default_wake_on() -> Vec<WakeOn> {
+    vec![WakeOn::Touch, WakeOn::Fn]
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_idle_fade_ms() -> u64 {
+    250
+}
+
+fn default_idle_gif_fps() -> u32 {
+    8
+}
+
+impl IdleConfig {
+    pub fn fade(&self) -> Duration {
+        Duration::from_millis(self.fade_ms)
+    }
+
+    pub fn wakes_on(&self, w: WakeOn) -> bool {
+        self.wake_on.contains(&w)
+    }
+
+    fn validate(&self, layers: &[LayerConfig], fn_layer: Option<&str>) -> Result<()> {
+        for (key, v) in [
+            ("dim_after_s", self.dim_after_s),
+            ("sleep_after_s", self.sleep_after_s),
+            ("off_after_s", self.off_after_s),
+        ] {
+            if !IDLE_AFTER_S.contains(&v) {
+                bail!("[idle] {key} must be {IDLE_AFTER_S:?} (0 leaves the stage out)");
+            }
+        }
+        for (key, v) in [("dim_level", self.dim_level), ("sleep_level", self.sleep_level)] {
+            if !(0.0..=1.0).contains(&v) {
+                bail!("[idle] {key} must be 0.0-1.0 (a fraction of the normal brightness)");
+            }
+        }
+        // The stages in use come one after another.
+        let stages = [
+            ("dim_after_s", self.dim_after_s),
+            ("sleep_after_s", self.sleep_after_s),
+            ("off_after_s", self.off_after_s),
+        ];
+        let used: Vec<_> = stages.iter().filter(|(_, v)| *v > 0).collect();
+        for pair in used.windows(2) {
+            let ((a, va), (b, vb)) = (pair[0], pair[1]);
+            if va >= vb {
+                bail!("[idle] {b} ({vb}) must be greater than {a} ({va}): the stages go in order");
+            }
+        }
+        match &self.sleep_layer {
+            Some(id) => {
+                if !layers.iter().any(|l| &l.id == id) {
+                    bail!("[idle] sleep_layer {id:?} is not one of the [[layers]]");
+                }
+                if Some(id.as_str()) == fn_layer {
+                    bail!("[idle] sleep_layer {id:?} is the [fn] layer");
+                }
+                if self.sleep_after_s == 0 {
+                    bail!("[idle] sleep_layer needs sleep_after_s (the time before it shows)");
+                }
+            }
+            None if self.sleep_after_s > 0 && self.off_after_s > 0 => bail!(
+                "[idle] without sleep_layer, sleep_after_s already turns the bar off: \
+                 add a sleep_layer or set off_after_s = 0"
+            ),
+            None => {}
+        }
+        if self.wake_on.is_empty() {
+            bail!("[idle] wake_on needs \"touch\", \"fn\" or both (else nothing wakes the bar)");
+        }
+        if self.wake_on.len() == 2 && self.wake_on[0] == self.wake_on[1] {
+            bail!("[idle] wake_on lists {:?} twice", self.wake_on[0]);
+        }
+        if !IDLE_FADE_MS.contains(&self.fade_ms) {
+            bail!("[idle] fade_ms must be {IDLE_FADE_MS:?}");
+        }
+        if !IDLE_GIF_FPS.contains(&self.idle_gif_fps) {
+            bail!("[idle] idle_gif_fps must be {IDLE_GIF_FPS:?} (0: a still picture)");
+        }
+        Ok(())
+    }
 }
 
 /// `[fn]`.
@@ -1815,6 +1961,16 @@ impl Config {
                 );
             }
         }
+        if let Some(i) = &self.idle {
+            let fn_layer = self.fn_layer.as_ref().map(|f| f.layer.as_str());
+            i.validate(&self.layers, fn_layer)?;
+            if i.sleep_layer.is_some() && self.default_layer == i.sleep_layer {
+                bail!(
+                    "default_layer {:?} is the [idle] sleep_layer, which only shows asleep",
+                    self.default_layer.as_deref().unwrap_or_default()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1877,10 +2033,14 @@ impl Config {
     /// bar, like tiny-dfr). `None` if there is nothing at all.
     pub fn default_layer(&self) -> Option<Cow<'_, LayerConfig>> {
         let fn_layer = self.fn_layer.as_ref().map(|f| f.layer.as_str());
+        let sleep_layer = self.idle.as_ref().and_then(|i| i.sleep_layer.as_deref());
+        let special = |l: &&LayerConfig| {
+            Some(l.id.as_str()) == fn_layer || Some(l.id.as_str()) == sleep_layer
+        };
         if let Some(l) = match &self.default_layer {
             Some(id) => self.layers.iter().find(|l| &l.id == id),
-            // The first one, but never the Fn layer.
-            None => self.layers.iter().find(|l| Some(l.id.as_str()) != fn_layer),
+            // The first one, but never the Fn or sleep layer.
+            None => self.layers.iter().find(|l| !special(l)),
         } {
             return Some(Cow::Borrowed(l));
         }
@@ -3689,5 +3849,92 @@ mod tests {
             let err = format!("{:#}", layer(&bad).unwrap_err());
             assert!(err.contains(want), "{bad}: {err}");
         }
+    }
+
+
+    /// A config with `idle_section`, a main layer, an "idle" layer and an Fn one.
+    fn with_idle(idle_section: &str) -> Result<Config> {
+        parse(&format!(
+            r#"
+            {idle_section}
+            [[layers]]
+            id = "idle"
+            [[layers.items]]
+            type = "spacer"
+            [[layers]]
+            id = "main"
+            [[layers.items]]
+            type = "button"
+            id = "esc"
+            label = "esc"
+            action = {{ type = "key", key = "KEY_ESC" }}
+            [[layers]]
+            id = "fn"
+            [[layers.items]]
+            type = "spacer"
+            [fn]
+            "#
+        ))
+    }
+
+    #[test]
+    fn idle_section_defaults_and_values() {
+        assert!(with_idle("").unwrap().idle.is_none(), "no section, no idle");
+        let i = with_idle("[idle]").unwrap().idle.unwrap();
+        assert_eq!((i.dim_after_s, i.sleep_after_s, i.off_after_s), (0, 0, 0));
+        assert_eq!((i.dim_level, i.sleep_level), (0.25, 0.10));
+        assert_eq!(i.wake_on, vec![WakeOn::Touch, WakeOn::Fn]);
+        assert!(i.swallow_wake_touch && i.sleep_layer.is_none());
+        assert_eq!((i.fade(), i.idle_gif_fps), (Duration::from_millis(250), 8));
+        let c = with_idle(
+            "[idle]\ndim_after_s = 30\ndim_level = 0.25\nsleep_after_s = 90\n\
+             sleep_layer = 'idle'\nsleep_level = 0.1\noff_after_s = 300\n\
+             wake_on = ['fn']\nswallow_wake_touch = false\nfade_ms = 0\nidle_gif_fps = 0",
+        )
+        .unwrap();
+        let i = c.idle.as_ref().unwrap();
+        assert_eq!((i.dim_after_s, i.sleep_after_s, i.off_after_s), (30, 90, 300));
+        assert!(i.wakes_on(WakeOn::Fn) && !i.wakes_on(WakeOn::Touch));
+        assert_eq!(i.sleep_layer.as_deref(), Some("idle"));
+        // The sleep layer comes first in the file but is never the starting one.
+        assert_eq!(c.default_layer().unwrap().id, "main");
+        // Levels may be whole numbers.
+        let i = with_idle("[idle]\ndim_after_s = 5\ndim_level = 1").unwrap().idle.unwrap();
+        assert_eq!(i.dim_level, 1.0);
+    }
+
+    #[test]
+    fn rejects_bad_idle_sections() {
+        for (idle, want) in [
+            ("[idle]\ndim_after_s = 86401", "dim_after_s must be 0..=86400"),
+            ("[idle]\ndim_after_s = -1", "invalid value"),
+            ("[idle]\ndim_level = 1.5", "dim_level must be 0.0-1.0"),
+            ("[idle]\nsleep_level = -0.1", "sleep_level must be 0.0-1.0"),
+            ("[idle]\ndim_after_s = 90\noff_after_s = 30", "off_after_s (30) must be greater than dim_after_s (90)"),
+            (
+                "[idle]\ndim_after_s = 30\nsleep_after_s = 30\nsleep_layer = 'idle'",
+                "sleep_after_s (30) must be greater than dim_after_s (30)",
+            ),
+            ("[idle]\nsleep_after_s = 9\nsleep_layer = 'nope'", "sleep_layer \"nope\" is not one of the [[layers]]"),
+            ("[idle]\nsleep_after_s = 9\nsleep_layer = 'fn'", "sleep_layer \"fn\" is the [fn] layer"),
+            ("[idle]\nsleep_layer = 'idle'", "sleep_layer needs sleep_after_s"),
+            ("[idle]\nsleep_after_s = 9\noff_after_s = 20", "without sleep_layer, sleep_after_s already turns the bar off"),
+            ("[idle]\nwake_on = []", "wake_on needs"),
+            ("[idle]\nwake_on = ['touch', 'touch']", "wake_on lists Touch twice"),
+            ("[idle]\nwake_on = ['keyboard']", "unknown variant `keyboard`, expected `touch` or `fn`"),
+            ("[idle]\nfade_ms = 2001", "fade_ms must be 0..=2000"),
+            ("[idle]\nidle_gif_fps = 31", "idle_gif_fps must be 0..=30"),
+            ("[idle]\ndim_after = 30", "unknown field `dim_after`"),
+        ] {
+            let err = format!("{:#}", with_idle(idle).expect_err(idle));
+            assert!(err.contains(want), "{idle:?}: {err}");
+        }
+        // default_layer can't be the sleep layer (top-level key, before the tables).
+        let err = parse(
+            "default_layer = 'idle'\n[[layers]]\nid = 'idle'\n[[layers.items]]\ntype = 'spacer'\n\
+             [idle]\nsleep_after_s = 9\nsleep_layer = 'idle'",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is the [idle] sleep_layer"), "{err:#}");
     }
 }

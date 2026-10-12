@@ -217,7 +217,7 @@ impl AsFd for FnKeyboard {
 /// else read stays in memory.
 fn scan(buf: &mut [u8], n: usize, out: &mut Vec<FnEvent>) {
     let fn_code = KeyCode::KEY_FN.code();
-    for ev in buf[..n].chunks_exact(EVENT_SIZE) {
+    for ev in buf[..n].as_chunks::<EVENT_SIZE>().0 {
         let ty = u16::from_ne_bytes([ev[TYPE_AT], ev[TYPE_AT + 1]]);
         let code = u16::from_ne_bytes([ev[TYPE_AT + 2], ev[TYPE_AT + 3]]);
         if ty == EV_KEY && code == fn_code {
@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(choose(&[tb], None), None);
         // A Fn key on something that types no letters isn't a keyboard.
         let buttons = cand("Some button box", 0x19, true, false, false);
-        assert_eq!(choose(&[buttons.clone()], None), None);
+        assert_eq!(choose(std::slice::from_ref(&buttons), None), None);
         assert_eq!(choose(&[buttons], Some("button box")), Some(0), "unless forced");
     }
 

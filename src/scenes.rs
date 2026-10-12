@@ -1303,6 +1303,12 @@ impl Scene {
         self.buttons.iter().find(|b| b.id == id).map(|b| b.rect)
     }
 
+    /// Where expandable `id` is, folded.
+    #[cfg(test)]
+    pub fn expandable_rect(&self, id: &str) -> Option<Rect> {
+        self.menus.iter().find(|m| m.id == id).map(|m| m.rect)
+    }
+
     /// A widget that only shows something: no background, no button (touching it
     /// does nothing and reports nothing).
     pub fn add_display_widget(&mut self, rect: Rect, widget: Box<dyn Widget>) {

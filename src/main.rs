@@ -1151,6 +1151,21 @@ impl App {
         }
     }
 
+    /// One event of the followed finger, at canvas `at`: to the layer on screen.
+    /// Returns whether the bar changed.
+    fn on_touch(&mut self, phase: Phase, at: (f32, f32), t: Duration, out: &mut Vec<UiEvent>) -> bool {
+        let scene = self.fnl.scene.as_mut().unwrap_or(&mut self.scene);
+        let changed = scene.handle_touch(phase, at, t, &self.font, out);
+        self.finger = match phase {
+            Phase::Down | Phase::Move => Some(at),
+            Phase::Up | Phase::Cancel => None,
+        };
+        // After each event: a quick tap read in one batch still presses and
+        // releases its key.
+        self.sync_held_key();
+        changed
+    }
+
     /// The scene on the bar: the Fn layer's while it is shown, else the normal one.
     fn shown(&self) -> &Scene {
         self.fnl.scene.as_ref().unwrap_or(&self.scene)
@@ -2120,22 +2135,7 @@ fn run(
                                 t.phase, t.x, t.y
                             );
                         }
-                        // Touches go to the layer on screen.
-                        let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
-                        dirty |= scene.handle_touch(
-                            t.phase,
-                            (x, y),
-                            scene_t,
-                            &app.font,
-                            &mut ui_events,
-                        );
-                        app.finger = match t.phase {
-                            Phase::Down | Phase::Move => Some((x, y)),
-                            Phase::Up | Phase::Cancel => None,
-                        };
-                        // After each event: a quick tap read in one batch still
-                        // presses and releases its key.
-                        app.sync_held_key();
+                        dirty |= app.on_touch(t.phase, (x, y), scene_t, &mut ui_events);
                     }
                     for e in &ui_events {
                         let msg = ui_event_json(e);
@@ -2376,6 +2376,225 @@ mod tests {
         let live = idle.live();
         idle.scene.advance(Duration::from_secs(1), &live);
         assert_eq!(idle.scene.next_change(Duration::from_secs(1)), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+
+    /// The daemon's App with `[fn]` (`fn_section`, TOML): an Fn layer with two
+    /// held keys and a clock, and a main layer with a button and a dropdown. The
+    /// keyboard isn't read: tests feed Fn's events.
+    fn fn_app(dir: &Path, fn_section: &str) -> App {
+        let toml = format!(
+            "{fn_section}\n\
+             [[layers]]\nid = 'main'\n\
+             [[layers.items]]\ntype = 'button'\nid = 'before'\nlabel = 'B'\naction = {{ type = 'socket' }}\n\
+             [[layers.items]]\ntype = 'expandable'\nid = 'cap'\nicon = 'builtin:folder'\nlabel = 'Cap'\n\
+             [[layers.items.children]]\nid = 'one'\nlabel = 'Uno'\naction = {{ type = 'socket' }}\n\
+             [[layers.items.children]]\nid = 'two'\nlabel = 'Dos'\naction = {{ type = 'socket' }}\n\
+             [[layers]]\nid = 'fn'\n\
+             [[layers.items]]\ntype = 'button'\nid = 'f1'\nlabel = 'F1'\n\
+             action = {{ type = 'key', key = 'KEY_F1', hold = true }}\n\
+             [[layers.items]]\ntype = 'button'\nid = 'f2'\nlabel = 'F2'\n\
+             action = {{ type = 'key', key = 'KEY_F2', hold = true }}\n\
+             [[layers.items]]\ntype = 'clock'\nid = 'clock'\n"
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+                layer: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: None,
+            follow_fn: false,
+        };
+        new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap()
+    }
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    fn fn_shown(app: &App) -> bool {
+        app.fnl.scene.is_some()
+    }
+
+    fn mid(app: &App, id: &str) -> (f32, f32) {
+        let r = app.shown().button_rect(id).unwrap();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// Draws a frame as the loop does, and says whether another one is wanted.
+    fn settle(app: &mut App, t: Duration) -> Option<Duration> {
+        app.fnl.switched = false;
+        let live = app.live();
+        let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
+        scene.advance(t, &live);
+        app.shown().next_change(t)
+    }
+
+    #[test]
+    fn hold_shows_the_fn_layer_after_the_delay_and_at_rest_nothing_runs() {
+        let dir = tmp("fn-hold");
+        let mut app = fn_app(&dir, "[fn]\ndelay_ms = 80");
+        let t0 = Instant::now();
+        // At rest: no Fn layer, no delay timer, no frames, no clock tick (the
+        // clock is on the Fn layer only).
+        assert!(!fn_shown(&app) && app.fnl.deadline().is_none());
+        assert_eq!(settle(&mut app, MS(1000)), None);
+        assert_eq!(app.shown().wall_period(), None);
+        // Fn down: the delay's timer, and nothing shown yet.
+        assert!(!app.on_fn_events(&[FnEvent::Pressed], t0));
+        assert_eq!(app.fnl.deadline(), Some(t0 + MS(80)));
+        assert!(!app.on_fn_timer(t0 + MS(79)), "an early wake-up waits on");
+        assert_eq!(app.fnl.deadline(), Some(t0 + MS(80)));
+        assert!(app.on_fn_timer(t0 + MS(80)));
+        assert!(fn_shown(&app) && app.fnl.switched);
+        assert!(app.fnl.deadline().is_none(), "shown: no timer while held");
+        assert!(app.shown().button_rect("f1").is_some());
+        assert_eq!(app.shown().wall_period(), Some(60), "the clock ticks while shown");
+        // Auto-repeat or a duplicate press changes nothing.
+        assert!(!app.on_fn_events(&[FnEvent::Pressed], t0 + MS(500)));
+        // Fn up: back to the normal layer, and at rest again.
+        assert!(app.on_fn_events(&[FnEvent::Released], t0 + MS(900)));
+        assert!(!fn_shown(&app) && app.fnl.switched && app.fnl.deadline().is_none());
+        assert_eq!(settle(&mut app, MS(2000)), None);
+        assert_eq!(app.shown().wall_period(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_quick_fn_tap_shows_nothing_and_leaves_no_timer() {
+        let dir = tmp("fn-tap");
+        let mut app = fn_app(&dir, "[fn]\ndelay_ms = 120");
+        let t0 = Instant::now();
+        let events = [FnEvent::Pressed, FnEvent::Released];
+        assert!(!app.on_fn_events(&events, t0));
+        assert!(!fn_shown(&app) && !app.fnl.switched);
+        assert!(app.fnl.deadline().is_none());
+        assert!(!app.on_fn_timer(t0 + MS(120)), "a stale wake-up shows nothing");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn toggle_flips_on_each_press_without_timers() {
+        let dir = tmp("fn-toggle");
+        let mut app = fn_app(&dir, "[fn]\nmode = 'toggle'");
+        let t0 = Instant::now();
+        for (i, want) in [true, false, true].into_iter().enumerate() {
+            let t = t0 + MS(500 * i as u64);
+            assert!(app.on_fn_events(&[FnEvent::Pressed], t));
+            assert_eq!(fn_shown(&app), want);
+            assert!(app.fnl.deadline().is_none());
+            assert!(!app.on_fn_events(&[FnEvent::Released], t + MS(90)));
+            assert_eq!(fn_shown(&app), want, "releases change nothing");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_open_dropdown_folds_at_once_under_the_fn_layer() {
+        let dir = tmp("fn-dropdown");
+        let mut app = fn_app(&dir, "[fn]\ndelay_ms = 0\ntransition_ms = 0");
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        let r = app.scene.expandable_rect("cap").unwrap();
+        let cap = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        app.on_touch(Phase::Down, cap, MS(0), &mut out);
+        app.on_touch(Phase::Up, cap, MS(20), &mut out);
+        let opening = settle(&mut app, MS(20));
+        assert!(opening.is_some(), "unfolding");
+        assert!(app.on_fn_events(&[FnEvent::Pressed], t0));
+        assert!(fn_shown(&app));
+        assert!(app.on_fn_events(&[FnEvent::Released], t0 + MS(300)));
+        // Back on the normal layer, folded: at most the folder icon's own
+        // animation finishes, and then nothing runs.
+        settle(&mut app, MS(400));
+        assert_eq!(settle(&mut app, MS(3000)), None);
+        let before = mid(&app, "before");
+        out.clear();
+        app.on_touch(Phase::Down, before, MS(500), &mut out);
+        app.on_touch(Phase::Up, before, MS(520), &mut out);
+        assert_eq!(out, vec![UiEvent::Tap("before".into())], "the row is back as it was");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_finger_down_during_the_switch_does_nothing_until_it_lifts() {
+        let dir = tmp("fn-finger");
+        let mut app = fn_app(&dir, "[fn]\ndelay_ms = 0\ntransition_ms = 0");
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        // A finger on "before"; Fn comes: the press is cancelled, no tap.
+        let before = mid(&app, "before");
+        app.on_touch(Phase::Down, before, MS(0), &mut out);
+        assert!(app.on_fn_events(&[FnEvent::Pressed], t0));
+        let f1 = mid(&app, "f1");
+        // Sliding onto F1 or lifting there presses nothing.
+        app.on_touch(Phase::Move, f1, MS(10), &mut out);
+        assert!(app.held.is_none());
+        app.on_touch(Phase::Up, f1, MS(20), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(app.held.is_none() && app.finger.is_none());
+        // The next touch holds F1 (no virtual keyboard here: not sent, but held).
+        app.on_touch(Phase::Down, f1, MS(30), &mut out);
+        let held = app.held.as_ref().unwrap();
+        assert_eq!((held.id.as_str(), held.key, held.sent), ("f1", KeyCode::KEY_F1, false));
+        // Fn goes up with the finger still on F1: the key is released, and the
+        // normal layer ignores that finger until it lifts.
+        assert!(app.on_fn_events(&[FnEvent::Released], t0 + MS(100)));
+        assert!(app.held.is_none());
+        app.on_touch(Phase::Up, f1, MS(120), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        // A quick tap read in one batch: pressed and released.
+        assert!(app.on_fn_events(&[FnEvent::Pressed], t0 + MS(200)));
+        app.on_touch(Phase::Down, f1, MS(200), &mut out);
+        assert!(app.held.is_some());
+        app.on_touch(Phase::Up, f1, MS(210), &mut out);
+        assert!(app.held.is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_lost_keyboard_a_resync_or_a_reload_never_leave_the_layer_stuck() {
+        let dir = tmp("fn-lost");
+        let mut app = fn_app(&dir, "[fn]\ndelay_ms = 0");
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        // Held, with a finger on F1: the keyboard goes away.
+        app.on_fn_events(&[FnEvent::Pressed], t0);
+        app.on_touch(Phase::Down, mid(&app, "f1"), MS(0), &mut out);
+        assert!(app.held.is_some());
+        assert!(app.fn_lost(fnkey::Lost("gone".into())));
+        assert!(!fn_shown(&app) && app.held.is_none());
+        app.on_touch(Phase::Up, (0.0, 0.0), MS(10), &mut out);
+        // Lost events: Fn's state is asked again (no keyboard here: up).
+        app.on_fn_events(&[FnEvent::Pressed], t0);
+        assert!(fn_shown(&app));
+        assert!(app.on_fn_events(&[FnEvent::Resync], t0 + MS(10)));
+        assert!(!fn_shown(&app));
+        // A reload while shown starts over from Fn's real state.
+        app.on_fn_events(&[FnEvent::Pressed], t0 + MS(20));
+        assert!(fn_shown(&app));
+        app.reload_config();
+        assert!(!fn_shown(&app) && app.fnl.deadline().is_none());
+        assert!(app.fnl.machine.is_some(), "still configured");
+        // A reload without [fn]: no layer, no machine, nothing to follow.
+        let toml = fs::read_to_string(dir.join("config.toml")).unwrap();
+        fs::write(dir.join("config.toml"), toml.replace("[fn]\ndelay_ms = 0", "")).unwrap();
+        app.reload_config();
+        assert!(app.fnl.machine.is_none());
+        assert!(!app.on_fn_events(&[FnEvent::Pressed], t0 + MS(30)));
+        assert!(!fn_shown(&app));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

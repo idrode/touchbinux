@@ -1566,6 +1566,86 @@ Para verlo sin grabar ni capturar nada: `touchbinux bar --config <archivo> --png
 <salida.png> --status rec` (o `rec_done`, `shot`, `rec_shot`). Con el daemon en
 marcha, los mensajes del socket de arriba lo muestran en la barra de verdad.
 
+#### `app_keys`
+
+Un hueco de ancho fijo que muestra **botones distintos según la app que tiene el
+foco** en Hyprland (por la clase de su ventana). Con la acción [`keys`](#acciones),
+cada botón manda un atajo de teclado a esa ventana: atrás/adelante en el
+navegador, copiar/pegar en la terminal...
+
+```toml
+[[layers.items]]
+type = "app_keys"
+id = "app_keys"
+width = 360
+transition_ms = 150
+# default_set = "none"
+
+[[layers.items.sets]]
+id = "browser"
+class = ["zen"]
+[[layers.items.sets.children]]
+icon = "go-previous"
+action = { type = "keys", keys = "alt+left" }
+[[layers.items.sets.children]]
+label = "Copiar"
+action = { type = "keys", keys = "ctrl+c" }
+```
+
+| Campo | Por defecto | Qué hace |
+|---|---|---|
+| `id` | `"app_keys"` | |
+| `width` / `stretch` | `360` | el hueco; los botones de cada set se lo reparten a partes iguales, con el `gap` de la capa |
+| `transition_ms` | `150` | fundido al cambiar de set (0-1000; 0 = cambio seco) |
+| `default_set` | `"none"` | qué se ve si ninguna clase coincide o no hay nada enfocado: `"none"` (el hueco vacío) o el `id` de un set |
+| `[[...sets]]` | **obligatorio** (1-32) | los juegos de botones |
+
+Cada set (`[[layers.items.sets]]`):
+
+| Campo | Qué hace |
+|---|---|
+| `id` | obligatorio, único en el elemento (no `"none"`) |
+| `class` | lista de clases de ventana; coincide la clase **entera**, sin distinguir mayúsculas |
+| `title_contains` | opcional: además, el título tiene que contener este texto (sin distinguir mayúsculas). Un set necesita `class`, `title_contains` o los dos |
+| `[[...sets.children]]` | 1-12 botones |
+
+Los botones (`[[layers.items.sets.children]]`) son como los hijos de un
+`drag_children`: `label` y/o `icon` (ruta, `builtin:` o nombre del tema de
+iconos), `action` (obligatoria; cualquiera menos `hold`), `id` (por defecto
+`<elemento>.<set>.<n>`, que es lo que llega por el socket al tocarlo) y su caja:
+`shape`, `radius`, `size`, `background`, `pressed_background`, `pressed_scale`,
+`text_color`, `color`. Se dibujan exactamente como los botones de una capa.
+
+- **Gana el primer set que coincide**, en el orden del archivo.
+- **Sin polling**: sigue los eventos de Hyprland que el daemon ya escucha. Cambiar a
+  otra ventana de la misma clase, o que cambie el título sin que cambie el set, no
+  redibuja nada. Al cambiar de set hay un fundido de `transition_ms` (unos 30 fps
+  solo mientras dura); al arrancar o recargar, el set actual sale sin animación.
+- **Sin Hyprland**, o sin nada enfocado: `default_set`.
+- **Tocar un botón no cambia el foco**: la barra no es una ventana; el atajo va a
+  la ventana que ya lo tenía. Si el set cambia con el dedo encima, ese toque no
+  hace nada.
+- Puede haber varios en distintas capas (por ejemplo, otro en la capa de reposo).
+  La capa Fn no los admite. La capa Fn y la de reposo mandan como siempre.
+- **El ancho cuenta**: si la capa no tiene sitio, los elementos del final no se
+  dibujan y el log dice cuáles (`"clock" doesn't fit`). Comprueba con `--png`.
+- **Etiquetas**: se dibujan con la fuente de la barra (Noto Sans Bold), que no tiene
+  flechas como ◀ ▶ ↻ (salen como cuadros vacíos). Para eso, mejor iconos del tema:
+  `go-previous`, `go-next`, `view-refresh`, `tab-new`, `window-close`, `edit-undo`...
+
+**Qué clase tiene una app.** Con la app abierta:
+
+```sh
+hyprctl clients -j | jq -r '.[] | .class' | sort -u
+```
+
+(En este equipo: `zen`, `kitty`, `kitty-start`...) Y para previsualizar un set sin
+cambiar de ventana: `--focus-class <clase>` (ver
+[sección 10](#vista-previa-sin-tocar-la-barra---png)).
+
+`config.example.toml` trae un ejemplo comentado con zen, kitty, obsidian y
+Telegram (y huecos para Signal y Renoise).
+
 #### `spacer`
 
 Espacio vacío. Solo `width` o `stretch` (por defecto `stretch = 1`).
@@ -1656,6 +1736,40 @@ con los modificadores que tengas pulsados en el teclado. No avisa de un `tap`.
 ```toml
 action = { type = "key", key = "KEY_F5", hold = true }
 ```
+
+**`keys`**: un **atajo** (acorde): modificadores y una tecla, por nombre.
+
+```toml
+action = { type = "keys", keys = "ctrl+shift+t" }
+```
+
+Pulsa los modificadores, pulsa y suelta la tecla y suelta los modificadores, con
+8 ms entre paso y paso para que el compositor registre cada uno (unos 30 ms en
+total; el bucle no se para mientras: los pasos salen a su hora). Va a la ventana
+enfocada por el teclado virtual, sin shell ni comandos. Si llegan dos seguidos, el
+segundo espera a que acabe el primero.
+
+Nombres (cualquier mayúscula, modificadores primero, la tecla al final):
+
+- modificadores: `ctrl`, `shift`, `alt`, `super`;
+- letras `a`-`z`, cifras `0`-`9`, `f1`-`f24`;
+- `enter`, `tab`, `esc`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`,
+  `home`, `end`, `insert`, `delete`, `backspace`, `space`;
+- signos: `comma`, `period`, `slash`, `backslash`, `minus`, `equal`,
+  `semicolon`, `apostrophe`, `grave`, `leftbrace`, `rightbrace`.
+
+Son **posiciones de tecla** de un teclado estadounidense (como los códigos de
+Linux): con otra distribución, un signo es lo que esa tecla escriba en ella (con
+la española, `slash` es la tecla de `-`). Un nombre desconocido es un error al
+cargar: `keys "ctrl+shift+tee": unknown key "tee"; known: ...`.
+
+**Modificadores del teclado físico.** El acorde sale por el teclado virtual, que
+es otro dispositivo: pulsa y suelta solo sus propios modificadores y nunca toca el
+estado del teclado físico. Si tienes Shift pulsado en el teclado mientras tocas
+`ctrl+t` en la barra, el acorde no lo suelta ni lo repite: lo que haga la app
+con los dos teclados a la vez depende de cómo combine Hyprland sus
+modificadores (**no comprobado**). Si el daemon termina a mitad de un acorde, lo acaba antes de salir: nunca
+queda un modificador pulsado.
 
 **`socket`**: no hace nada local; solo avisa por el socket (para que otro proceso,
 como Quickshell, decida).
@@ -2079,7 +2193,8 @@ una suspensión real.
 | `hypr.rs`, `hyprwatch.rs`, `hyprctl.rs` | Hyprland: sockets, espera sin sondeo, dispatch por proveedor (por `hyprctl` o por el socket de control) |
 | `ipc.rs` | el socket JSON por líneas |
 | `runner.rs`, `user.rs` | lanzar comandos como el usuario de sesión |
-| `keys.rs` | teclado virtual (uinput) |
+| `keys.rs` | teclado virtual (uinput) y acordes (`keys`) |
+| `appkeys.rs` | `app_keys`: un set de botones por clase de ventana, con fundido |
 | `fnkey.rs` | la tecla Fn del teclado interno: solo lectura, filtro del kernel |
 | `fnlayer.rs` | cuándo sale la capa Fn (máquina de estados) y el fundido |
 | `idle.rs` | reposo: etapas despierta, atenuada, dormida y apagada (máquina de estados) |
@@ -2110,6 +2225,13 @@ que miden tiempos: `cargo test --release -- --ignored --nocapture`.
 Carga y **valida** el config igual que el daemon, dibuja un fotograma de 2008x60 a un
 PNG y sale. No abre DRM ni el táctil: no hace falta root ni parar el servicio. Lee el
 brillo, la batería y tu Hyprland reales; el volumen sale siempre como 50.
+
+Con `--focus-class <clase>` (solo `bar --png`), los `app_keys` se dibujan como si
+esa clase tuviera el foco, sin mirar Hyprland:
+
+```sh
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/zen.png --focus-class zen
+```
 
 Con `--layer <id>` (solo `bar --png`) dibuja esa capa en lugar de la de inicio; por
 ejemplo, la capa Fn:

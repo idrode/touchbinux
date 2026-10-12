@@ -499,6 +499,96 @@ format = "%H:%M"
 # key = "weather"
 # width = 200
 
+# Buttons for the app in front: a slot that shows one set or another by the
+# class of the window focused in Hyprland (`hyprctl clients -j | jq -r '.[] |
+# .class' | sort -u` lists them). `keys` sends a chord to that window through
+# the virtual keyboard. Commented out: it needs Hyprland and these apps.
+# [[layers.items]]
+# type = "app_keys"
+# id = "app_keys"
+# width = 360
+# transition_ms = 150              # cross-fade when the set changes (0-1000)
+# default_set = "none"             # or a set's id: no match, nothing focused
+#
+# [[layers.items.sets]]
+# id = "browser"
+# class = ["zen"]                  # whole class, any case
+# [[layers.items.sets.children]]
+# icon = "go-previous"            # names from your icon theme (Freedesktop)
+# action = { type = "keys", keys = "alt+left" }
+# [[layers.items.sets.children]]
+# icon = "go-next"
+# action = { type = "keys", keys = "alt+right" }
+# [[layers.items.sets.children]]
+# icon = "view-refresh"
+# action = { type = "keys", keys = "ctrl+r" }
+# [[layers.items.sets.children]]
+# icon = "tab-new"
+# action = { type = "keys", keys = "ctrl+t" }
+# [[layers.items.sets.children]]
+# icon = "window-close"
+# action = { type = "keys", keys = "ctrl+w" }
+# [[layers.items.sets.children]]
+# icon = "edit-undo"              # reopen the closed tab
+# action = { type = "keys", keys = "ctrl+shift+t" }
+#
+# [[layers.items.sets]]
+# id = "terminal"
+# class = ["kitty", "kitty-start"]
+# [[layers.items.sets.children]]
+# label = "Tab"
+# action = { type = "keys", keys = "ctrl+shift+t" }
+# [[layers.items.sets.children]]
+# label = "Copiar"
+# action = { type = "keys", keys = "ctrl+shift+c" }
+# [[layers.items.sets.children]]
+# label = "Pegar"
+# action = { type = "keys", keys = "ctrl+shift+v" }
+#
+# [[layers.items.sets]]
+# id = "obsidian"
+# class = ["obsidian"]
+# [[layers.items.sets.children]]
+# label = "Abrir"                  # quick switcher
+# action = { type = "keys", keys = "ctrl+o" }
+# [[layers.items.sets.children]]
+# label = "Nueva"
+# action = { type = "keys", keys = "ctrl+n" }
+# [[layers.items.sets.children]]
+# label = "Buscar"
+# action = { type = "keys", keys = "ctrl+shift+f" }
+# [[layers.items.sets.children]]
+# label = "Paleta"                 # command palette
+# action = { type = "keys", keys = "ctrl+p" }
+#
+# [[layers.items.sets]]
+# id = "telegram"
+# class = ["org.telegram.desktop"]
+# [[layers.items.sets.children]]
+# label = "Buscar"
+# action = { type = "keys", keys = "ctrl+f" }
+# [[layers.items.sets.children]]
+# label = "‹ Chat"
+# action = { type = "keys", keys = "ctrl+shift+tab" }
+# [[layers.items.sets.children]]
+# label = "Chat ›"
+# action = { type = "keys", keys = "ctrl+tab" }
+#
+# # To fill in: Signal and Renoise (check their class with hyprctl first).
+# # [[layers.items.sets]]
+# # id = "signal"
+# # class = ["signal"]
+# # [[layers.items.sets.children]]
+# # label = "..."
+# # action = { type = "keys", keys = "..." }
+# #
+# # [[layers.items.sets]]
+# # id = "renoise"
+# # class = ["Renoise"]
+# # [[layers.items.sets.children]]
+# # label = "..."
+# # action = { type = "keys", keys = "..." }
+
 # Rest when unused, like a Mac's Touch Bar: dimmed, then a sleep layer (a GIF,
 # very dim), then off. A touch on the bar or the Fn key wakes it (the daemon
 # never reads the rest of the keyboard; hypridle & co. can tell it instead, see

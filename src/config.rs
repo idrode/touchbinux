@@ -3833,6 +3833,40 @@ mod tests {
         assert!(matches!(nvim, Action::Command { argv, detach: true, .. } if argv[4] == "/usr/bin/nvim"));
     }
 
+    /// The app_keys item commented out in the example is valid once uncommented.
+    #[test]
+    fn example_app_keys_is_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let start = text.find("# [[layers.items]]\n# type = \"app_keys\"").unwrap();
+        let block = &text[start..start + text[start..].find("\n\n").unwrap()];
+        let body: String = block
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = parse(&format!("[[layers]]\nid='m'\n{body}")).unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!((item.kind, item.size()), (ItemKind::AppKeys, Size::Fixed(360.0)));
+        let sets: Vec<_> = item.sets.iter().flatten().map(|s| s.id.as_str()).collect();
+        assert_eq!(sets, ["browser", "terminal", "obsidian", "telegram"]);
+        let keys = |set: &str| -> Vec<String> {
+            item.app_key_ids()
+                .filter(|(_, _, s)| *s == set)
+                .filter_map(|(_, c, _)| match &c.action {
+                    Some(Action::Keys { keys }) => Some(keys.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(keys("browser"), ["alt+left", "alt+right", "ctrl+r", "ctrl+t", "ctrl+w", "ctrl+shift+t"]);
+        assert_eq!(keys("terminal"), ["ctrl+shift+t", "ctrl+shift+c", "ctrl+shift+v"]);
+        assert_eq!(keys("obsidian"), ["ctrl+o", "ctrl+n", "ctrl+shift+f", "ctrl+p"]);
+        assert_eq!(keys("telegram"), ["ctrl+f", "ctrl+shift+tab", "ctrl+tab"]);
+        let sets = item.sets.as_ref().unwrap();
+        assert!(sets[1].matches("kitty-start", "") && sets[3].matches("org.telegram.desktop", ""));
+    }
+
     /// The [idle] section and sleep layer commented out in the example are valid
     /// once uncommented (with a real GIF at `path`).
     #[test]

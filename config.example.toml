@@ -496,3 +496,39 @@ format = "%H:%M"
 # type = "text"
 # key = "weather"
 # width = 200
+
+# Rest when unused, like a Mac's Touch Bar: dimmed, then a sleep layer (a GIF,
+# very dim), then off. A touch on the bar or the Fn key wakes it (the daemon
+# never reads the rest of the keyboard; hypridle & co. can tell it instead, see
+# docs/GUIA.md). Commented out because the GIF is yours: uncomment both blocks
+# and set `path`.
+# [idle]
+# dim_after_s = 30                 # 0 leaves a stage out; times count from the
+# dim_level = 0.25                 #   last activity and go in order (0-86400 s)
+# sleep_after_s = 90               # levels: fractions of the normal brightness
+# sleep_layer = "idle"             # without it, sleep_after_s turns the bar off
+# sleep_level = 0.10
+# off_after_s = 300                # brightness 0 and nothing drawn
+# wake_on = ["touch", "fn"]        # touch | fn
+# swallow_wake_touch = true        # the waking touch does nothing else
+# fade_ms = 250                    # brightness ramp (waking: 150 ms at most)
+# idle_gif_fps = 8                 # sleep layer's frames a second (0 = still)
+#
+# # The sleep layer: only shown, never touched (a touch wakes the bar). The GIF
+# # in the middle, the spacers either side.
+# [[layers]]
+# id = "idle"
+#
+# [[layers.items]]
+# type = "spacer"
+# stretch = 1
+#
+# [[layers.items]]
+# type = "gif"
+# id = "idle_gif"
+# path = "/home/your-user/Pictures/gifs/idle.gif"   # absolute
+# play = "always"
+#
+# [[layers.items]]
+# type = "spacer"
+# stretch = 1

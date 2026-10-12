@@ -326,6 +326,7 @@ journalctl -u touchbinux -e            # ver el resultado
 | `default_layer` | texto | la primera `[[layers]]` | capa que se muestra. Debe existir. |
 | `[[layers]]` | lista | — | capas de elementos |
 | `[fn]` | tabla | — | capa que sale al mantener Fn (ver [Capa Fn](#capa-fn-fn)) |
+| `[idle]` | tabla | — | atenuar, dormir y apagar la barra sin uso (ver [Reposo](#reposo-idle)) |
 | `[[buttons]]` | lista | — | formato antiguo (ver al final) |
 
 ```toml
@@ -406,6 +407,99 @@ Cómo se comporta:
   ha salido.
 - Del teclado solo se lee la tecla Fn (filtro del kernel); el detalle está en
   [SECURITY.md](SECURITY.md#tecla-fn).
+
+### Reposo: `[idle]`
+
+Como en el Mac: sin uso, la barra se **atenúa**, luego **duerme** (una capa mínima,
+por ejemplo solo un GIF, muy tenue) y al final se **apaga**. Un toque o la tecla Fn
+la despiertan. Sin la sección `[idle]` no cambia nada: el daemon ni toca el brillo.
+
+```toml
+[idle]
+dim_after_s = 30
+dim_level = 0.25
+sleep_after_s = 90
+sleep_layer = "idle"
+sleep_level = 0.10
+off_after_s = 300
+wake_on = ["touch", "fn"]
+swallow_wake_touch = true
+fade_ms = 250
+idle_gif_fps = 8
+```
+
+| Clave | Por defecto | Rango | Qué hace |
+|---|---|---|---|
+| `dim_after_s` | `0` | 0-86400 | segundos sin actividad hasta **atenuar** (misma capa, brillo `dim_level`). `0`: sin esta etapa |
+| `dim_level` | `0.25` | 0.0-1.0 | brillo atenuado, fracción del normal |
+| `sleep_after_s` | `0` | 0-86400 | hasta **dormir**: sale `sleep_layer` con fundido, brillo `sleep_level`. Sin `sleep_layer`, a esa hora se **apaga** |
+| `sleep_layer` | — | id de una `[[layers]]` | la capa del reposo. No puede ser la de `[fn]` ni la de inicio, y necesita `sleep_after_s` |
+| `sleep_level` | `0.10` | 0.0-1.0 | brillo dormida, fracción del normal |
+| `off_after_s` | `0` | 0-86400 | hasta **apagar**: brillo 0 y no se dibuja nada |
+| `wake_on` | `["touch", "fn"]` | `touch`, `fn` | qué la despierta dormida o apagada (al menos uno) |
+| `swallow_wake_touch` | `true` | | el toque que la despierta no hace nada más (ni toque, ni arrastre) |
+| `fade_ms` | `250` | 0-2000 | rampa de brillo al bajar de etapa. Al despertar, 150 ms como mucho |
+| `idle_gif_fps` | `8` | 0-30 | fotogramas por segundo de la capa dormida, como mucho. `0`: se dibuja una vez, con los GIF en su primer fotograma |
+
+Los tiempos cuentan desde la **última actividad** y van en orden: las etapas que
+uses (las distintas de 0) tienen que ser crecientes (`dim < sleep < off`). Puedes
+quitar cualquiera; sin `sleep_layer` y con `off_after_s` a la vez es un error (las
+dos apagarían).
+
+**Qué es actividad.** Cualquier toque en la barra y pulsar o soltar Fn. Despierta,
+la barra atenuada sigue funcionando normal: el toque actúa y devuelve el brillo.
+Dormida o apagada, solo despierta lo que esté en `wake_on`; lo demás se ignora. El
+**teclado no cuenta** (leerlo obligaría al daemon a ver todo lo que escribes; ver
+[SECURITY.md](SECURITY.md#reposo-sin-leer-el-teclado)). Para que escribir la
+mantenga despierta, que te avise tu sesión por el socket:
+
+```sh
+echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
+```
+
+Por ejemplo, desde hypridle (**no probado**: hypridle no está instalado en este
+equipo), un `listener` que avise al volver de la inactividad del sistema:
+
+```
+listener {
+    timeout = 25
+    on-resume = echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
+}
+```
+
+Con `wake_on = ["fn"]` el daemon abre el lector de Fn aunque no haya `[fn]` (el
+mismo, filtrado a la tecla Fn).
+
+Cómo se comporta:
+
+- **Atenuada**: solo baja el brillo, con una rampa de `fade_ms` (unas 30 escrituras
+  por segundo durante la rampa, ninguna después).
+- **Dormida**: lo desplegado (reproductor, hijos del lanzador) se pliega al
+  instante y una tecla mantenida se suelta; luego sale la `sleep_layer` con
+  fundido. No se puede tocar: un toque solo despierta. Sus GIF van a
+  `idle_gif_fps` como mucho.
+- **Apagada**: brillo 0 y no se dibuja ni se presenta nada.
+- **Al despertar**: vuelve la capa de antes (o la de Fn, si Fn sigue pulsada) y el
+  brillo normal en 150 ms como mucho.
+- **Grabando** (un `status` en grabación, o una grabación del `capture`): la barra
+  no pasa de atenuada. Si empieza una con la barra apagada, vuelve a atenuada.
+- **Suspensión**: al reanudar, `touchbinux-resume` recarga el config, y una recarga
+  cuenta como actividad. Una recarga aplica los tiempos nuevos desde ese momento.
+- **El brillo normal** es el que tiene la barra la primera vez que arranca con
+  `[idle]`; se guarda en `/var/lib/touchbinux/state.toml` (`touchbar_brightness`)
+  y se restaura **siempre** al salir: Ctrl+C, `systemctl stop`/`restart`, un
+  error, un panic. Si el daemon muere con `SIGKILL`, el siguiente arranque lo
+  restaura desde ese archivo. Para cambiarlo, edita ese valor con el daemon parado.
+- **Sin dispositivo de brillo** (no hay `228600000.dsi.0`, `display-pipe` ni
+  `appletb_backlight` en `/sys/class/backlight`): no se atenúa (dormida y apagada
+  siguen; apagada manda un fotograma negro). El log lo dice al arrancar.
+- **Coste**: despierta o atenuada, como siempre (0 fps quieta) más un temporizador
+  para la siguiente etapa; dormida, `idle_gif_fps` fotogramas por segundo (ninguno
+  con `0`); apagada, ningún fotograma y ningún temporizador de reposo, reloj ni
+  batería.
+
+Para ver la capa de reposo sin esperar: `--png /tmp/idle.png --layer idle` (ver
+[sección 10](#vista-previa-sin-tocar-la-barra---png)).
 
 ### Anchos: `width` y `stretch`
 
@@ -1724,12 +1818,18 @@ deja el script funcionando aunque touchbinux no esté en marcha.
 El daemon escucha en `/run/touchbinux.sock`: **JSON por líneas** (un objeto por
 línea, terminado en `\n`). Solo pueden conectarse root y el usuario de `run_as`.
 
-**Entrada** (cliente → daemon), dos tipos:
+**Entrada** (cliente → daemon), tres tipos:
 
 ```json
 {"type":"set","key":"weather","value":"18 °C"}
 {"type":"status","id":"rec","state":"start"}
+{"type":"idle","state":"activity"}
 ```
+
+`idle` (con `[idle]`): hay actividad. Despierta la barra y reinicia la cuenta. Es
+la manera de que tu sesión (hypridle, un script) la mantenga despierta mientras
+escribes, sin que el daemon lea el teclado. Sin `[idle]` en el config responde un
+error.
 
 `status` es para los elementos [`status`](#status): `id` `"rec"` con `state`
 `"start"` o `"stop"`, o `id` `"shot"` (sin `state`, o `"done"`).
@@ -1738,7 +1838,7 @@ línea, terminado en `\n`). Solo pueden conectarse root y el usuario de `run_as`
 correcto no responde nada. Uno incorrecto responde, por ejemplo:
 
 ```json
-{"message":"invalid message: unknown variant `nope`, expected `set` or `status` at line 1 column 14","type":"error"}
+{"message":"invalid message: unknown variant `nope`, expected one of `set`, `status`, `idle` at line 1 column 14","type":"error"}
 ```
 
 **Salida** (daemon → todos los clientes conectados):
@@ -1967,6 +2067,8 @@ una suspensión real.
 | `keys.rs` | teclado virtual (uinput) |
 | `fnkey.rs` | la tecla Fn del teclado interno: solo lectura, filtro del kernel |
 | `fnlayer.rs` | cuándo sale la capa Fn (máquina de estados) y el fundido |
+| `idle.rs` | reposo: etapas despierta, atenuada, dormida y apagada (máquina de estados) |
+| `barlight.rs` | brillo de la Touch Bar (`[idle]`): rampas y restauración al salir |
 | `stats.rs` | estadísticas de fps/CPU en el log |
 
 Bucle: esperar evento (toque, socket, Hyprland, temporizador, señal) → actualizar
@@ -2076,6 +2178,44 @@ En la barra:
 5. Con la barra quieta, `top -p $(pidof touchbinux)` debe marcar 0 % de CPU, con y
    sin Fn pulsada (salvo durante el fundido).
 6. Ctrl+C y `sudo systemctl start touchbinux`.
+
+### Probar el reposo
+
+Con tiempos cortos, en una copia de tu config (no hace falta tocar
+`/etc/touchbinux`):
+
+```toml
+[idle]
+dim_after_s = 5
+sleep_after_s = 10
+sleep_layer = "idle"
+off_after_s = 20
+```
+
+```sh
+cargo test idle                 # etapas, brillo, despertar, socket (reloj simulado)
+./target/debug/touchbinux bar --config <copia> --png /tmp/idle.png --layer idle
+sudo systemctl stop touchbinux
+sudo ./target/debug/touchbinux bar --config <copia>
+```
+
+En el log: `idle: backlight /sys/class/backlight/228600000.dsi.0 (normal N of 255)`
+y, sin tocar nada, `idle: Awake -> Dim` a los 5 s, `Dim -> Sleep` a los 10 s y
+`Sleep -> Off` a los 20 s. El brillo se puede mirar en otra terminal:
+
+```sh
+watch -n 0.2 cat /sys/class/backlight/228600000.dsi.0/brightness
+```
+
+Actividad sin teclado: un toque, Fn, o el socket (desde tu usuario):
+
+```sh
+echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
+```
+
+Y comprobar que el brillo vuelve: Ctrl+C con la barra apagada, y
+`cat .../brightness` debe dar el normal. CPU: `top -p $(pidof touchbinux)`, 0 %
+apagada y despierta quieta. `sudo systemctl start touchbinux` al terminar.
 
 ### Añadir un tipo de elemento
 

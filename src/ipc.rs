@@ -373,6 +373,9 @@ mod tests {
         assert!(errors[0].contains("unknown variant `asleep`, expected `activity`"), "{}", errors[0]);
         assert!(errors[1].contains("missing field `state`"), "{}", errors[1]);
         assert!(errors[2].starts_with("invalid message: EOF"), "{}", errors[2]);
+        // The types a client can send, as the error lists them (docs/GUIA.md).
+        let (_, errors) = parse(b"{\"type\":\"nope\"}\n");
+        assert!(errors[0].contains("expected one of `set`, `status`, `idle`"), "{}", errors[0]);
     }
 
     #[test]

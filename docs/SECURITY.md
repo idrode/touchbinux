@@ -63,8 +63,9 @@ Sacado del código; entre paréntesis, dónde se usa.
 | `/dev/dri/cardN` del Touch Bar (`adp` / `appletbdrm`), `char-drm` | rw, maestro DRM (`acquire_master_lock`) | volcar el framebuffer (`display.rs`) |
 | `/dev/input/eventN` del digitalizador, `char-input` | rw, `EVIOCGRAB` (exclusivo) | toques (`touch.rs`) |
 | `/dev/uinput` | rw | teclado virtual (`keys.rs`) |
-| `/dev/input/eventN` del teclado interno, `char-input` | **solo lectura**, sin grab; solo con `[fn]` | la tecla Fn (`fnkey.rs`, ver [Tecla Fn](#tecla-fn)) |
+| `/dev/input/eventN` del teclado interno, `char-input` | **solo lectura**, sin grab; solo con `[fn]` o `[idle] wake_on` con `fn` | la tecla Fn (`fnkey.rs`, ver [Tecla Fn](#tecla-fn)) |
 | `/sys/class/backlight/<pantalla>/brightness` | escritura | brillo (`levels.rs`) |
+| `/sys/class/backlight/228600000.dsi.0/brightness` (la Touch Bar) | escritura, solo con `[idle]` | atenuar y apagar la barra, y restaurarla al salir (`barlight.rs`) |
 | `/sys/class/backlight/*/actual_brightness`, `/sys/class/power_supply/*` | lectura | brillo y batería |
 
 Los tres nodos son de root (`0660` o `0600`): root los abre como propietario, sin
@@ -76,7 +77,8 @@ sin ella. **No está probado**, ver abajo.
 **Archivos y sockets**
 
 - `/etc/touchbinux/` (configuración, iconos, GIF): lectura.
-- `/var/lib/touchbinux/state.toml`: lectura y escritura (`StateDirectory=`).
+- `/var/lib/touchbinux/state.toml`: lectura y escritura (`StateDirectory=`). Con
+  `[idle]` guarda también el brillo normal de la barra.
 - `/run/touchbinux.sock`: lo crea con modo `0600` y se lo da al usuario (`chown`).
 - `/run/user/<uid>/hypr/<firma>/.socket.sock` y `.socket2.sock`: `connect`. El
   directorio es `0700` y los sockets `0755` del usuario: root necesita
@@ -116,7 +118,7 @@ se sacan los comandos del servicio.
 | Entrada | Quién la controla | Validación |
 |---|---|---|
 | `/etc/touchbinux/config.toml` | root | parseo estricto (`deny_unknown_fields`, rangos, un error = no carga; al recargar, se queda la anterior). `run_as` solo si el archivo es de root y no escribible por grupo u otros, nunca root. Los comandos son `argv` (sin shell) |
-| Socket `/run/touchbinux.sock` | el usuario de la sesión | modo `0600` del usuario desde el `bind` (umask `0177`, sin ventana), y además `SO_PEERCRED`: solo root o ese uid. Clientes limitados (`MAX_CLIENTS`), líneas de 64 KiB como mucho (las largas se descartan), JSON con un único tipo de mensaje (`set`: clave de 1 a 64 bytes, número de claves limitado). No puede lanzar comandos ni acciones: solo cambia textos y el volumen mostrado |
+| Socket `/run/touchbinux.sock` | el usuario de la sesión | modo `0600` del usuario desde el `bind` (umask `0177`, sin ventana), y además `SO_PEERCRED`: solo root o ese uid. Clientes limitados (`MAX_CLIENTS`), líneas de 64 KiB como mucho (las largas se descartan), JSON con tres tipos de mensaje: `set` (clave de 1 a 64 bytes, número de claves limitado), `status` (ids y estados fijos) e `idle` (solo `"activity"`). No puede lanzar comandos ni acciones: solo cambia textos, el volumen mostrado, el `status` y despierta la barra |
 | Eventos de Hyprland (`.socket2.sock`) | el compositor del usuario | se parsean como texto. Lo que vuelve a Hyprland (dispatch) se comprueba: id de workspace solo cifras, dirección de ventana `0x` y hexadecimal |
 | Socket de mpv | el usuario | debe ser un socket del usuario de la sesión y el proceso al otro lado (`SO_PEERCRED`) también. JSON de mpv; solo se leen propiedades observadas |
 | `/proc` (buscar `wf-recorder`) | cualquier proceso | solo procesos del usuario de la sesión con `comm` exacto; se sigue por pid y hora de inicio (un pid reutilizado no engaña). Antes del `SIGINT` se vuelve a comprobar |
@@ -176,7 +178,31 @@ comprueba un test que necesita root: crea un teclado virtual con uinput, escribe
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test the_kernel_filter_passes_fn_only -- --ignored
 ```
 
-Sin `[fn]` no se abre ningún teclado.
+Sin `[fn]` (ni `wake_on` con `fn` en `[idle]`) no se abre ningún teclado.
+
+## Reposo sin leer el teclado
+
+`[idle]` atenúa, duerme y apaga la barra sin actividad. Cuentan como actividad los
+toques en la barra (su propio dispositivo) y la tecla Fn, por el mismo lector de
+arriba y **con el mismo filtro**: el kernel le sigue pasando solo `KEY_FN`.
+
+Que escribir en el teclado mantenga la barra despierta **no se implementa, a
+propósito, por privacidad**: haría falta quitar el filtro y que un proceso root
+recibiera cada pulsación, aunque solo fuera para mirar la hora. No
+hay opción `keyboard` en `wake_on` y el config la rechaza (`unknown variant`).
+
+La alternativa es que avise la **sesión del usuario**, que ya ve el teclado: el
+socket acepta `{"type":"idle","state":"activity"}` (solo de root o del usuario de
+sesión, como el resto del socket) y lo trata como un toque. hypridle u otro
+programa de la sesión puede mandarlo (ver `docs/GUIA.md`, «Reposo»). Por esa vía
+solo llega «hay actividad», nunca qué se ha tecleado. Cualquier otro
+`state` o un JSON mal formado se responde con un error y no cambia nada.
+
+**El brillo de la barra.** Solo se escribe con `[idle]`. El valor normal se
+restaura siempre: al despertar, al quitar `[idle]` en una recarga, al terminar
+(`Drop`: Ctrl+C, SIGTERM, `systemctl restart`, un error, un panic que se
+desenrolla) y desde un *panic hook*. Un `SIGKILL` no se puede atender: el valor
+normal está en el archivo de estado y el siguiente arranque lo vuelve a escribir.
 
 ## Endurecimiento: aplicado, descartado y por qué
 

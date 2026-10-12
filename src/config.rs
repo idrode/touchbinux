@@ -3651,6 +3651,30 @@ mod tests {
         assert!(matches!(nvim, Action::Command { argv, detach: true, .. } if argv[4] == "/usr/bin/nvim"));
     }
 
+    /// The [idle] section and sleep layer commented out in the example are valid
+    /// once uncommented (with a real GIF at `path`).
+    #[test]
+    fn example_idle_is_valid() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
+        let start = text.find("# [idle]\n").unwrap();
+        let body: String = text[start..]
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_dir, gif) = temp_gif("example-idle");
+        let body = body.replace("/home/your-user/Pictures/gifs/idle.gif", &gif.to_string_lossy());
+        let c = parse(&format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='spacer'\n{body}")).unwrap();
+        let i = c.idle.as_ref().unwrap();
+        assert_eq!((i.dim_after_s, i.sleep_after_s, i.off_after_s), (30, 90, 300));
+        assert_eq!(i.sleep_layer.as_deref(), Some("idle"));
+        let layer = c.layer("idle").unwrap();
+        let kinds: Vec<_> = layer.items.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, [ItemKind::Spacer, ItemKind::Gif, ItemKind::Spacer]);
+        assert_eq!(c.default_layer().unwrap().id, "m");
+    }
+
     /// A real 2-frame GIF (6x3) in a fresh temporary directory (removed when the
     /// returned folder is dropped).
     fn temp_gif(name: &str) -> (crate::testdir::TestDir, std::path::PathBuf) {

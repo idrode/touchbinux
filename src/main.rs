@@ -1163,8 +1163,8 @@ impl App {
         // Closed before another is opened: epoll follows them by id.
         self.fnl.keyboard = None;
         self.fnl.watch = None;
-        let f = self.config.fn_layer.as_ref().filter(|_| self.args.scene == "bar");
-        self.fnl.machine = f.map(|f| FnMachine::new(f.mode, f.delay()));
+        let f = self.config.fn_layer().filter(|_| self.args.scene == "bar");
+        self.fnl.machine = f.map(|(f, _)| FnMachine::new(f.mode, f.delay()));
         // The config may have changed: whatever shows is built again if needed.
         self.show_fn(false);
         if self.fnl.machine.is_none() || !self.fnl.follow {
@@ -1519,7 +1519,10 @@ fn main() -> Result<()> {
             follow_fn: true,
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
-        run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app)
+        let result = run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app);
+        // However it ends, no key is left down on the virtual keyboard.
+        app.release_held();
+        result
     })();
 
     // Leave the bar black; dropping `drm` then removes the framebuffer and releases master.
@@ -2100,7 +2103,9 @@ fn run(
                     let scene_t = Instant::now() - start;
                     // E.g. an automatic fold that is due but not drawn yet: the touch
                     // must see the scene as it is now.
-                    dirty |= app.scene.advance(scene_t, &app.live());
+                    let live = app.live();
+                    let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
+                    dirty |= scene.advance(scene_t, &live);
                     // While present() blocks (~33 ms) moves pile up; only the last of
                     // each run matters, so a drag never lags behind the finger.
                     for (i, t) in touches.iter().enumerate() {
@@ -2115,13 +2120,22 @@ fn run(
                                 t.phase, t.x, t.y
                             );
                         }
-                        dirty |= app.scene.handle_touch(
+                        // Touches go to the layer on screen.
+                        let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
+                        dirty |= scene.handle_touch(
                             t.phase,
                             (x, y),
                             scene_t,
                             &app.font,
                             &mut ui_events,
                         );
+                        app.finger = match t.phase {
+                            Phase::Down | Phase::Move => Some((x, y)),
+                            Phase::Up | Phase::Cancel => None,
+                        };
+                        // After each event: a quick tap read in one batch still
+                        // presses and releases its key.
+                        app.sync_held_key();
                     }
                     for e in &ui_events {
                         let msg = ui_event_json(e);

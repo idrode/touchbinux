@@ -62,6 +62,9 @@ const MAX_CHILDREN: usize = 12;
 const MAX_KEY_SETS: usize = 32;
 pub const DEFAULT_APP_KEYS_WIDTH: f32 = 360.0;
 const DEFAULT_APP_KEYS_TRANSITION_MS: u64 = 150;
+/// workspaces' app buttons: unfolding, and folding by themselves.
+const DEFAULT_APP_TRANSITION_MS: u64 = 150;
+pub const DEFAULT_APP_COLLAPSE_MS: u64 = 5000;
 const MAX_APP_KEYS_TRANSITION_MS: u64 = 1000;
 /// `thumb_size` of a gif_picker, px (it is also capped to the row's height).
 const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
@@ -615,6 +618,13 @@ pub struct ItemConfig {
     /// app_keys: the cross-fade when the set changes, ms.
     #[serde(default)]
     pub transition_ms: Option<u64>,
+    /// workspaces: buttons for the apps in its strips, unfolded by tapping an
+    /// app's icon.
+    #[serde(default)]
+    pub app_actions: Option<Vec<AppAction>>,
+    /// workspaces: how long those buttons take to unfold and fold, ms.
+    #[serde(default)]
+    pub app_transition_ms: Option<u64>,
     /// button: a row of children pulled out to its right by dragging the button
     /// rightwards (a tap still runs its `action`).
     #[serde(default)]
@@ -838,16 +848,42 @@ impl KeySet {
     /// Whether a window of `class` titled `title` gets these buttons. Nothing
     /// focused (an empty class) matches none.
     pub fn matches(&self, class: &str, title: &str) -> bool {
-        if class.is_empty() {
-            return false;
-        }
-        let class = class.to_lowercase();
-        let class_ok = self.class.is_empty() || self.class.iter().any(|c| c.to_lowercase() == class);
-        let title_ok = self
-            .title_contains
-            .as_ref()
-            .is_none_or(|t| title.to_lowercase().contains(&t.to_lowercase()));
-        class_ok && title_ok
+        window_matches(&self.class, self.title_contains.as_deref(), class, title)
+    }
+}
+
+/// Whether a window of `class` titled `title` is one of `classes` (whole, any
+/// case; any class if empty) with a title containing `title_contains` (any
+/// case). An empty class (nothing focused) is none.
+fn window_matches(classes: &[String], title_contains: Option<&str>, class: &str, title: &str) -> bool {
+    if class.is_empty() {
+        return false;
+    }
+    let class = class.to_lowercase();
+    let class_ok = classes.is_empty() || classes.iter().any(|c| c.to_lowercase() == class);
+    let title_ok = title_contains.is_none_or(|t| title.to_lowercase().contains(&t.to_lowercase()));
+    class_ok && title_ok
+}
+
+/// `[[layers.items.app_actions]]` of a workspaces item: buttons for the windows
+/// of these classes, unfolded in its place by tapping one's icon in a strip.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppAction {
+    /// Window classes (as `hyprctl clients` gives them), compared whole and
+    /// ignoring case.
+    #[serde(default)]
+    pub class: Vec<String>,
+    /// And, if given, a title containing this (ignoring case).
+    #[serde(default)]
+    pub title_contains: Option<String>,
+    #[serde(default)]
+    pub children: Vec<ChildConfig>,
+}
+
+impl AppAction {
+    pub fn matches(&self, class: &str, title: &str) -> bool {
+        window_matches(&self.class, self.title_contains.as_deref(), class, title)
     }
 }
 
@@ -1062,6 +1098,8 @@ impl ItemConfig {
             sets: None,
             default_set: None,
             transition_ms: None,
+            app_actions: None,
+            app_transition_ms: None,
             drag_children: None,
             drag_px: None,
             close_on_tap: None,
@@ -1122,6 +1160,85 @@ impl ItemConfig {
             pressed_border_color: None,
             gif: None,
         }
+    }
+
+    /// workspaces: every app_actions' buttons with their ids, and its index. By
+    /// default `<item>.<first class, lowercase>.<n>`, n counting on through
+    /// app_actions with the same first class.
+    pub fn app_action_ids(&self) -> impl Iterator<Item = (String, &ChildConfig, usize)> {
+        let item = self.id().unwrap_or("");
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut out = Vec::new();
+        for (k, a) in self.app_actions.iter().flatten().enumerate() {
+            let first = a.class.first().map(|c| c.to_lowercase()).unwrap_or_default();
+            let parent = format!("{item}.{first}");
+            let n0 = counts.entry(first).or_default();
+            for c in &a.children {
+                out.push((c.id(&parent, *n0), c, k));
+                *n0 += 1;
+            }
+        }
+        out.into_iter()
+    }
+
+    /// workspaces: how long its app buttons take to unfold.
+    pub fn app_transition(&self) -> Duration {
+        Duration::from_millis(self.app_transition_ms.unwrap_or(DEFAULT_APP_TRANSITION_MS))
+    }
+
+    /// workspaces: its app_actions and their buttons.
+    fn validate_app_actions(&self, what: &str) -> Result<()> {
+        let Some(actions) = &self.app_actions else {
+            for (field, set) in [
+                ("close_on_tap", self.close_on_tap.is_some()),
+                ("collapse_after_ms", self.collapse_after_ms.is_some()),
+                ("app_transition_ms", self.app_transition_ms.is_some()),
+            ] {
+                if set {
+                    bail!("{what}: `{field}` only applies with `app_actions`");
+                }
+            }
+            return Ok(());
+        };
+        if actions.is_empty() || actions.len() > MAX_KEY_SETS {
+            bail!("{what}: app_actions needs 1 to {MAX_KEY_SETS} entries, it has {}", actions.len());
+        }
+        if self.strip == Some(WsStrip::None) {
+            bail!("{what}: app_actions open from an app's icon in a strip: strip = \"none\" shows none");
+        }
+        let mut seen: Vec<(String, Option<String>)> = Vec::new();
+        for (k, a) in actions.iter().enumerate() {
+            let first = a.class.first().cloned().unwrap_or_default();
+            let what = format!("{what}: app_actions {} ({first:?})", k + 1);
+            if a.class.is_empty() || a.class.iter().any(String::is_empty) {
+                bail!("{what}: `class` needs one or more window classes, none empty");
+            }
+            if a.title_contains.as_deref() == Some("") {
+                bail!("{what}: title_contains must not be empty");
+            }
+            for c in &a.class {
+                let key = (c.to_lowercase(), a.title_contains.as_ref().map(|t| t.to_lowercase()));
+                if seen.contains(&key) {
+                    bail!(
+                        "{what}: class {c:?} is already in another app_actions (each class once, \
+                         or with a different title_contains)"
+                    );
+                }
+                seen.push(key);
+            }
+            let n = a.children.len();
+            if !(1..=MAX_CHILDREN).contains(&n) {
+                bail!("{what}: needs 1 to {MAX_CHILDREN} `children`, it has {n}");
+            }
+        }
+        for (id, child, k) in self.app_action_ids() {
+            let first = actions[k].class.first().cloned().unwrap_or_default();
+            validate_child(&format!("{what}: app_actions {first:?}: child {id:?}"), child, false, true)?;
+        }
+        if self.app_transition_ms.is_some_and(|t| t > MAX_APP_KEYS_TRANSITION_MS) {
+            bail!("{what}: app_transition_ms must be 0..={MAX_APP_KEYS_TRANSITION_MS}");
+        }
+        Ok(())
     }
 
     /// app_keys: every set's buttons with their ids (`<item>.<set>.<n>` by
@@ -1349,6 +1466,10 @@ impl ItemConfig {
                 "show",
                 "overview_action",
                 "drag_px",
+                "app_actions",
+                "collapse_after_ms",
+                "close_on_tap",
+                "app_transition_ms",
             ],
             // No action: it only shows state, it never starts anything.
             ItemKind::Status => &[
@@ -1380,6 +1501,8 @@ impl ItemConfig {
             ("play", self.play.is_some()),
             ("loading", self.loading.is_some()),
             ("sets", self.sets.is_some()),
+            ("app_actions", self.app_actions.is_some()),
+            ("app_transition_ms", self.app_transition_ms.is_some()),
             ("default_set", self.default_set.is_some()),
             ("transition_ms", self.transition_ms.is_some()),
             ("key", self.key.is_some()),
@@ -1643,6 +1766,7 @@ impl ItemConfig {
         if self.stretch.is_some() {
             bail!("{what}: use `width` (the most it takes), not `stretch`");
         }
+        self.validate_app_actions(what)?;
         let style = self.style.unwrap_or_default();
         // Each style's sizes are an error with the other.
         let sizes = [
@@ -2328,7 +2452,9 @@ impl Config {
                 let ids = item.id().map(str::to_string).into_iter();
                 let captures = item.capture_children().into_iter().map(|(id, _)| id);
                 let keys = item.app_key_ids().map(|(id, _, _)| id);
-                for id in ids.chain(item.child_ids().map(|(id, _)| id)).chain(captures).chain(keys) {
+                let apps = item.app_action_ids().map(|(id, _, _)| id);
+                let children = item.child_ids().map(|(id, _)| id);
+                for id in ids.chain(children).chain(captures).chain(keys).chain(apps) {
                     check_id(&id).with_context(|| format!("layer {:?}", layer.id))?;
                 }
             }
@@ -2414,6 +2540,9 @@ impl Config {
             return item.action.as_ref();
         }
         if let Some((_, c)) = items().flat_map(ItemConfig::child_ids).find(|(child, _)| child == id) {
+            return c.action.as_ref();
+        }
+        if let Some((_, c, _)) = items().flat_map(ItemConfig::app_action_ids).find(|(child, _, _)| child == id) {
             return c.action.as_ref();
         }
         items()
@@ -4612,6 +4741,97 @@ mod tests {
         assert!(one_item("", "type='workspaces'\nstrip_border_color='#ffffff'\nstrip_border_width=2").is_ok());
         let err = format!("{:#}", one_item("", "type='workspaces'\nstrip_border_color='#ffffff'").unwrap_err());
         assert!(err.contains("strip_border_color needs strip_border_width > 0"), "{err}");
+    }
+
+    /// A workspaces item with `extra` (TOML) and app_actions for zen and kitty.
+    fn ws_apps(extra: &str) -> Result<Config> {
+        parse(&format!(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "workspaces"
+            width = 520
+            {extra}
+            [[layers.items.app_actions]]
+            class = ["zen"]
+            [[layers.items.app_actions.children]]
+            icon = "go-previous"
+            action = {{ type = "keys", keys = "alt+left" }}
+            [[layers.items.app_actions.children]]
+            id = "reload"
+            label = "R"
+            background = "#333333"
+            border_color = "#00ffb7"
+            border_width = 1
+            action = {{ type = "keys", keys = "ctrl+r" }}
+            [[layers.items.app_actions]]
+            class = ["kitty", "Kitty-Start"]
+            [[layers.items.app_actions.children]]
+            label = "Tab"
+            action = {{ type = "keys", keys = "ctrl+shift+t" }}
+            "##
+        ))
+    }
+
+    #[test]
+    fn workspaces_app_actions() {
+        let c = ws_apps("collapse_after_ms = 3000\nclose_on_tap = true\napp_transition_ms = 200").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.collapse_after(), Some(Duration::from_millis(3000)));
+        assert_eq!((item.close_on_tap, item.app_transition()), (Some(true), Duration::from_millis(200)));
+        let ids: Vec<_> = item.app_action_ids().map(|(id, _, k)| (id, k)).collect();
+        assert_eq!(
+            ids,
+            vec![("workspaces.zen.1".into(), 0), ("reload".into(), 0), ("workspaces.kitty.1".into(), 1)]
+        );
+        assert!(matches!(c.action("workspaces.zen.1"), Some(Action::Keys { keys }) if keys == "alt+left"));
+        assert!(matches!(c.action("workspaces.kitty.1"), Some(Action::Keys { keys }) if keys == "ctrl+shift+t"));
+        let apps = item.app_actions.as_ref().unwrap();
+        assert!(apps[1].matches("KITTY-start", "x") && !apps[1].matches("kitty2", "x"));
+        // Defaults.
+        let item = &ws_apps("").unwrap().layers[0].items[0];
+        assert_eq!((item.collapse_after(), item.close_on_tap), (None, None));
+        assert_eq!(item.app_transition(), Duration::from_millis(150));
+    }
+
+    #[test]
+    fn bad_app_actions() {
+        for (extra, want) in [
+            ("app_transition_ms = 1001", "app_transition_ms must be 0..=1000"),
+            ("collapse_after_ms = 100", "collapse_after_ms must be"),
+            ("strip = 'none'", "strip = \"none\" shows none"),
+            ("close_on_tap = 'yes'", "invalid type"),
+        ] {
+            let err = format!("{:#}", ws_apps(extra).expect_err(extra));
+            assert!(err.contains(want), "{extra}: {err}");
+        }
+        let ws = |body: &str| {
+            parse(&format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\n{body}"))
+        };
+        for (body, want) in [
+            ("close_on_tap = true", "`close_on_tap` only applies with `app_actions`"),
+            ("app_transition_ms = 100", "`app_transition_ms` only applies with `app_actions`"),
+            ("[[layers.items.app_actions]]\nclass=['zen']", "needs 1 to 12 `children`, it has 0"),
+            ("[[layers.items.app_actions]]\n[[layers.items.app_actions.children]]\nlabel='x'\naction={type='socket'}", "`class` needs one or more window classes"),
+            ("[[layers.items.app_actions]]\nclass=['zen']\n[[layers.items.app_actions.children]]\nlabel='x'\naction={type='keys', keys='ctrl+tee'}", "unknown key \"tee\""),
+            ("[[layers.items.app_actions]]\nclass=['zen']\n[[layers.items.app_actions.children]]\naction={type='socket'}", "a child needs an `icon`, a `label` or both"),
+            ("[[layers.items.app_actions]]\nclass=['zen']\ncolor='#ffffff'\n[[layers.items.app_actions.children]]\nlabel='x'\naction={type='socket'}", "unknown field `color`"),
+            (
+                "[[layers.items.app_actions]]\nclass=['zen']\n[[layers.items.app_actions.children]]\nlabel='x'\naction={type='socket'}\n\
+                 [[layers.items.app_actions]]\nclass=['Zen']\n[[layers.items.app_actions.children]]\nlabel='y'\naction={type='socket'}",
+                "class \"Zen\" is already in another app_actions",
+            ),
+        ] {
+            let err = format!("{:#}", ws(body).expect_err(body));
+            assert!(err.contains(want), "{body}: {err}");
+        }
+        // The same class with a different title_contains is fine.
+        assert!(ws(
+            "[[layers.items.app_actions]]\nclass=['zen']\ntitle_contains='mail'\n[[layers.items.app_actions.children]]\nlabel='x'\naction={type='socket'}\n\
+             [[layers.items.app_actions]]\nclass=['zen']\n[[layers.items.app_actions.children]]\nlabel='y'\naction={type='socket'}"
+        )
+        .is_ok());
     }
 }
 

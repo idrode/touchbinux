@@ -44,6 +44,8 @@ use config::{Action, Config, ItemConfig, ItemKind, StatusIdle};
 use gifpick::{Loader, Reply, Request};
 use display::DrmBackend;
 use evdev::KeyCode;
+use fnkey::{FnEvent, FnKeyboard, Lost, NodeWatch};
+use fnlayer::{Fade, FnMachine};
 use hypr::{Hypr, ReadOutcome};
 use hyprctl::HyprAction;
 use hyprwatch::InstanceWatch;
@@ -69,6 +71,7 @@ use stats::Stats;
 use status::Status;
 use statussrc::{RecChange, RecWatch, ShotWatch};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     rc::Rc,
@@ -121,8 +124,10 @@ const DEMO_BUTTONS: &[(&str, &str)] = &[
 const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
-                     [--config <file>] [--gif <file>] [--png <file> [--status <state>]]\n\
-                     --status (previews only): rec | rec_done | shot | rec_shot";
+                     [--config <file>] [--gif <file>] \
+                     [--png <file> [--status <state>] [--layer <id>]]\n\
+                     --status (previews only): rec | rec_done | shot | rec_shot\n\
+                     --layer (previews only): the bar scene's layer to draw, e.g. fn";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -143,6 +148,9 @@ const TOKEN_MPV_WATCH: u64 = 14;
 const TOKEN_BATTERY_POLL: u64 = 15;
 const TOKEN_STATUS_SHOTS: u64 = 16;
 const TOKEN_STATUS_PID: u64 = 17;
+const TOKEN_FN_KEYS: u64 = 18;
+const TOKEN_FN_NODES: u64 = 19;
+const TOKEN_FN_TIMER: u64 = 20;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -152,6 +160,8 @@ struct Args {
     config: Option<PathBuf>,
     /// `--png` only: what status items show in the preview.
     status: Option<String>,
+    /// `--png` only: the layer drawn instead of the starting one.
+    layer: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -161,6 +171,7 @@ fn parse_args() -> Result<Args> {
         png: None,
         config: None,
         status: None,
+        layer: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -178,11 +189,15 @@ fn parse_args() -> Result<Args> {
                 }
                 args.status = Some(st);
             }
+            "--layer" => args.layer = Some(it.next().ok_or(anyhow!(USAGE))?),
             _ => return Err(anyhow!("unknown argument {arg:?}\n{USAGE}")),
         }
     }
     if args.status.is_some() && args.png.is_none() {
         return Err(anyhow!("--status only goes with --png\n{USAGE}"));
+    }
+    if args.layer.is_some() && (args.png.is_none() || args.scene != "bar") {
+        return Err(anyhow!("--layer only goes with bar --png\n{USAGE}"));
     }
     Ok(args)
 }
@@ -267,6 +282,50 @@ struct App {
     rec_key: (Vec<String>, Duration),
     /// Status items with idle = "hidden" that are on the bar (showing something).
     status_shown: BTreeSet<String>,
+    /// The Fn layer, with an `[fn]` section.
+    fnl: FnSide,
+    /// The key held down by a finger on a `hold = true` button.
+    held: Option<HeldKey>,
+    /// Where the followed finger is on the bar, while it is down.
+    finger: Option<(f32, f32)>,
+}
+
+/// The Fn layer: whether it shows, where the Fn key is read from, and its scene.
+/// `App::scene` stays the normal layer's all along (kept up to date while hidden).
+#[derive(Default)]
+struct FnSide {
+    /// With an `[fn]` section (and the bar scene).
+    machine: Option<FnMachine>,
+    /// Read the keyboard: the daemon does, previews and tests don't.
+    follow: bool,
+    keyboard: Option<FnKeyboard>,
+    /// Change with each keyboard opened and each watch made (epoll).
+    keyboard_id: u64,
+    watch: Option<NodeWatch>,
+    watch_id: u64,
+    /// Why there is no keyboard, as last logged (once per reason).
+    missing: Option<String>,
+    /// The Fn layer's scene, while it is shown.
+    scene: Option<Scene>,
+    /// The layer changed since the last frame: the loop cross-fades.
+    switched: bool,
+}
+
+impl FnSide {
+    /// When the delay's timer must go off (only while it is waiting).
+    fn deadline(&self) -> Option<Instant> {
+        self.machine.as_ref().and_then(FnMachine::deadline)
+    }
+}
+
+/// A key pressed on the virtual keyboard by a finger on button `id`, with the
+/// modifiers mirrored from the physical keyboard.
+struct HeldKey {
+    id: String,
+    key: KeyCode,
+    mods: Vec<KeyCode>,
+    /// Whether it went out (there may be no virtual keyboard): only then released.
+    sent: bool,
 }
 
 /// A gif_picker's folder as last read, and its GIF.
@@ -717,15 +776,44 @@ impl App {
         self.sync_pickers();
     }
 
-    fn build_scene(&mut self) -> Result<Scene> {
+    /// The bar scene of layer `id`, or of the starting layer.
+    fn bar_scene(&mut self, id: Option<&str>) -> Result<Scene> {
+        let (w, h) = (self.w, self.h);
+        let font = &self.font;
+        let layer = match id {
+            Some(id) => Some(Cow::Borrowed(
+                self.config.layer(id).ok_or_else(|| anyhow!("no layer {id:?} in the config"))?,
+            )),
+            None => self.config.default_layer(),
+        };
+        let Some(mut layer) = layer else {
+            let mut scene = Scene::new(w, h)?;
+            let r = Rect { w: 420.0, ..scenes::content_area(w, h) };
+            let spec = ButtonSpec::new("none", Icon::None, "No layers in config");
+            scene.add_button(r, font, spec);
+            return Ok(scene);
+        };
         // Hidden status items with nothing to show take no room.
-        self.status_shown = self.hidden_status_shown();
         let shown = &self.status_shown;
         let gone = |i: &ItemConfig| {
             i.kind == ItemKind::Status
                 && i.idle == Some(StatusIdle::Hidden)
                 && !i.id().is_some_and(|id| shown.contains(id))
         };
+        if layer.items.iter().any(gone) {
+            layer.to_mut().items.retain(|i| !gone(i));
+        }
+        let hypr = self.hypr.connected().then_some(&self.hypr.state);
+        let mut scene = scenes::bar_with(w, h, font, &layer, &mut self.icons, hypr)?;
+        // `text` items show what clients have already set.
+        for (key, value) in &self.store {
+            scene.set_text(key, &value_text(value));
+        }
+        Ok(scene)
+    }
+
+    fn build_scene(&mut self) -> Result<Scene> {
+        self.status_shown = self.hidden_status_shown();
         let (w, h) = (self.w, self.h);
         let area = scenes::content_area(w, h);
         let label = self.label();
@@ -737,27 +825,10 @@ impl App {
         let font = &self.font;
         match self.args.scene.as_str() {
             "windows" => scenes::windows(w, h, font, &self.hypr.state, &mut self.icons, &shared),
-            "bar" => match self.config.default_layer() {
-                Some(mut layer) => {
-                    if layer.items.iter().any(gone) {
-                        layer.to_mut().items.retain(|i| !gone(i));
-                    }
-                    let hypr = self.hypr.connected().then_some(&self.hypr.state);
-                    let mut scene = scenes::bar_with(w, h, font, &layer, &mut self.icons, hypr)?;
-                    // `text` items show what clients have already set.
-                    for (key, value) in &self.store {
-                        scene.set_text(key, &value_text(value));
-                    }
-                    Ok(scene)
-                }
-                None => {
-                    let mut scene = Scene::new(w, h)?;
-                    let r = Rect { w: 420.0, ..area };
-                    let spec = ButtonSpec::new("none", Icon::None, "No layers in config");
-                    scene.add_button(r, font, spec);
-                    Ok(scene)
-                }
-            },
+            "bar" => {
+                let layer = self.args.layer.clone();
+                self.bar_scene(layer.as_deref())
+            }
             "buttons" => {
                 let specs = self
                     .config
@@ -897,8 +968,10 @@ impl App {
         }
         let text = value_text(&value);
         self.store.insert(key.clone(), value);
-        // `text` items showing this key (and the demo scene's "label").
-        Ok(self.scene.set_text(&key, &text))
+        // `text` items showing this key (and the demo scene's "label"), on both
+        // layers.
+        let on_fn = self.fnl.scene.as_mut().is_some_and(|s| s.set_text(&key, &text));
+        Ok(self.scene.set_text(&key, &text) | on_fn)
     }
 
     /// Re-reads the config file; on any error keeps the current one.
@@ -929,6 +1002,8 @@ impl App {
             }
             Err(e) => eprintln!("config: {e:#}\nconfig: keeping the previous configuration"),
         }
+        // Even with the old config: a reload (or resume) starts the Fn layer over.
+        self.sync_fn();
     }
 
     /// Runs `hyprctl dispatch <expr>` with the syntax of the connected Hyprland's
@@ -1075,6 +1150,254 @@ impl App {
             _ => {}
         }
     }
+
+    /// The scene on the bar: the Fn layer's while it is shown, else the normal one.
+    fn shown(&self) -> &Scene {
+        self.fnl.scene.as_ref().unwrap_or(&self.scene)
+    }
+
+    /// Sets the Fn layer up for the current config: nothing without `[fn]`;
+    /// otherwise the keyboard is looked for again and Fn's state read afresh, so a
+    /// reload (also sent after a resume) never leaves the layer stuck.
+    fn sync_fn(&mut self) {
+        // Closed before another is opened: epoll follows them by id.
+        self.fnl.keyboard = None;
+        self.fnl.watch = None;
+        let f = self.config.fn_layer.as_ref().filter(|_| self.args.scene == "bar");
+        self.fnl.machine = f.map(|f| FnMachine::new(f.mode, f.delay()));
+        // The config may have changed: whatever shows is built again if needed.
+        self.show_fn(false);
+        if self.fnl.machine.is_none() || !self.fnl.follow {
+            self.fnl.missing = None;
+            return;
+        }
+        self.open_fn_keyboard();
+        self.fn_resync();
+    }
+
+    /// Looks for the keyboard; without one, watches for it (logged once per reason).
+    fn open_fn_keyboard(&mut self) {
+        let wanted = self.config.fn_layer.as_ref().and_then(|f| f.fn_device.clone());
+        match FnKeyboard::find(wanted.as_deref()) {
+            Ok(k) => {
+                eprintln!("fn: following the Fn key of {} {:?}", k.path.display(), k.name);
+                self.fnl.keyboard = Some(k);
+                self.fnl.keyboard_id += 1;
+                self.fnl.watch = None;
+                self.fnl.missing = None;
+            }
+            Err(why) => {
+                if self.fnl.missing.as_ref() != Some(&why) {
+                    eprintln!("fn: {why}; no Fn layer until one appears");
+                }
+                self.fnl.missing = Some(why);
+                if self.fnl.watch.is_none() {
+                    match NodeWatch::new() {
+                        Ok(w) => {
+                            self.fnl.watch = Some(w);
+                            self.fnl.watch_id += 1;
+                        }
+                        Err(e) => eprintln!("fn: can't watch {}: {e}", fnkey::INPUT_DIR),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Starts over from Fn's real state. Returns whether the bar changed.
+    fn fn_resync(&mut self) -> bool {
+        let pressed = match self.fnl.keyboard.as_ref().map(FnKeyboard::fn_pressed) {
+            Some(Ok(p)) => p,
+            Some(Err(lost)) => return self.fn_lost(lost),
+            None => false,
+        };
+        if let Some(m) = &mut self.fnl.machine {
+            m.reset(pressed);
+        }
+        self.apply_fn()
+    }
+
+    /// The keyboard went away: as if Fn were up, then it is looked for again.
+    fn fn_lost(&mut self, Lost(why): Lost) -> bool {
+        eprintln!("fn: lost the keyboard ({why})");
+        self.fnl.keyboard = None;
+        if let Some(m) = &mut self.fnl.machine {
+            m.reset(false);
+        }
+        let mut changed = self.apply_fn();
+        if self.fnl.follow {
+            // It may be back already (a driver rebind); else the watch waits for it.
+            self.open_fn_keyboard();
+            match self.fnl.keyboard.as_ref().map(FnKeyboard::fn_pressed) {
+                Some(Ok(pressed)) => {
+                    if let Some(m) = &mut self.fnl.machine {
+                        m.reset(pressed);
+                    }
+                    changed |= self.apply_fn();
+                }
+                Some(Err(Lost(why))) => {
+                    eprintln!("fn: lost the keyboard again ({why})");
+                    self.fnl.keyboard = None;
+                    self.open_fn_keyboard_later();
+                }
+                None => {}
+            }
+        }
+        changed
+    }
+
+    /// No keyboard for now: the watch says when a device node appears.
+    fn open_fn_keyboard_later(&mut self) {
+        if self.fnl.watch.is_none()
+            && let Ok(w) = NodeWatch::new()
+        {
+            self.fnl.watch = Some(w);
+            self.fnl.watch_id += 1;
+        }
+    }
+
+    /// The keyboard is readable.
+    fn on_fn_readable(&mut self) -> bool {
+        let Some(kb) = &mut self.fnl.keyboard else {
+            return false;
+        };
+        let mut events = Vec::new();
+        match kb.read(&mut events) {
+            Ok(()) => self.on_fn_events(&events, Instant::now()),
+            Err(lost) => self.fn_lost(lost),
+        }
+    }
+
+    /// Fn's presses and releases as read. Returns whether the bar changed.
+    fn on_fn_events(&mut self, events: &[FnEvent], now: Instant) -> bool {
+        let Some(m) = &mut self.fnl.machine else {
+            return false;
+        };
+        for e in events {
+            match e {
+                FnEvent::Pressed => m.key(true, now),
+                FnEvent::Released => m.key(false, now),
+                FnEvent::Resync => return self.fn_resync(),
+            }
+        }
+        self.apply_fn()
+    }
+
+    /// The delay's timer went off.
+    fn on_fn_timer(&mut self, now: Instant) -> bool {
+        if let Some(m) = &mut self.fnl.machine {
+            m.fire(now);
+        }
+        self.apply_fn()
+    }
+
+    /// A device node appeared while the keyboard was missing.
+    fn on_fn_nodes(&mut self) -> bool {
+        if let Some(w) = &self.fnl.watch {
+            w.drain();
+        }
+        if self.fnl.keyboard.is_some() || self.fnl.machine.is_none() {
+            return false;
+        }
+        self.open_fn_keyboard();
+        self.fnl.keyboard.is_some() && self.fn_resync()
+    }
+
+    /// Shows or hides the Fn layer as the machine says.
+    fn apply_fn(&mut self) -> bool {
+        let want = self.fnl.machine.as_ref().is_some_and(FnMachine::shown);
+        self.show_fn(want)
+    }
+
+    /// Puts the Fn layer on the bar or takes it off. The scene leaving is
+    /// interrupted (a touch in progress cancelled, anything unfolded folded at
+    /// once); a finger already down does nothing on the one arriving until it
+    /// lifts; a key held by it is released. Returns whether anything changed.
+    fn show_fn(&mut self, show: bool) -> bool {
+        if show == self.fnl.scene.is_some() {
+            return false;
+        }
+        let t = self.epoch.elapsed();
+        let finger = self.finger;
+        if show {
+            let Some(id) = self.config.fn_layer.as_ref().map(|f| f.layer.clone()) else {
+                return false;
+            };
+            let mut scene = match self.bar_scene(Some(&id)) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("fn: layer {id:?}: {e:#}");
+                    return false;
+                }
+            };
+            self.scene.interrupt(finger, t, &self.font);
+            if finger.is_some() {
+                scene.block_touch();
+            }
+            self.fnl.scene = Some(scene);
+        } else {
+            if let Some(mut s) = self.fnl.scene.take() {
+                s.interrupt(finger, t, &self.font);
+            }
+            if finger.is_some() {
+                self.scene.block_touch();
+            }
+        }
+        self.fnl.switched = true;
+        self.sync_held_key();
+        true
+    }
+
+    /// Presses or releases the held key so that it is down exactly while the
+    /// scene on the bar says a finger holds it: whatever happened meanwhile (a
+    /// lift, a lost touch, the layer changing, a rebuild), no key stays stuck.
+    fn sync_held_key(&mut self) {
+        let want = self.shown().held_key();
+        if self.held.as_ref().map(|h| h.id.as_str()) == want {
+            return;
+        }
+        let want = want.map(str::to_string);
+        self.release_held();
+        let Some(id) = want else {
+            return;
+        };
+        let Some(name) = self.config.action(&id).and_then(Action::held_key) else {
+            return;
+        };
+        let Ok(key) = KeyCode::from_str(name) else {
+            return;
+        };
+        // Ctrl, Shift, Alt or Super held on the keyboard go with it: the compositor
+        // may keep each keyboard's modifiers apart.
+        let mods = self.fnl.keyboard.as_ref().map(FnKeyboard::modifiers).unwrap_or_default();
+        let sent = match &mut self.keyboard {
+            Some(kb) => kb
+                .press(&mods, key)
+                .inspect_err(|e| eprintln!("action: {e:#}"))
+                .is_ok(),
+            None => {
+                eprintln!("action: no virtual keyboard for {name}");
+                false
+            }
+        };
+        if sent {
+            eprintln!("action: key {name} down");
+        }
+        self.held = Some(HeldKey { id, key, mods, sent });
+    }
+
+    /// Releases the held key, if any.
+    fn release_held(&mut self) {
+        let Some(h) = self.held.take() else {
+            return;
+        };
+        if let (true, Some(kb)) = (h.sent, &mut self.keyboard) {
+            match kb.release(&h.mods, h.key) {
+                Ok(()) => eprintln!("action: key {:?} up", h.key),
+                Err(e) => eprintln!("action: {e:#}"),
+            }
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -1104,6 +1427,7 @@ fn main() -> Result<()> {
             keyboard: None,
             // Previews read the folders inline, so the PNG shows the chosen GIFs.
             loader: None,
+            follow_fn: false,
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         // Give mpv a moment to report its state, so the preview shows it.
@@ -1192,6 +1516,7 @@ fn main() -> Result<()> {
             loader: Loader::start()
                 .inspect_err(|e| eprintln!("gif_picker: {e:#}; reading folders inline"))
                 .ok(),
+            follow_fn: true,
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app)
@@ -1216,6 +1541,8 @@ struct AppParts {
     brightness: Option<u8>,
     keyboard: Option<VirtualKeyboard>,
     loader: Option<Loader>,
+    /// Read the keyboard's Fn key (the daemon only).
+    follow_fn: bool,
 }
 
 fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> Result<App> {
@@ -1258,6 +1585,12 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         rec_watch: None,
         rec_key: (Vec::new(), Duration::ZERO),
         status_shown: BTreeSet::new(),
+        fnl: FnSide {
+            follow: p.follow_fn,
+            ..FnSide::default()
+        },
+        held: None,
+        finger: None,
     };
     app.sync_mpv();
     app.sync_recorder();
@@ -1270,6 +1603,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
     app.scene = app.build_scene()?;
     app.sync_pickers();
     app.sync_capture();
+    app.sync_fn();
     Ok(app)
 }
 
@@ -1467,6 +1801,9 @@ fn run(
     // The same for the status item's folder watch and recorder pidfd.
     let mut shot_watch: Option<u64> = None;
     let mut rec_pidfd: Option<u64> = None;
+    // The same for the Fn keyboard and the watch for it while it is missing.
+    let mut fn_keys: Option<u64> = None;
+    let mut fn_nodes: Option<u64> = None;
     let debug_touch = app.args.scene == "touch";
     let start = app.epoch;
     // State changed outside the animation clock (touch, Hyprland, socket, levels).
@@ -1496,6 +1833,20 @@ fn run(
         {
             epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_STATUS_PID))?;
             rec_pidfd = Some(id);
+        }
+        // Fn: the keyboard (new after a reload or once found again) and the watch
+        // for it into epoll; closed ones leave epoll by themselves.
+        if let Some(kb) = &app.fnl.keyboard
+            && fn_keys != Some(app.fnl.keyboard_id)
+        {
+            epoll.add(kb, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_KEYS))?;
+            fn_keys = Some(app.fnl.keyboard_id);
+        }
+        if let Some(w) = &app.fnl.watch
+            && fn_nodes != Some(app.fnl.watch_id)
+        {
+            epoll.add(w, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_NODES))?;
+            fn_nodes = Some(app.fnl.watch_id);
         }
         // A hidden status item appears or goes: the others move up or make room.
         if app.status_layout_changed() {
@@ -1645,6 +1996,8 @@ fn run(
                     }
                 }
                 TOKEN_TIMER => drain_timer(&timer)?,
+                TOKEN_FN_KEYS => dirty |= app.on_fn_readable(),
+                TOKEN_FN_NODES => dirty |= app.on_fn_nodes(),
                 TOKEN_STATUS_SHOTS => {
                     let at = app.scene_now();
                     if app.shot_watch.as_mut().is_some_and(ShotWatch::read) {
@@ -1877,6 +2230,7 @@ mod tests {
                 png: None,
                 config: Some(path.clone()),
                 status: None,
+                layer: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -1886,6 +2240,7 @@ mod tests {
             brightness: None,
             keyboard: None,
             loader: None,
+            follow_fn: false,
         };
         new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap()
     }

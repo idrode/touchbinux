@@ -14,7 +14,7 @@ use evdev::KeyCode;
 use serde::Deserialize;
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     path::Path,
     rc::Rc,
@@ -57,6 +57,11 @@ const PRESSED_SCALE: std::ops::RangeInclusive<f32> = 0.8..=1.2;
 pub const MAX_KEY_LEN: usize = 64;
 /// An expandable's children must fit in one unfolded row.
 const MAX_CHILDREN: usize = 12;
+/// app_keys: sets, its default width and its cross-fade.
+const MAX_KEY_SETS: usize = 32;
+pub const DEFAULT_APP_KEYS_WIDTH: f32 = 360.0;
+const DEFAULT_APP_KEYS_TRANSITION_MS: u64 = 150;
+const MAX_APP_KEYS_TRANSITION_MS: u64 = 1000;
 /// `thumb_size` of a gif_picker, px (it is also capped to the row's height).
 const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
 /// `seek_height` of a player's seek bar, px.
@@ -421,6 +426,7 @@ pub enum ItemKind {
     Capture,
     Workspaces,
     Status,
+    AppKeys,
     Spacer,
 }
 
@@ -496,6 +502,7 @@ impl ItemKind {
             ItemKind::Capture => "capture",
             ItemKind::Workspaces => "workspaces",
             ItemKind::Status => "status",
+            ItemKind::AppKeys => "app_keys",
             ItemKind::Spacer => "spacer",
         }
     }
@@ -582,6 +589,17 @@ pub struct ItemConfig {
     /// expandable: what it unfolds into, left to right.
     #[serde(default)]
     pub children: Option<Vec<ChildConfig>>,
+    /// app_keys: the sets of buttons, the first that matches the focused window
+    /// shows.
+    #[serde(default)]
+    pub sets: Option<Vec<KeySet>>,
+    /// app_keys: the set shown when none matches (or nothing is focused):
+    /// "none" (default, empty) or a set's id.
+    #[serde(default)]
+    pub default_set: Option<String>,
+    /// app_keys: the cross-fade when the set changes, ms.
+    #[serde(default)]
+    pub transition_ms: Option<u64>,
     /// button: a row of children pulled out to its right by dragging the button
     /// rightwards (a tap still runs its `action`).
     #[serde(default)]
@@ -778,6 +796,39 @@ pub struct ChildConfig {
     pub text_color: Option<Color>,
 }
 
+/// One of an app_keys item's sets: its buttons, for windows of these classes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeySet {
+    pub id: String,
+    /// Window classes (as `hyprctl clients` gives them), compared whole and
+    /// ignoring case.
+    #[serde(default)]
+    pub class: Vec<String>,
+    /// And, if given, a title containing this (ignoring case).
+    #[serde(default)]
+    pub title_contains: Option<String>,
+    #[serde(default)]
+    pub children: Vec<ChildConfig>,
+}
+
+impl KeySet {
+    /// Whether a window of `class` titled `title` gets these buttons. Nothing
+    /// focused (an empty class) matches none.
+    pub fn matches(&self, class: &str, title: &str) -> bool {
+        if class.is_empty() {
+            return false;
+        }
+        let class = class.to_lowercase();
+        let class_ok = self.class.is_empty() || self.class.iter().any(|c| c.to_lowercase() == class);
+        let title_ok = self
+            .title_contains
+            .as_ref()
+            .is_none_or(|t| title.to_lowercase().contains(&t.to_lowercase()));
+        class_ok && title_ok
+    }
+}
+
 /// What a player's child does natively, as an mpv command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -894,6 +945,7 @@ impl ItemConfig {
                 ItemKind::GifPicker | ItemKind::Player | ItemKind::Capture => 80.0,
                 ItemKind::Workspaces => DEFAULT_WS_WIDTH,
                 ItemKind::Status => DEFAULT_STATUS_WIDTH,
+                ItemKind::AppKeys => DEFAULT_APP_KEYS_WIDTH,
             }),
         }
     }
@@ -957,6 +1009,149 @@ impl ItemConfig {
     }
 
     /// An expandable's children with their ids.
+    /// A button `id` doing `action`, with nothing else set (no label, icon or
+    /// size: the caller fills those in).
+    pub fn plain_button(id: &str, action: Action) -> ItemConfig {
+        ItemConfig {
+            kind: ItemKind::Button,
+            id: Some(id.to_string()),
+            icon: None,
+            label: None,
+            color: None,
+            format: None,
+            icon_dir: None,
+            action: Some(action),
+            width: None,
+            stretch: None,
+            anim_ms: None,
+            expand_width: None,
+            collapse_after_ms: None,
+            path: None,
+            play: None,
+            loading: None,
+            key: None,
+            children: None,
+            sets: None,
+            default_set: None,
+            transition_ms: None,
+            drag_children: None,
+            drag_px: None,
+            close_on_tap: None,
+            max_icons: None,
+            icon_size: None,
+            inactive_color: None,
+            style: None,
+            dot_size: None,
+            active_width: None,
+            active_orientation: None,
+            bar_long: None,
+            bar_short: None,
+            gap: None,
+            strip_background: None,
+            icon_gap: None,
+            strip_pad: None,
+            strip_height: None,
+            strip_border_color: None,
+            strip_border_width: None,
+            bar_border_color: None,
+            bar_border_width: None,
+            active_border_color: None,
+            icon_tint: None,
+            strip: None,
+            class_icons: None,
+            show: None,
+            overview_action: None,
+            active_color: None,
+            dir: None,
+            thumb_size: None,
+            socket: None,
+            seek_color: None,
+            seek_height: None,
+            show_time: None,
+            grid: None,
+            battery_colors: None,
+            full_color: None,
+            screenshot: None,
+            record: None,
+            record_color: None,
+            idle: None,
+            rec_color: None,
+            shot_color: None,
+            shot_watch: None,
+            rec_processes: None,
+            rec_poll_ms: None,
+            rec_done_ms: None,
+            shot_ms: None,
+            shape: None,
+            radius: None,
+            background: None,
+            pressed_background: None,
+            diameter: None,
+            pressed_scale: None,
+            text_color: None,
+            gif: None,
+        }
+    }
+
+    /// app_keys: every set's buttons with their ids (`<item>.<set>.<n>` by
+    /// default), and the set's id.
+    pub fn app_key_ids(&self) -> impl Iterator<Item = (String, &ChildConfig, &str)> {
+        let item = self.id().unwrap_or("");
+        self.sets.iter().flatten().flat_map(move |set| {
+            let parent = format!("{item}.{}", set.id);
+            set.children
+                .iter()
+                .enumerate()
+                .map(move |(n, c)| (c.id(&parent, n), c, set.id.as_str()))
+        })
+    }
+
+    /// app_keys: the cross-fade between sets.
+    pub fn transition(&self) -> Duration {
+        Duration::from_millis(self.transition_ms.unwrap_or(DEFAULT_APP_KEYS_TRANSITION_MS))
+    }
+
+    /// app_keys: its sets, their buttons and default_set.
+    fn validate_app_keys(&self, what: &str) -> Result<()> {
+        let sets = self.sets.as_deref().unwrap_or_default();
+        if !(1..=MAX_KEY_SETS).contains(&sets.len()) {
+            bail!("{what}: an app_keys needs 1 to {MAX_KEY_SETS} `sets`, it has {}", sets.len());
+        }
+        let mut ids = BTreeSet::new();
+        for set in sets {
+            let what = format!("{what}: set {:?}", set.id);
+            if set.id.is_empty() || set.id == "none" || !ids.insert(set.id.as_str()) {
+                bail!("{what}: a set needs an id, not empty, \"none\" or repeated");
+            }
+            if set.class.iter().any(String::is_empty) {
+                bail!("{what}: an empty class");
+            }
+            if set.class.is_empty() && set.title_contains.is_none() {
+                bail!("{what}: a set needs `class` (window classes) or `title_contains`");
+            }
+            if set.title_contains.as_deref() == Some("") {
+                bail!("{what}: title_contains must not be empty");
+            }
+            let n = set.children.len();
+            if !(1..=MAX_CHILDREN).contains(&n) {
+                bail!("{what}: a set needs 1 to {MAX_CHILDREN} `children`, it has {n}");
+            }
+        }
+        for (id, child, set) in self.app_key_ids() {
+            validate_child(&format!("{what}: set {set:?}: child {id:?}"), child, false, true)?;
+        }
+        if let Some(d) = &self.default_set
+            && d != "none"
+            && !ids.contains(d.as_str())
+        {
+            bail!("{what}: default_set {d:?} is not \"none\" nor one of its sets");
+        }
+        if self.transition_ms.is_some_and(|t| t > MAX_APP_KEYS_TRANSITION_MS) {
+            bail!("{what}: transition_ms must be 0..={MAX_APP_KEYS_TRANSITION_MS}");
+        }
+        Ok(())
+    }
+
     pub fn child_ids(&self) -> impl Iterator<Item = (String, &ChildConfig)> {
         let parent = self.id().unwrap_or("");
         self.children()
@@ -979,6 +1174,8 @@ impl ItemConfig {
             ItemKind::Workspaces => &[],
             // Nothing behind it: empty when idle.
             ItemKind::Status => &[],
+            // Its buttons have their own boxes.
+            ItemKind::AppKeys => &[],
             // They unfold instead of showing a pressed highlight.
             ItemKind::Volume | ItemKind::Brightness => &["shape", "radius", "background", "size"],
             // Its pressed_background is its children's highlight.
@@ -999,6 +1196,7 @@ impl ItemConfig {
             ],
         };
         let allowed: &[&str] = match self.kind {
+            ItemKind::AppKeys => &["id", "sets", "default_set", "transition_ms"],
             ItemKind::Button => &[
                 "id",
                 "icon",
@@ -1143,6 +1341,9 @@ impl ItemConfig {
             ("path", self.path.is_some()),
             ("play", self.play.is_some()),
             ("loading", self.loading.is_some()),
+            ("sets", self.sets.is_some()),
+            ("default_set", self.default_set.is_some()),
+            ("transition_ms", self.transition_ms.is_some()),
             ("key", self.key.is_some()),
             ("shape", self.shape.is_some()),
             ("radius", self.radius.is_some()),
@@ -1215,6 +1416,9 @@ impl ItemConfig {
                 bail!("{what}: stretch must be in (0, 1000]")
             }
             _ => {}
+        }
+        if self.kind == ItemKind::AppKeys {
+            self.validate_app_keys(&what)?;
         }
         if self.kind == ItemKind::Button {
             if self.id.is_none() {
@@ -1966,7 +2170,8 @@ impl Config {
             for item in &layer.items {
                 let ids = item.id().map(str::to_string).into_iter();
                 let captures = item.capture_children().into_iter().map(|(id, _)| id);
-                for id in ids.chain(item.child_ids().map(|(id, _)| id)).chain(captures) {
+                let keys = item.app_key_ids().map(|(id, _, _)| id);
+                for id in ids.chain(item.child_ids().map(|(id, _)| id)).chain(captures).chain(keys) {
                     check_id(&id).with_context(|| format!("layer {:?}", layer.id))?;
                 }
             }
@@ -2051,10 +2256,13 @@ impl Config {
         if let Some(item) = items().find(|i| i.id() == Some(id)) {
             return item.action.as_ref();
         }
+        if let Some((_, c)) = items().flat_map(ItemConfig::child_ids).find(|(child, _)| child == id) {
+            return c.action.as_ref();
+        }
         items()
-            .flat_map(ItemConfig::child_ids)
-            .find(|(child, _)| child == id)
-            .and_then(|(_, c)| c.action.as_ref())
+            .flat_map(ItemConfig::app_key_ids)
+            .find(|(child, _, _)| child == id)
+            .and_then(|(_, c, _)| c.action.as_ref())
     }
 
     /// The layer the `bar` scene starts with: `default_layer`, else the first
@@ -2080,80 +2288,10 @@ impl Config {
             .buttons
             .iter()
             .map(|b| ItemConfig {
-                kind: ItemKind::Button,
-                id: Some(b.id.clone()),
                 icon: b.icon.clone(),
                 label: Some(b.label.clone()),
-                color: None,
-                format: None,
-                icon_dir: None,
-                action: Some(b.action.clone()),
-                width: None,
                 stretch: Some(1.0),
-                anim_ms: None,
-                expand_width: None,
-                collapse_after_ms: None,
-                path: None,
-                play: None,
-                loading: None,
-                key: None,
-                children: None,
-                drag_children: None,
-                drag_px: None,
-                close_on_tap: None,
-                max_icons: None,
-                icon_size: None,
-                inactive_color: None,
-                style: None,
-                dot_size: None,
-                active_width: None,
-                active_orientation: None,
-                bar_long: None,
-                bar_short: None,
-                gap: None,
-                strip_background: None,
-                icon_gap: None,
-                strip_pad: None,
-                strip_height: None,
-                strip_border_color: None,
-                strip_border_width: None,
-                bar_border_color: None,
-                bar_border_width: None,
-                active_border_color: None,
-                icon_tint: None,
-                strip: None,
-                class_icons: None,
-                show: None,
-                overview_action: None,
-                active_color: None,
-                dir: None,
-                thumb_size: None,
-                socket: None,
-                seek_color: None,
-                seek_height: None,
-                show_time: None,
-                grid: None,
-                battery_colors: None,
-                full_color: None,
-                screenshot: None,
-                record: None,
-                record_color: None,
-                idle: None,
-                rec_color: None,
-                shot_color: None,
-                shot_watch: None,
-                rec_processes: None,
-                rec_poll_ms: None,
-                rec_done_ms: None,
-                shot_ms: None,
-                shape: None,
-                radius: None,
-                background: None,
-                pressed_background: None,
-                diameter: None,
-                pressed_scale: None,
-                text_color: None,
-                gif: None,
+                ..ItemConfig::plain_button(&b.id, b.action.clone())
             })
             .collect();
         Some(Cow::Owned(LayerConfig {
@@ -4027,6 +4165,129 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("unknown field `hold`"), "{err:#}");
+    }
+
+    /// An app_keys item with a browser set and a terminal set, plus `extra` (TOML)
+    /// on the item.
+    fn app_keys(extra: &str) -> Result<Config> {
+        parse(&format!(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "app_keys"
+            width = 360
+            {extra}
+            [[layers.items.sets]]
+            id = "browser"
+            class = ["zen"]
+            [[layers.items.sets.children]]
+            label = "◀"
+            action = {{ type = "keys", keys = "alt+left" }}
+            [[layers.items.sets.children]]
+            id = "reload"
+            icon = "builtin:folder"
+            shape = "circle"
+            background = "#333333"
+            pressed_background = "#00ff00"
+            pressed_scale = 0.9
+            text_color = "#ffffff"
+            color = "#ff0000"
+            action = {{ type = "keys", keys = "ctrl+r" }}
+            [[layers.items.sets]]
+            id = "term"
+            class = ["kitty", "Kitty-Start"]
+            title_contains = "nvim"
+            [[layers.items.sets.children]]
+            label = "T"
+            action = {{ type = "keys", keys = "ctrl+shift+t" }}
+            "##
+        ))
+    }
+
+    #[test]
+    fn app_keys_sets_and_their_buttons() {
+        let c = app_keys("transition_ms = 200\ndefault_set = 'term'").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!((item.kind, item.id()), (ItemKind::AppKeys, Some("app_keys")));
+        assert_eq!((item.size(), item.transition()), (Size::Fixed(360.0), Duration::from_millis(200)));
+        let ids: Vec<_> = item.app_key_ids().map(|(id, _, set)| (id, set)).collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("app_keys.browser.1".to_string(), "browser"),
+                ("reload".to_string(), "browser"),
+                ("app_keys.term.1".to_string(), "term"),
+            ]
+        );
+        // A tap on one finds its action like any other.
+        assert!(matches!(c.action("app_keys.browser.1"), Some(Action::Keys { keys }) if keys == "alt+left"));
+        assert!(matches!(c.action("reload"), Some(Action::Keys { keys }) if keys == "ctrl+r"));
+        // Matching: whole class, any case; the title only if asked for.
+        let sets = item.sets.as_ref().unwrap();
+        assert!(sets[0].matches("zen", "Some page"));
+        assert!(sets[0].matches("Zen", ""));
+        assert!(!sets[0].matches("zen-browser", "x"));
+        assert!(!sets[0].matches("", ""), "nothing focused matches nothing");
+        assert!(sets[1].matches("kitty-start", "nvim main.rs"));
+        assert!(sets[1].matches("KITTY", "NVIM"));
+        assert!(!sets[1].matches("kitty", "htop"));
+        // Defaults.
+        let item = &app_keys("").unwrap().layers[0].items[0];
+        assert_eq!((item.default_set.as_deref(), item.transition()), (None, Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn rejects_bad_app_keys() {
+        for (extra, want) in [
+            ("default_set = 'mail'", "default_set \"mail\" is not \"none\" nor one of its sets"),
+            ("transition_ms = 1001", "transition_ms must be 0..=1000"),
+            ("label = 'x'", "`label` is not valid for a app_keys"),
+            ("background = '#000000'", "`background` is not valid for a app_keys"),
+        ] {
+            let err = format!("{:#}", app_keys(extra).expect_err(extra));
+            assert!(err.contains(want), "{extra}: {err}");
+        }
+        let set = |body: &str| {
+            parse(&format!(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='app_keys'\n\
+                 [[layers.items.sets]]\n{body}"
+            ))
+        };
+        for (body, want) in [
+            ("id='a'\nclass=['zen']", "a set needs 1 to 12 `children`, it has 0"),
+            ("id='a'\n[[layers.items.sets.children]]\nlabel='x'\naction={type='socket'}", "a set needs `class`"),
+            ("id='a'\nclass=['']\n[[layers.items.sets.children]]\nlabel='x'\naction={type='socket'}", "an empty class"),
+            ("id='none'\nclass=['z']\n[[layers.items.sets.children]]\nlabel='x'\naction={type='socket'}", "not empty, \"none\" or repeated"),
+            ("id='a'\nclass=['z']\n[[layers.items.sets.children]]\nlabel='x'\naction={type='keys', keys='ctrl+shift+tee'}", "set \"a\": child \"app_keys.a.1\": keys \"ctrl+shift+tee\": unknown key \"tee\""),
+            ("id='a'\nclass=['z']\n[[layers.items.sets.children]]\nlabel='x'\naction={type='key', key='KEY_F5', hold=true}", "`hold` only works on a layer's buttons"),
+            ("id='a'\nclass=['z']\n[[layers.items.sets.children]]\naction={type='socket'}", "a child needs an `icon`, a `label` or both"),
+            ("id='a'\nclass=['z']\n[[layers.items.sets.children]]\nlabel='x'\nrole='prev'\naction={type='socket'}", "`role` is only for a player's children"),
+            ("id='a'\nclass=['z']\nwhat='x'\n[[layers.items.sets.children]]\nlabel='x'\naction={type='socket'}", "unknown field `what`"),
+        ] {
+            let err = format!("{:#}", set(body).expect_err(body));
+            assert!(err.contains(want), "{body}: {err}");
+        }
+        let err = format!("{:#}", parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='app_keys'").unwrap_err());
+        assert!(err.contains("an app_keys needs 1 to 32 `sets`, it has 0"), "{err}");
+        // Two sets with the same id, and a child id taken elsewhere.
+        let err = format!(
+            "{:#}",
+            set("id='a'\nclass=['z']\n[[layers.items.sets.children]]\nlabel='x'\naction={type='socket'}\n\
+                 [[layers.items.sets]]\nid='a'\nclass=['y']\n[[layers.items.sets.children]]\nlabel='x'\naction={type='socket'}")
+            .unwrap_err()
+        );
+        assert!(err.contains("not empty, \"none\" or repeated"), "{err}");
+        let err = format!(
+            "{:#}",
+            parse(
+                "[[layers]]\nid='m'\n[[layers.items]]\ntype='button'\nid='dup'\nlabel='b'\naction={type='socket'}\n\
+                 [[layers.items]]\ntype='app_keys'\n[[layers.items.sets]]\nid='a'\nclass=['z']\n\
+                 [[layers.items.sets.children]]\nid='dup'\nlabel='x'\naction={type='socket'}"
+            )
+            .unwrap_err()
+        );
+        assert!(err.contains("id \"dup\" is empty or repeated"), "{err}");
     }
 }
 

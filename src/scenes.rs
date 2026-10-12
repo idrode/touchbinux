@@ -4,6 +4,7 @@
 
 use crate::{
     anim::Animated,
+    appkeys::AppKeys,
     capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
@@ -318,6 +319,8 @@ enum Capture {
     /// On a workspaces item (its pill or icon in `Scene::ws_target`): where the
     /// finger came down, and what it is doing (`Pulling`/`Out`: its overview drag).
     Ws(usize, (f32, f32), PullState),
+    /// On an app_keys item: the touch goes to the set it shows.
+    AppKeys(usize),
     /// A touch outside an unfolded item: it folds, and the touch does nothing else.
     Blocked,
 }
@@ -342,6 +345,8 @@ pub struct Scene {
     menus: Vec<Expandable>,
     /// `workspaces` items, with their overview drag's `drag_px` if they have one.
     workspaces: Vec<(Workspaces, Option<f32>)>,
+    /// app_keys items: a set of buttons by the focused window.
+    app_keys: Vec<AppKeys>,
     /// What the finger on a workspaces item came down on, and what it is on now.
     ws_target: Option<Hit>,
     ws_hover: Option<Hit>,
@@ -375,6 +380,7 @@ impl Scene {
             expanders: Vec::new(),
             menus: Vec::new(),
             workspaces: Vec::new(),
+            app_keys: Vec::new(),
             ws_target: None,
             ws_hover: None,
             buttons: Vec::new(),
@@ -435,6 +441,9 @@ impl Scene {
             };
             ws.draw(canvas, t, font, pressed.as_ref());
         }
+        for a in &self.app_keys {
+            a.draw(canvas, t, font, live);
+        }
         // Everything of the pressed item is drawn by now (background, highlight, icon,
         // live content): scale it as a whole.
         if let Some(i) = self.pressed_button() {
@@ -467,7 +476,8 @@ impl Scene {
             let menus = self.menus.iter().enumerate();
             let menus = menus.filter(|&(j, _)| u != Unfolded::Menu(j)).map(|(_, o)| o.rect);
             let ws = self.workspaces.iter().map(|(w, _)| w.rect);
-            let rects = self.buttons.iter().map(|b| b.rect).chain(sliders).chain(menus).chain(ws);
+            let keys = self.app_keys.iter().map(|a| a.rect);
+            let rects = self.buttons.iter().map(|b| b.rect).chain(sliders).chain(menus).chain(ws).chain(keys);
             for r in rects.filter(|r| overlaps(*r, open)) {
                 canvas.fill_rect(r.x - 1.0, r.y - 1.0, r.w + 2.0, r.h + 2.0, veil);
             }
@@ -518,11 +528,13 @@ impl Scene {
         let expanders = self.expanders.iter().map(|e| e.next_change(t));
         let menus = self.menus.iter().map(|m| m.next_change(t));
         let ws = self.workspaces.iter().map(|(w, _)| w.next_change(t));
+        let keys = self.app_keys.iter().map(|a| a.next_change(t));
         animated
             .chain(widgets)
             .chain(expanders)
             .chain(menus)
             .chain(ws)
+            .chain(keys)
             .flatten()
             .min()
     }
@@ -548,7 +560,32 @@ impl Scene {
         for (w, _) in &mut self.workspaces {
             w.advance(t);
         }
+        for a in &mut self.app_keys {
+            changed |= a.advance(t, live);
+        }
         changed
+    }
+
+    /// The focused window is of `class`, titled `title`: app_keys items show its
+    /// set (cross-faded if `animate`). Returns whether any shows something else.
+    pub fn set_app_focus(&mut self, class: &str, title: &str, t: Duration, font: &Font, animate: bool) -> bool {
+        let mut changed = false;
+        for a in &mut self.app_keys {
+            changed |= a.set_focus(class, title, t, font, animate);
+        }
+        changed
+    }
+
+    /// The set each app_keys item shows, by item id.
+    #[cfg(test)]
+    pub fn app_key_sets(&self) -> Vec<(&str, Option<&str>)> {
+        self.app_keys.iter().map(|a| (a.id.as_str(), a.active())).collect()
+    }
+
+    /// Where app_keys item `id` is.
+    #[cfg(test)]
+    pub fn app_keys_rect(&self, id: &str) -> Option<Rect> {
+        self.app_keys.iter().find(|a| a.id == id).map(|a| a.rect)
     }
 
     /// Hyprland's state changed: the workspaces items follow it, animated. Returns
@@ -737,6 +774,9 @@ impl Scene {
                 self.capture = if let Some(c) = self.expander_down((x, y), t, font, out) {
                     changed = true;
                     c
+                } else if let Some(i) = self.app_keys.iter().position(|a| contains(a.rect, x, y)) {
+                    changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
+                    Capture::AppKeys(i)
                 } else if let Some(i) =
                     self.workspaces.iter().position(|(w, _)| contains(w.rect, x, y))
                 {
@@ -766,6 +806,9 @@ impl Scene {
                 } else {
                     Capture::None
                 };
+            }
+            (Phase::Move, Capture::AppKeys(i)) => {
+                changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
             }
             (Phase::Move, Capture::Button(i, _)) => {
                 // Leaving the button un-highlights it; coming back re-highlights it.
@@ -842,6 +885,9 @@ impl Scene {
             }
             (Phase::Up | Phase::Cancel, capture) => {
                 match capture {
+                    Capture::AppKeys(i) => {
+                        changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
+                    }
                     Capture::Button(i, _) => {
                         let b = &self.buttons[i];
                         if phase == Phase::Up && contains(b.rect, x, y) {
@@ -1057,6 +1103,8 @@ impl Scene {
                 let j = self.workspaces.iter().position(|(w, _)| &w.id == id);
                 j.map_or(Capture::None, |j| Capture::Ws(j, from, state))
             }
+            // The set may be laid out anew: the touch on it ends.
+            Capture::AppKeys(_) => Capture::Blocked,
             Capture::Blocked => Capture::Blocked,
             Capture::None => Capture::None,
         };
@@ -1087,6 +1135,9 @@ impl Scene {
         }
         self.ws_target = None;
         self.ws_hover = None;
+        for a in &mut self.app_keys {
+            a.interrupt(t, font);
+        }
     }
 
     /// This scene comes on screen under a finger that landed on another one: that
@@ -1754,6 +1805,11 @@ pub fn bar_with(
         let size = icon_side(ih);
         let frame = layer.frame_for(item);
         match item.kind {
+            ItemKind::AppKeys => {
+                // Empty (or default_set) until the daemon says what is focused.
+                let keys = AppKeys::new(item, rect, layer, font, icons)?;
+                scene.app_keys.push(keys);
+            }
             ItemKind::Button => {
                 scene.battery_icon |= item.icon.as_deref() == Some(BUILTIN_BATTERY);
                 let icon = button_icon(item, icons, size);
@@ -4963,4 +5019,111 @@ mod tests {
         s.handle_touch(Phase::Down, mid(f1), MS(20), &font, &mut out);
         assert_eq!(s.held_key(), Some("f1"));
     }
+
+    /// [B] [app_keys: browser (2 buttons) | term (1)], default_set as given.
+    fn keys_scene(font: &Font, default: &str) -> Scene {
+        let toml = format!(
+            r##"
+            [[layers]]
+            id = "m"
+            [[layers.items]]
+            type = "button"
+            id = "b"
+            label = "B"
+            action = {{ type = "socket" }}
+            [[layers.items]]
+            type = "app_keys"
+            width = 360
+            transition_ms = 150
+            default_set = "{default}"
+            [[layers.items.sets]]
+            id = "browser"
+            class = ["zen"]
+            [[layers.items.sets.children]]
+            label = "<"
+            action = {{ type = "keys", keys = "alt+left" }}
+            [[layers.items.sets.children]]
+            label = "R"
+            background = "#333333"
+            action = {{ type = "keys", keys = "ctrl+r" }}
+            [[layers.items.sets]]
+            id = "term"
+            class = ["kitty"]
+            [[layers.items.sets.children]]
+            label = "T"
+            action = {{ type = "keys", keys = "ctrl+shift+t" }}
+            "##
+        );
+        menu_scene(font, &toml)
+    }
+
+    fn keys_set(s: &Scene) -> Option<&str> {
+        s.app_key_sets()[0].1
+    }
+
+    #[test]
+    fn app_keys_shows_the_focused_windows_set() {
+        let Some(font) = font() else { return };
+        let mut s = keys_scene(&font, "none");
+        assert_eq!(keys_set(&s), None, "nothing focused yet: default_set none");
+        assert!(s.set_app_focus("zen", "A page", MS(0), &font, false));
+        assert_eq!(keys_set(&s), Some("browser"));
+        // Another title (or window) of the same class: nothing to redraw.
+        assert!(!s.set_app_focus("Zen", "Another page", MS(10), &font, true));
+        assert!(s.set_app_focus("kitty", "~", MS(20), &font, false));
+        assert_eq!(keys_set(&s), Some("term"));
+        // No match, nothing focused: the default.
+        assert!(s.set_app_focus("firefox", "x", MS(30), &font, false));
+        assert_eq!(keys_set(&s), None);
+        assert!(!s.set_app_focus("", "", MS(40), &font, false));
+        let mut d = keys_scene(&font, "term");
+        assert_eq!(keys_set(&d), Some("term"), "the default from the start");
+        d.set_app_focus("zen", "", MS(0), &font, false);
+        assert!(d.set_app_focus("", "", MS(10), &font, false));
+        assert_eq!(keys_set(&d), Some("term"));
+    }
+
+    #[test]
+    fn app_keys_cross_fades_only_while_changing_set() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let mut s = keys_scene(&font, "none");
+        s.set_app_focus("zen", "", MS(0), &font, false);
+        s.advance(MS(0), &live);
+        assert_eq!(s.next_change(MS(0)), None, "shown at once, no frames");
+        s.set_app_focus("kitty", "", MS(1000), &font, true);
+        assert_eq!(s.next_change(MS(1000)), Some(MS(1000)), "frames while fading");
+        let r = s.app_keys_rect("app_keys").unwrap();
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(1075), &font, &live).unwrap();
+        s.advance(MS(1150), &live);
+        assert_eq!(s.next_change(MS(1150)), None, "done after transition_ms");
+        assert!(r.w >= 359.0 && r.w <= 361.0, "{r:?}");
+    }
+
+    #[test]
+    fn app_keys_buttons_report_their_own_taps() {
+        let Some(font) = font() else { return };
+        let mut s = keys_scene(&font, "none");
+        let r = s.app_keys_rect("app_keys").unwrap();
+        // Empty: a touch on it does nothing.
+        assert!(tap(&mut s, mid(r), MS(0), &font).1.is_empty());
+        s.set_app_focus("zen", "", MS(0), &font, false);
+        // Two buttons share the slot: the left half is the first.
+        let left = (r.x + r.w / 4.0, r.y + r.h / 2.0);
+        let right = (r.x + 3.0 * r.w / 4.0, r.y + r.h / 2.0);
+        assert_eq!(tap(&mut s, left, MS(10), &font).1, vec![UiEvent::Tap("app_keys.browser.1".into())]);
+        assert_eq!(tap(&mut s, right, MS(20), &font).1, vec![UiEvent::Tap("app_keys.browser.2".into())]);
+        // The set changes under the finger: that touch does nothing on either.
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, left, MS(30), &font, &mut out);
+        s.set_app_focus("kitty", "", MS(40), &font, true);
+        s.handle_touch(Phase::Up, left, MS(50), &font, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(tap(&mut s, left, MS(60), &font).1, vec![UiEvent::Tap("app_keys.term.1".into())]);
+        // The layer's own button still works.
+        let b = s.button_rect("b").unwrap();
+        assert_eq!(tap(&mut s, mid(b), MS(70), &font).1, vec![UiEvent::Tap("b".into())]);
+    }
 }
+

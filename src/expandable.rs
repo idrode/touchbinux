@@ -7,6 +7,7 @@
 //! idle it schedules no frames, unless its icon is animating.
 
 use crate::{
+    border::Border,
     anim::{Animated, ease_in_out},
     capture::{RecLook, Recording},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
@@ -96,6 +97,8 @@ pub struct Child {
     /// Its own box (a player's child with style fields); `None`: drawn straight on
     /// the row, with the parent's highlights.
     pub frame: Option<Frame>,
+    /// Its own border, inside that box.
+    pub border: Option<Border>,
     /// A circle `frame`'s diameter (default: the child's height; at most the row's).
     pub size: Option<f32>,
     /// Icons that follow mpv (role = "playpause"); `glyph` stands in for a missing one.
@@ -166,6 +169,7 @@ impl Child {
             active: false,
             enabled: true,
             frame: None,
+            border: None,
             size: None,
             states: None,
         }
@@ -227,6 +231,8 @@ pub struct Expandable {
     area: Rect,
     width: Option<f32>,
     frame: Frame,
+    /// Inside the outline, folded and unfolded.
+    pub border: Option<Border>,
     /// Its icon; told about taps (`builtin:folder` opens).
     face: Box<dyn Animated>,
     /// How wide the icon is drawn (a GIF may be wider than the usual square).
@@ -285,6 +291,7 @@ impl Expandable {
             area: spec.area,
             width: spec.width,
             frame: spec.frame,
+            border: None,
             face: spec.face,
             face_w: icon_side(rect.h),
             label: spec.label,
@@ -548,6 +555,9 @@ impl Expandable {
         }
         let r = self.current_rect(t);
         self.frame.draw_background(canvas, r);
+        if let Some(b) = &self.border {
+            b.draw(canvas, &self.frame, r, false, 1.0);
+        }
         if let (Some(look), Some(rec)) = (self.rec_look, self.recording) {
             rec.draw(canvas, r, self.frame.corner(r), t, font, look);
             return;
@@ -680,8 +690,17 @@ impl Expandable {
             }
             let text = fade(f.text.unwrap_or(text), alpha);
             draw_child(canvas, slot, side, font, child, text, alpha, t);
-            if pressed && f.pressed.is_none() {
+            // The default veil goes over the border too; a pressed_border_color
+            // goes over the veil.
+            let veiled = pressed && f.pressed.is_none();
+            if let Some(border) = &child.border {
+                border.draw(canvas, &f, b, pressed && !veiled, alpha);
+            }
+            if veiled {
                 f.draw_pressed_veil(canvas, b);
+                if let Some(border) = child.border.filter(|x| x.pressed.is_some()) {
+                    border.draw(canvas, &f, b, true, alpha);
+                }
             }
             if pressed && f.pressed_scale != 1.0 {
                 canvas.scale_region(b, f.pressed_scale, self.row_colour());

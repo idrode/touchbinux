@@ -7,6 +7,7 @@
 //! automatic fold, so an idle bar schedules no frames.
 
 use crate::{
+    border::Border,
     anim::Tween,
     canvas::{Canvas, Font, Rect, Rgba},
     frame::{Frame, Shape},
@@ -188,6 +189,8 @@ pub struct Expander {
     color: Rgba,
     /// Shape, radius and background, folded and unfolded.
     frame: Frame,
+    /// Inside the outline, folded and unfolded.
+    pub border: Option<Border>,
     pub fold: Fold,
     /// The value under the finger while dragging; shown instead of the live one so
     /// late readings of the real level don't make the knob jump back.
@@ -217,6 +220,7 @@ impl Expander {
             open_rect,
             color,
             frame,
+            border: None,
             fold,
             drag: None,
             available: true,
@@ -302,6 +306,9 @@ impl Expander {
         let r = self.current_rect(t);
         // Corner radius follows the current size: a circle unfolds into a pill.
         self.frame.draw_background(canvas, r);
+        if let Some(b) = &self.border {
+            b.draw(canvas, &self.frame, r, false, 1.0);
+        }
 
         let value = self.value(live);
         let text = value.map_or("–".to_string(), |v| v.to_string());

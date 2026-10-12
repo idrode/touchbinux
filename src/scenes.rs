@@ -4,6 +4,7 @@
 
 use crate::{
     anim::Animated,
+    border::Border,
     appkeys::AppKeys,
     capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
@@ -144,6 +145,8 @@ struct Button {
     pull: Option<Pull>,
     /// A key held while the finger is on it (`hold = true`), instead of a tap.
     hold: bool,
+    /// Its border (in the static layer; see `Scene::attach_border`).
+    border: Option<Border>,
 }
 
 /// A button's `drag_children` row.
@@ -257,6 +260,7 @@ struct TextItem {
     rect: Rect,
     text: String,
     frame: Frame,
+    border: Option<Border>,
 }
 
 impl TextItem {
@@ -274,6 +278,9 @@ impl TextItem {
         let baseline = font.centered_baseline(r.y + r.h / 2.0, px);
         let color = self.frame.text.unwrap_or(Rgba::WHITE);
         canvas.draw_text(font, &text, r.x + 2.0 * PADDING, baseline, px, color);
+        if let Some(b) = &self.border {
+            b.draw(canvas, &self.frame, r, pressed && self.frame.pressed.is_some(), 1.0);
+        }
     }
 }
 
@@ -420,11 +427,15 @@ impl Scene {
         for (j, text) in self.texts.iter().enumerate() {
             text.draw(canvas, font, pressed.is_some_and(|b| b.text == Some(j)));
         }
-        // Without one, the default veil goes over the static content.
+        // Without one, the default veil goes over the static content (border
+        // included); a pressed_border_color goes over the veil.
         if let Some(b) = pressed {
             let precomposed = b.text.is_some() || self.pressed_layer.is_some();
             if b.frame.pressed.is_none() || !precomposed {
                 b.frame.draw_pressed_veil(canvas, b.rect);
+                if let Some(border) = b.border.filter(|x| x.pressed.is_some()) {
+                    border.draw(canvas, &b.frame, b.rect, true, 1.0);
+                }
             }
         }
         for (rect, item) in &self.animated {
@@ -1304,6 +1315,7 @@ impl Scene {
             text: None,
             pull: None,
             hold: false,
+            border: None,
         });
     }
 
@@ -1358,6 +1370,7 @@ impl Scene {
             text: None,
             pull: None,
             hold: false,
+            border: None,
         });
     }
 
@@ -1395,7 +1408,36 @@ impl Scene {
             rect: area,
             text: text.into(),
             frame,
+            border: None,
         });
+    }
+
+    /// Gives item `id` (just added, in `rect` with `frame`) its border: drawn into
+    /// the static layer (and, in its pressed colour, into the pressed one) for a
+    /// button or a live widget; kept by text items, sliders and expandables,
+    /// which draw their box every frame.
+    fn attach_border(&mut self, id: &str, rect: Rect, frame: &Frame, border: Border) {
+        for e in self.expanders.iter_mut().filter(|e| e.id == id) {
+            e.border = Some(border);
+        }
+        // A button's drag_children row has its id too: the row is its box.
+        for m in self.menus.iter_mut().filter(|m| m.id == id) {
+            m.border = Some(border);
+        }
+        let Some(i) = self.buttons.iter().position(|b| b.id == id) else {
+            return;
+        };
+        self.buttons[i].border = Some(border);
+        if let Some(t) = self.buttons[i].text {
+            self.texts[t].border = Some(border);
+            return;
+        }
+        border.draw(&mut self.background, frame, rect, false, 1.0);
+        if frame.pressed.is_some()
+            && let Some(layer) = self.pressed_layer_mut()
+        {
+            border.draw(layer, frame, rect, true, 1.0);
+        }
     }
 }
 
@@ -1975,6 +2017,7 @@ pub fn bar_with(
                     text: Some(scene.texts.len() - 1),
                     pull: None,
                     hold: false,
+                    border: None,
                 });
             }
             ItemKind::Workspaces => {
@@ -2056,6 +2099,9 @@ pub fn bar_with(
                 scene.add_display_widget(rect, Box::new(widget));
             }
             ItemKind::Spacer => {}
+        }
+        if let Some(border) = layer.border_for(item) {
+            scene.attach_border(id, rect, &frame, border);
         }
     }
     Ok(scene)
@@ -2191,6 +2237,7 @@ fn children(
             child.states = Some(StateGlyphs::new(glyph(&c.icon_playing), glyph(&c.icon_paused)));
         }
         child.frame = c.frame(frame);
+        child.border = c.border();
         child.size = c.diameter;
         out.push(child);
     }
@@ -5241,5 +5288,132 @@ mod tests {
 
     /// Taken with the code before borders (commit 60ddd81's drawing).
     const GOLDEN: [u64; 4] = [0xb65109bb21a16c0a, 0xd0168b46c5a34ceb, 0xc56548f24cba886e, 0xda1410cde6d6d606];
+
+    /// UNBORDERED with a layer border (`layer`, TOML) and `items` keys added to
+    /// item `id`.
+    fn bordered(layer: &str, edits: &[(&str, &str)]) -> String {
+        let mut t = UNBORDERED.replace("item_radius = 10", &format!("item_radius = 10\n{layer}"));
+        for (anchor, extra) in edits {
+            assert!(t.contains(anchor), "{anchor}");
+            t = t.replacen(anchor, &format!("{anchor}\n{extra}"), 1);
+        }
+        t
+    }
+
+    fn is(p: [u8; 4], rgb: [u8; 3]) -> bool {
+        p[..3].iter().zip(rgb).all(|(&a, b)| a.abs_diff(b) < 40)
+    }
+
+    #[test]
+    fn a_zero_width_border_draws_nothing() {
+        let Some(font) = font() else { return };
+        let toml = bordered("item_border_color = '#ff0000'\nitem_border_width = 0", &[]);
+        assert_eq!(unbordered_frames(&font, &toml), GOLDEN);
+    }
+
+    #[test]
+    fn borders_go_round_every_kind_of_box() {
+        let Some(font) = font() else { return };
+        let toml = bordered(
+            "item_border_color = '#ff0000'\nitem_border_width = 2",
+            &[("pressed_background = \"#ff0000\"", "border_color = \"#00ff00\"\nborder_width = 2")],
+        );
+        assert_ne!(unbordered_frames(&font, &toml), GOLDEN);
+        let live = live();
+        let mut s = menu_scene(&font, &toml);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.advance(MS(0), &live);
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        // Just inside the top edge of each box, in the middle: the border.
+        let top = |c: &Canvas, r: Rect| pixel(c, r.x + r.w / 2.0, r.y.ceil() + 0.5);
+        let inside = |c: &Canvas, r: Rect| pixel(c, r.x + r.w / 2.0, r.y + 4.5);
+        for id in ["plain", "green", "round", "t"] {
+            let r = s.button_rect(id).unwrap();
+            assert!(is(top(&c, r), RED), "{id}: {:?}", top(&c, r));
+            assert!(!is(inside(&c, r), RED), "{id}: the inside is its background");
+        }
+        // The circle: round, so its square's corner stays black.
+        let r = s.button_rect("round").unwrap();
+        assert_eq!(pixel(&c, r.x + 1.0, r.y + 1.0)[..3], [0, 0, 0]);
+        assert!(is(pixel(&c, r.x + 1.0, r.y + r.h / 2.0), RED), "its left side");
+        // Volume and the brightness circle, the expandable and the player.
+        for e in &s.expanders {
+            assert!(is(top(&c, e.rect), RED), "{}", e.id);
+        }
+        for m in &s.menus {
+            assert!(is(top(&c, m.rect), RED), "{}", m.id);
+        }
+        // Unfolded volume: the border follows the pill as it grows.
+        let vol = s.expanders[0].rect;
+        tap(&mut s, mid(vol), MS(10), &font);
+        s.advance(MS(600), &live);
+        s.draw(&mut c, MS(600), &font, &live).unwrap();
+        let open = s.expanders[0].open_rect;
+        assert!(is(top(&c, open), RED), "unfolded volume");
+    }
+
+    #[test]
+    fn boxed_children_have_their_own_border_and_pressed_colour() {
+        let Some(font) = font() else { return };
+        let toml = bordered(
+            "",
+            &[("pressed_background = \"#ff0000\"", "border_color = \"#00ff00\"\nborder_width = 2\npressed_border_color = \"#0000ff\"")],
+        );
+        let live = live();
+        let mut s = menu_scene(&font, &toml);
+        let player = s.menus.iter().position(|m| m.id == "player").unwrap();
+        let at = mid(s.menus[player].rect);
+        tap(&mut s, at, MS(0), &font);
+        s.advance(MS(600), &live);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(600), &font, &live).unwrap();
+        // The second child's box: find its top edge's colour at its middle.
+        let r = s.menus[player].open_rect;
+        let xs: Vec<f32> = (r.x as i32..(r.x + r.w) as i32)
+            .map(|x| x as f32)
+            .filter(|&x| s.menus[player].part_at(x, r.y + r.h / 2.0) == Part::Child(1))
+            .collect();
+        let x = (xs[0] + xs[xs.len() - 1]) / 2.0;
+        let column: Vec<[u8; 4]> = (0..H).map(|y| pixel(&c, x, y as f32)).collect();
+        assert!(column.iter().any(|&p| is(p, [0, 0xff, 0])), "a green border");
+        assert!(!column.iter().any(|&p| is(p, [0, 0, 0xff])));
+        // Pressed: blue.
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (x, r.y + r.h / 2.0), MS(600), &font, &mut out);
+        s.draw(&mut c, MS(600), &font, &live).unwrap();
+        let column: Vec<[u8; 4]> = (0..H).map(|y| pixel(&c, x, y as f32)).collect();
+        assert!(column.iter().any(|&p| is(p, [0, 0, 0xff])), "a blue border while pressed");
+    }
+
+    #[test]
+    fn pressed_border_colour_with_and_without_a_pressed_background() {
+        let Some(font) = font() else { return };
+        let toml = bordered(
+            "item_border_color = '#ff0000'\nitem_border_width = 2",
+            &[
+                ("label = \"Plain\"", "pressed_border_color = \"#0000ff\""),
+                ("label = \"G\"", "pressed_border_color = \"#0000ff\""),
+            ],
+        );
+        let live = live();
+        for id in ["plain", "green", "round"] {
+            let mut s = menu_scene(&font, &toml);
+            let r = s.button_rect(id).unwrap();
+            let mut out = Vec::new();
+            s.handle_touch(Phase::Down, mid(r), MS(0), &font, &mut out);
+            let mut c = Canvas::new(W, H).unwrap();
+            s.draw(&mut c, MS(0), &font, &live).unwrap();
+            // Green is scaled to 0.9 while pressed: its edge moves in.
+            let y = if id == "green" { r.y + r.h * 0.05 + 0.5 } else { r.y.ceil() + 0.5 };
+            let p = pixel(&c, r.x + r.w / 2.0, y);
+            let want = if id == "round" { RED } else { [0, 0, 0xff] };
+            if id == "round" {
+                // No pressed colour: the default veil lightens the red border.
+                assert!(p[0] > 0xc0 && p[1] > 0x10, "{id}: {p:?}");
+            } else {
+                assert!(is(p, want), "{id}: {p:?}");
+            }
+        }
+    }
 }
 

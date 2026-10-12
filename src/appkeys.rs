@@ -134,6 +134,7 @@ impl AppKeys {
         }
         self.fade = (animate && !self.transition.is_zero()).then_some((self.active, t, self.transition));
         self.active = want;
+        eprintln!("app_keys {:?}: {class:?} -> set {:?}", self.id, self.active().unwrap_or("none"));
         true
     }
 

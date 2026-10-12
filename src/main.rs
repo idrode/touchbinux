@@ -134,9 +134,10 @@ const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] \
-                     [--png <file> [--status <state>] [--layer <id>]]\n\
+                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>]]\n\
                      --status (previews only): rec | rec_done | shot | rec_shot\n\
-                     --layer (previews only): the bar scene's layer to draw, e.g. fn";
+                     --layer (previews only): the bar scene's layer to draw, e.g. fn\n\
+                     --focus-class (previews only): app_keys show this window class's set";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -172,6 +173,9 @@ struct Args {
     status: Option<String>,
     /// `--png` only: the layer drawn instead of the starting one.
     layer: Option<String>,
+    /// `--png` only: the focused window's class for app_keys, instead of
+    /// Hyprland's.
+    focus_class: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -182,6 +186,7 @@ fn parse_args() -> Result<Args> {
         config: None,
         status: None,
         layer: None,
+        focus_class: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -200,6 +205,7 @@ fn parse_args() -> Result<Args> {
                 args.status = Some(st);
             }
             "--layer" => args.layer = Some(it.next().ok_or(anyhow!(USAGE))?),
+            "--focus-class" => args.focus_class = Some(it.next().ok_or(anyhow!(USAGE))?),
             _ => return Err(anyhow!("unknown argument {arg:?}\n{USAGE}")),
         }
     }
@@ -208,6 +214,9 @@ fn parse_args() -> Result<Args> {
     }
     if args.layer.is_some() && (args.png.is_none() || args.scene != "bar") {
         return Err(anyhow!("--layer only goes with bar --png\n{USAGE}"));
+    }
+    if args.focus_class.is_some() && (args.png.is_none() || args.scene != "bar") {
+        return Err(anyhow!("--focus-class only goes with bar --png\n{USAGE}"));
     }
     Ok(args)
 }
@@ -904,6 +913,9 @@ impl App {
         for (key, value) in &self.store {
             scene.set_text(key, &value_text(value));
         }
+        // app_keys show the focused window's set from the start, without a fade.
+        let (class, title) = self.app_focus();
+        scene.set_app_focus(&class, &title, self.epoch.elapsed(), &self.font, false);
         Ok(scene)
     }
 
@@ -1431,6 +1443,30 @@ impl App {
         // After each event: a quick tap read in one batch still presses and
         // releases its key.
         self.sync_held_key();
+        changed
+    }
+
+    /// The focused window's class and title, for app_keys: `--focus-class` in a
+    /// preview, else Hyprland's (empty with nothing focused or no Hyprland).
+    fn app_focus(&self) -> (String, String) {
+        if let Some(c) = &self.args.focus_class {
+            return (c.clone(), String::new());
+        }
+        let w = self.hypr.connected().then(|| self.hypr.state.focused_window()).flatten();
+        w.map_or_else(Default::default, |w| (w.class.clone(), w.title.clone()))
+    }
+
+    /// Hyprland's focus changed: app_keys items on every layer show the new
+    /// window's set, cross-faded. Returns whether the bar changed (a new title,
+    /// or another window of the same class, changes nothing).
+    fn sync_app_keys(&mut self) -> bool {
+        let (class, title) = self.app_focus();
+        let t = self.epoch.elapsed();
+        let font = &self.font;
+        let mut changed = self.scene.set_app_focus(&class, &title, t, font, true);
+        for s in [&mut self.fnl.scene, &mut self.idle.scene].into_iter().flatten() {
+            changed |= s.set_app_focus(&class, &title, t, font, true);
+        }
         changed
     }
 
@@ -2581,6 +2617,7 @@ fn run(
                         let t = Instant::now() - start;
                         let (st, font) = (&app.hypr.state, &app.font);
                         dirty |= app.scene.set_workspaces(st, t, font, &mut app.icons);
+                        dirty |= app.sync_app_keys();
                         let st = &app.hypr.state;
                         let focused = st
                             .focused_window()
@@ -2716,6 +2753,7 @@ mod tests {
                 config: Some(path.clone()),
                 status: None,
                 layer: None,
+                focus_class: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -2828,6 +2866,7 @@ mod tests {
                 config: Some(path.clone()),
                 status: None,
                 layer: None,
+                focus_class: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3078,6 +3117,7 @@ mod tests {
                 config: Some(path.clone()),
                 status: None,
                 layer: None,
+                focus_class: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3170,6 +3210,7 @@ mod tests {
                 config: Some(path.clone()),
                 status: None,
                 layer: None,
+                focus_class: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3436,6 +3477,7 @@ mod tests {
                 config: Some(path.clone()),
                 status: None,
                 layer: None,
+                focus_class: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3620,7 +3662,7 @@ mod tests {
         );
         fs::write(&path, toml).unwrap();
         let parts = AppParts {
-            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None },
+            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
             font: Font::find(FONT_CANDIDATES),
@@ -3646,4 +3688,128 @@ mod tests {
         }
         eprintln!("cache: {} bytes", app.gif_cache.bytes());
     }
+
+
+    /// The daemon's App with an app_keys item on the main layer and another on
+    /// the sleep layer (`[idle]`), focus given as `--focus-class` would.
+    fn keys_app(dir: &Path) -> App {
+        let set = |id: &str, class: &str, keys: &str| {
+            format!(
+                "[[layers.items.sets]]\nid = '{id}'\nclass = ['{class}']\n\
+                 [[layers.items.sets.children]]\nlabel = '{id}'\naction = {{ type = 'keys', keys = '{keys}' }}\n\
+                 [[layers.items.sets.children]]\nlabel = '2'\naction = {{ type = 'keys', keys = 'esc' }}\n"
+            )
+        };
+        let toml = format!(
+            "[idle]\nsleep_after_s = 10\nsleep_layer = 'idle'\n\
+             [[layers]]\nid = 'main'\n\
+             [[layers.items]]\ntype = 'app_keys'\nwidth = 360\n{}{}\
+             [[layers]]\nid = 'idle'\n\
+             [[layers.items]]\ntype = 'app_keys'\nid = 'sleepy'\n{}",
+            set("browser", "zen", "ctrl+shift+t"),
+            set("term", "kitty", "ctrl+shift+c"),
+            set("browser", "zen", "alt+left"),
+        );
+        let path = dir.join("config.toml");
+        fs::write(&path, toml).unwrap();
+        let parts = AppParts {
+            args: Args {
+                scene: "bar".into(),
+                gif: None,
+                png: None,
+                config: Some(path.clone()),
+                status: None,
+                layer: None,
+                focus_class: None,
+            },
+            config_path: Some(path.clone()),
+            config: Config::load(&path).unwrap(),
+            font: Font::find(FONT_CANDIDATES),
+            session: None,
+            backlight: None,
+            brightness: None,
+            keyboard: None,
+            loader: None,
+            follow_fn: false,
+            touchbar_light: None,
+        };
+        new_app(parts, PREVIEW_SIZE, Hypr::new(None), None).unwrap()
+    }
+
+    /// Hyprland says `class` has the focus now.
+    fn focus(app: &mut App, class: &str) -> bool {
+        app.args.focus_class = Some(class.into());
+        app.sync_app_keys()
+    }
+
+    fn keys_sets(app: &App) -> Vec<(String, Option<String>)> {
+        let mut v: Vec<_> = app.scene.app_key_sets().into_iter().collect();
+        if let Some(s) = &app.idle.scene {
+            v.extend(s.app_key_sets());
+        }
+        v.into_iter().map(|(id, set)| (id.to_string(), set.map(str::to_string))).collect()
+    }
+
+    #[test]
+    fn app_keys_follow_the_focus_on_every_layer() {
+        let dir = tmp("keys-focus");
+        let mut app = keys_app(&dir);
+        assert_eq!(keys_sets(&app), vec![("app_keys".into(), None)], "no Hyprland: nothing focused");
+        assert!(focus(&mut app, "zen"));
+        assert_eq!(keys_sets(&app), vec![("app_keys".into(), Some("browser".into()))]);
+        // Fading, then at rest: no frames.
+        let t = app.epoch.elapsed();
+        assert_eq!(app.scene_next_change(t), Some(t));
+        let live = app.live();
+        app.scene.advance(t + MS(200), &live);
+        assert_eq!(app.scene_next_change(t + MS(200)), None);
+        assert!(!focus(&mut app, "Zen"), "the same class: nothing to redraw");
+        // Asleep: the sleep layer's app_keys shows the same window's set at once.
+        app.on_idle_timer(Instant::now() + S(11));
+        assert_eq!(
+            keys_sets(&app),
+            vec![("app_keys".into(), Some("browser".into())), ("sleepy".into(), Some("browser".into()))]
+        );
+        assert!(focus(&mut app, "kitty"));
+        assert_eq!(
+            keys_sets(&app),
+            vec![("app_keys".into(), Some("term".into())), ("sleepy".into(), None)]
+        );
+        // A rebuild (a reload) shows the current set straight away.
+        app.rebuild().unwrap();
+        assert_eq!(app.scene.app_key_sets(), vec![("app_keys", Some("term"))]);
+        app.scene.advance(app.epoch.elapsed(), &live);
+        assert_eq!(app.scene.next_change(app.epoch.elapsed()), None, "no fade on a rebuild");
+    }
+
+    #[test]
+    fn a_tap_on_an_app_key_sends_its_chord_and_lets_go_of_the_modifiers() {
+        let dir = tmp("keys-tap");
+        let mut app = keys_app(&dir);
+        focus(&mut app, "zen");
+        let r = app.scene.app_keys_rect("app_keys").unwrap();
+        let first = (r.x + r.w / 4.0, r.y + r.h / 2.0);
+        let mut out = Vec::new();
+        let t = app.epoch.elapsed() + S(1);
+        app.on_touch(Phase::Down, first, t, &mut out);
+        app.on_touch(Phase::Up, first, t + MS(30), &mut out);
+        assert_eq!(out, vec![UiEvent::Tap("app_keys.browser.1".into())]);
+        // As the loop does with it.
+        for e in &out {
+            if let UiEvent::Tap(id) = e {
+                app.on_tap(id);
+            }
+        }
+        let mut rec = crate::keys::tests::Recorder::default();
+        while let Some(at) = app.key_queue.next_deadline() {
+            app.key_queue.poll(at, Some(&mut rec));
+        }
+        let (ctrl, shift, key) = (KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_T);
+        assert_eq!(
+            rec.0,
+            vec![(vec![ctrl, shift], 1), (vec![key], 1), (vec![key], 0), (vec![shift, ctrl], 0)]
+        );
+        assert_eq!(app.key_queue.next_deadline(), None, "nothing left: no timer");
+    }
 }
+

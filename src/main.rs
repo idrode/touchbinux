@@ -15,6 +15,7 @@ mod hypr;
 mod hyprctl;
 mod hyprwatch;
 mod icons;
+mod idle;
 mod ipc;
 mod keys;
 mod layout;
@@ -47,6 +48,7 @@ use evdev::KeyCode;
 use fnkey::{FnEvent, FnKeyboard, Lost, NodeWatch};
 use fnlayer::{Fade, FnMachine};
 use hypr::{Hypr, ReadOutcome};
+use idle::{IdleMachine, Stage};
 use hyprctl::HyprAction;
 use hyprwatch::InstanceWatch;
 use icons::IconResolver;
@@ -151,6 +153,7 @@ const TOKEN_STATUS_PID: u64 = 17;
 const TOKEN_FN_KEYS: u64 = 18;
 const TOKEN_FN_NODES: u64 = 19;
 const TOKEN_FN_TIMER: u64 = 20;
+const TOKEN_IDLE_TIMER: u64 = 21;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -288,6 +291,25 @@ struct App {
     held: Option<HeldKey>,
     /// Where the followed finger is on the bar, while it is down.
     finger: Option<(f32, f32)>,
+    /// Dimming, sleeping and turning off, with an `[idle]` section.
+    idle: IdleSide,
+}
+
+/// The bar at rest (`[idle]`).
+#[derive(Default)]
+struct IdleSide {
+    machine: Option<IdleMachine>,
+}
+
+impl IdleSide {
+    fn stage(&self) -> Stage {
+        self.machine.as_ref().map_or(Stage::Awake, IdleMachine::stage)
+    }
+
+    /// When the next stage is due (none at rest or without `[idle]`).
+    fn deadline(&self) -> Option<Instant> {
+        self.machine.as_ref().and_then(IdleMachine::deadline)
+    }
 }
 
 /// The Fn layer: whether it shows, where the Fn key is read from, and its scene.
@@ -1004,6 +1026,34 @@ impl App {
         }
         // Even with the old config: a reload (or resume) starts the Fn layer over.
         self.sync_fn();
+        // And counts as activity: the bar wakes up with the new times.
+        self.sync_idle(Instant::now());
+    }
+
+    /// Sets `[idle]` up for the current config, as if there had been activity at
+    /// `now`. Returns whether the bar changed.
+    fn sync_idle(&mut self, now: Instant) -> bool {
+        let from = self.idle.stage();
+        let cfg = self.config.idle.as_ref().filter(|_| self.args.scene == "bar");
+        self.idle.machine = cfg.map(|c| IdleMachine::new(c, now));
+        self.apply_idle((from, Stage::Awake))
+    }
+
+    /// The idle timer went off.
+    fn on_idle_timer(&mut self, now: Instant) -> bool {
+        match self.idle.machine.as_mut().and_then(|m| m.fire(now)) {
+            Some(change) => self.apply_idle(change),
+            None => false,
+        }
+    }
+
+    /// Puts the bar in the stage it went to. Returns whether it changed.
+    fn apply_idle(&mut self, (from, to): idle::Change) -> bool {
+        if from == to {
+            return false;
+        }
+        eprintln!("idle: {from:?} -> {to:?}");
+        true
     }
 
     /// Runs `hyprctl dispatch <expr>` with the syntax of the connected Hyprland's
@@ -1609,6 +1659,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
         },
         held: None,
         finger: None,
+        idle: IdleSide::default(),
     };
     app.sync_mpv();
     app.sync_recorder();
@@ -1622,6 +1673,7 @@ fn new_app(p: AppParts, (w, h): (u32, u32), hypr: Hypr, home: Option<&Path>) -> 
     app.sync_pickers();
     app.sync_capture();
     app.sync_fn();
+    app.sync_idle(Instant::now());
     Ok(app)
 }
 
@@ -1633,6 +1685,56 @@ fn arm_once(timer: &TimerFd, wait: Duration) -> Result<()> {
         TimerSetTimeFlags::empty(),
     )?;
     Ok(())
+}
+
+/// A one-shot monotonic timer that only exists while there is a deadline: none
+/// at rest. Created, re-armed or dropped (leaving epoll) by `sync`.
+struct OneShot {
+    token: u64,
+    timer: Option<(TimerFd, Instant)>,
+}
+
+impl OneShot {
+    fn new(token: u64) -> OneShot {
+        OneShot { token, timer: None }
+    }
+
+    fn sync(&mut self, epoll: &Epoll, deadline: Option<Instant>, now: Instant) -> Result<()> {
+        let Some(at) = deadline else {
+            self.timer = None;
+            return Ok(());
+        };
+        if self.timer.as_ref().is_some_and(|(_, armed)| *armed == at) {
+            return Ok(());
+        }
+        let t = match self.timer.take() {
+            Some((t, _)) => t,
+            None => {
+                let t = TimerFd::new(
+                    ClockId::CLOCK_MONOTONIC,
+                    TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
+                )?;
+                epoll.add(&t, EpollEvent::new(EpollFlags::EPOLLIN, self.token))?;
+                t
+            }
+        };
+        arm_once(&t, at.saturating_duration_since(now))?;
+        self.timer = Some((t, at));
+        Ok(())
+    }
+
+    /// It went off: drains it (it may already be gone).
+    fn drain(&self) -> Result<()> {
+        match &self.timer {
+            Some((t, _)) => drain_timer(t),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    fn exists(&self) -> bool {
+        self.timer.is_some()
+    }
 }
 
 /// Arms the real-time `clock` for the next multiple of `period` seconds of wall time
@@ -1822,9 +1924,10 @@ fn run(
     // The same for the Fn keyboard and the watch for it while it is missing.
     let mut fn_keys: Option<u64> = None;
     let mut fn_nodes: Option<u64> = None;
-    // The Fn layer's delay: a one-shot timer that only exists while Fn is held and
-    // the layer waits to show, with the deadline it is armed for.
-    let mut fn_timer: Option<(TimerFd, Instant)> = None;
+    // The Fn layer's delay: only while Fn is held and the layer waits to show.
+    let mut fn_timer = OneShot::new(TOKEN_FN_TIMER);
+    // The next idle stage: none once off (or held at Dim by a recording).
+    let mut idle_timer = OneShot::new(TOKEN_IDLE_TIMER);
     // The layer that was on screen when the Fn layer came or went, fading out.
     let mut fade: Option<Fade> = None;
     let debug_touch = app.args.scene == "touch";
@@ -1871,25 +1974,8 @@ fn run(
             epoll.add(w, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_NODES))?;
             fn_nodes = Some(app.fnl.watch_id);
         }
-        match app.fnl.deadline() {
-            None => fn_timer = None,
-            Some(at) if fn_timer.as_ref().is_some_and(|(_, armed)| *armed == at) => {}
-            Some(at) => {
-                let t = match fn_timer.take() {
-                    Some((t, _)) => t,
-                    None => {
-                        let t = TimerFd::new(
-                            ClockId::CLOCK_MONOTONIC,
-                            TimerFlags::TFD_NONBLOCK | TimerFlags::TFD_CLOEXEC,
-                        )?;
-                        epoll.add(&t, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_TIMER))?;
-                        t
-                    }
-                };
-                arm_once(&t, at.saturating_duration_since(now))?;
-                fn_timer = Some((t, at));
-            }
-        }
+        fn_timer.sync(&epoll, app.fnl.deadline(), now)?;
+        idle_timer.sync(&epoll, app.idle.deadline(), now)?;
         // A hidden status item appears or goes: the others move up or make room.
         if app.status_layout_changed() {
             match app.rebuild() {
@@ -2062,11 +2148,13 @@ fn run(
                 TOKEN_FN_KEYS => dirty |= app.on_fn_readable(),
                 TOKEN_FN_NODES => dirty |= app.on_fn_nodes(),
                 TOKEN_FN_TIMER => {
-                    if let Some((t, _)) = &fn_timer {
-                        drain_timer(t)?;
-                    }
+                    fn_timer.drain()?;
                     // Early or stale wake-ups change nothing (see FnMachine::fire).
                     dirty |= app.on_fn_timer(Instant::now());
+                }
+                TOKEN_IDLE_TIMER => {
+                    idle_timer.drain()?;
+                    dirty |= app.on_idle_timer(Instant::now());
                 }
                 TOKEN_STATUS_SHOTS => {
                     let at = app.scene_now();
@@ -2596,5 +2684,27 @@ mod tests {
         assert!(!app.on_fn_events(&[FnEvent::Pressed], t0 + MS(30)));
         assert!(!fn_shown(&app));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+
+    #[test]
+    fn a_one_shot_timer_only_exists_while_there_is_a_deadline() {
+        let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).unwrap();
+        let mut t = OneShot::new(TOKEN_IDLE_TIMER);
+        let now = Instant::now();
+        t.sync(&epoll, None, now).unwrap();
+        assert!(!t.exists());
+        t.sync(&epoll, Some(now + MS(20)), now).unwrap();
+        assert!(t.exists());
+        // Re-armed in place for another deadline, then fires.
+        t.sync(&epoll, Some(now + MS(5)), now).unwrap();
+        let mut events = [EpollEvent::empty(); 2];
+        let n = epoll.wait(&mut events, EpollTimeout::from(1000u16)).unwrap();
+        assert_eq!((n, events[0].data()), (1, TOKEN_IDLE_TIMER));
+        t.drain().unwrap();
+        // No deadline: the timerfd is closed (and leaves epoll).
+        t.sync(&epoll, None, now).unwrap();
+        assert!(!t.exists());
+        assert_eq!(epoll.wait(&mut events, EpollTimeout::ZERO).unwrap(), 0);
     }
 }

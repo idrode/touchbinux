@@ -4081,6 +4081,25 @@ mod tests {
         assert_eq!(item.kind, ItemKind::Workspaces);
         assert_eq!(item.size(), Size::Fixed(520.0));
         assert!(item.overview_action.is_some());
+        // Its app buttons: my apps and their chords.
+        let apps = item.app_actions.as_ref().unwrap();
+        let classes: Vec<_> = apps.iter().map(|a| a.class.join(",")).collect();
+        assert_eq!(classes, ["zen", "kitty,kitty-start", "obsidian", "org.telegram.desktop"]);
+        let keys = |k: usize| -> Vec<String> {
+            item.app_action_ids()
+                .filter(|(_, _, r)| *r == k)
+                .filter_map(|(_, c, _)| match &c.action {
+                    Some(Action::Keys { keys }) => Some(keys.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(keys(0), ["alt+left", "alt+right", "ctrl+r", "ctrl+t", "ctrl+w", "ctrl+shift+t"]);
+        assert_eq!(keys(1), ["ctrl+shift+t", "ctrl+shift+c", "ctrl+shift+v"]);
+        assert_eq!(keys(2), ["ctrl+o", "ctrl+n", "ctrl+shift+f", "ctrl+p"]);
+        assert_eq!(keys(3), ["ctrl+f", "ctrl+shift+tab", "ctrl+tab"]);
+        assert_eq!(item.collapse_after(), Some(Duration::from_millis(5000)));
+        assert_eq!(item.close_on_tap, Some(false));
     }
 
     /// The status item commented out in the example is valid once uncommented.
@@ -4140,40 +4159,6 @@ mod tests {
         let widths: Vec<_> = l.items.iter().map(|i| l.border_for(i).map(|b| b.width)).collect();
         assert_eq!(widths, [Some(1.5), Some(2.0), Some(1.0)]);
         assert!(l.border_for(&l.items[2]).unwrap().pressed.is_some());
-    }
-
-    /// The app_keys item commented out in the example is valid once uncommented.
-    #[test]
-    fn example_app_keys_is_valid() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let text = fs::read_to_string(root.join("config.example.toml")).unwrap();
-        let start = text.find("# [[layers.items]]\n# type = \"app_keys\"").unwrap();
-        let block = &text[start..start + text[start..].find("\n\n").unwrap()];
-        let body: String = block
-            .lines()
-            .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let c = parse(&format!("[[layers]]\nid='m'\n{body}")).unwrap();
-        let item = &c.layers[0].items[0];
-        assert_eq!((item.kind, item.size()), (ItemKind::AppKeys, Size::Fixed(360.0)));
-        let sets: Vec<_> = item.sets.iter().flatten().map(|s| s.id.as_str()).collect();
-        assert_eq!(sets, ["browser", "terminal", "obsidian", "telegram"]);
-        let keys = |set: &str| -> Vec<String> {
-            item.app_key_ids()
-                .filter(|(_, _, s)| *s == set)
-                .filter_map(|(_, c, _)| match &c.action {
-                    Some(Action::Keys { keys }) => Some(keys.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
-        assert_eq!(keys("browser"), ["alt+left", "alt+right", "ctrl+r", "ctrl+t", "ctrl+w", "ctrl+shift+t"]);
-        assert_eq!(keys("terminal"), ["ctrl+shift+t", "ctrl+shift+c", "ctrl+shift+v"]);
-        assert_eq!(keys("obsidian"), ["ctrl+o", "ctrl+n", "ctrl+shift+f", "ctrl+p"]);
-        assert_eq!(keys("telegram"), ["ctrl+f", "ctrl+shift+tab", "ctrl+tab"]);
-        let sets = item.sets.as_ref().unwrap();
-        assert!(sets[1].matches("kitty-start", "") && sets[3].matches("org.telegram.desktop", ""));
     }
 
     /// The [idle] section and sleep layer commented out in the example are valid

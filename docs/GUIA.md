@@ -1549,6 +1549,88 @@ class_icons = { "kitty" = "utilities-terminal", "zen" = "zen-browser" }
 overview_action = { type = "key", key = "KEY_F15" }   # p. ej. un bind de Hyprland
 ```
 
+##### Botones por app: `app_actions`
+
+Al **tocar el icono de una app** en la tira, además de darle el foco (como
+siempre: si está en otro workspace, Hyprland cambia a él), se **despliegan sus
+botones** en el sitio del elemento: el icono de la app queda a la izquierda como
+asa, y a su derecha los botones de esa app, con la acción [`keys`](#acciones)
+para mandarle atajos. Las cápsulas y la tira se ocultan mientras está desplegado y
+vuelven al plegar. El ancho del elemento no cambia: el resto de la barra no se
+mueve.
+
+```toml
+[[layers.items]]
+type = "workspaces"
+width = 520
+collapse_after_ms = 5000      # se pliega solo tras este tiempo sin tocarlo
+close_on_tap = false          # true: pulsar un botón también lo pliega
+app_transition_ms = 150       # al desplegar y plegar (0-1000)
+
+[[layers.items.app_actions]]
+class = ["zen"]               # clase entera, sin distinguir mayúsculas
+[[layers.items.app_actions.children]]
+icon = "go-previous"          # ruta, nombre del tema de iconos o builtin:
+action = { type = "keys", keys = "alt+left" }
+[[layers.items.app_actions.children]]
+label = "Copiar"
+action = { type = "keys", keys = "ctrl+c" }
+```
+
+| Campo (en `workspaces`) | Por defecto | Qué hace |
+|---|---|---|
+| `[[...app_actions]]` | — | las apps con botones (1-32) |
+| `collapse_after_ms` | `5000` | tiempo sin tocar nada del desplegable hasta que se pliega solo (500-60000). Cada toque lo reinicia |
+| `close_on_tap` | `false` | si pulsar un botón lo pliega |
+| `app_transition_ms` | `150` | duración del despliegue y del pliegue (0-1000) |
+
+Cada `[[layers.items.app_actions]]`:
+
+| Campo | Qué hace |
+|---|---|
+| `class` | lista de clases de ventana (obligatoria); cada clase solo en una entrada (o con distinto `title_contains`) |
+| `title_contains` | opcional: además, el título contiene este texto (sin distinguir mayúsculas). Se mira al tocar el icono |
+| `[[...app_actions.children]]` | 1-12 botones, como los hijos de un `drag_children`: `label` y/o `icon`, `action`, `id` (por defecto `<elemento>.<primera clase>.<n>`, p. ej. `workspaces.zen.1`, que es lo que llega por el socket) y su caja (`shape`, `radius`, `size`, `background`, `pressed_background`, `pressed_scale`, `text_color`, `color`, `border_*`). Sin `hold` |
+
+**Cuándo se pliega:** al tocar el asa (el icono de la app); tras
+`collapse_after_ms` sin tocarlo; con `close_on_tap = true`, al pulsar un botón;
+cuando el foco pasa a una ventana de **otra** app (a otra ventana de la misma, no)
+o a otro workspace; si la ventana se cierra o cambia de clase. La capa Fn y el
+reposo lo pliegan al momento, sin animación.
+
+**Las teclas van a esa ventana.** Los botones solo funcionan cuando Hyprland ya ha
+confirmado que la ventana tiene el foco; un toque antes (si el evento de foco aún
+no ha llegado) no hace nada, para no mandar teclas a otra ventana. El log lo dice:
+`workspaces: "zen" hasn't got the focus yet: tap ignored`.
+
+**Si no caben.** Al cargar se comprueba que los botones de cada app caben en el
+ancho del elemento menos el asa (el alto de la fila más 8 px): cada botón de solo
+icono necesita 40 px, uno con texto el texto más 8 px a cada lado, más el `gap` de
+la capa entre ellos. Si no, es un error que dice cuánto hace falta: con el
+elemento a 400 px, `the app_actions of "obsidian" need 399 px for their 4 buttons
+and there are 334 (the item's width 400 minus 66 for the app's icon); make the
+item at least 465 px wide, or use fewer or shorter buttons`. Con seis botones de icono o cuatro de palabras
+cortas, **520 px** (el ancho habitual) bastan.
+
+**Otras notas:**
+
+- Con `strip = "none"` no hay iconos que tocar: `app_actions` es un error ahí. Con
+  `strip = "active"` solo se ven (y se pueden tocar) los del workspace activo;
+  con `"all"`, los de todos.
+- Sin botones para esa clase, tocar el icono solo hace foco, como antes.
+- En reposo no cuesta nada: desplegado y quieto, solo queda pendiente el momento
+  del pliegue automático (un único temporizador); plegado, nada. Durante el
+  despliegue, unos 30 fotogramas por segundo.
+- La fuente de la barra no tiene flechas (◀ ↻...): usa iconos del tema
+  (`go-previous`, `go-next`, `view-refresh`, `tab-new`, `window-close`,
+  `edit-undo`...) o texto. La clase de una app:
+  `hyprctl clients -j | jq -r '.[] | .class' | sort -u`.
+- Para verlo sin Hyprland: `bar --png ... --expand <clase>` (ver
+  [sección 10](#vista-previa-sin-tocar-la-barra---png)).
+
+`config.example.toml` trae, en el bloque de `workspaces`, los de zen, kitty,
+obsidian y Telegram (y huecos para Signal y Renoise).
+
 #### `status`
 
 Muestra lo que está pasando, **sin lanzar nada nunca**: por ahora una **grabación
@@ -1630,86 +1712,6 @@ shot_ms = 2000
 Para verlo sin grabar ni capturar nada: `touchbinux bar --config <archivo> --png
 <salida.png> --status rec` (o `rec_done`, `shot`, `rec_shot`). Con el daemon en
 marcha, los mensajes del socket de arriba lo muestran en la barra de verdad.
-
-#### `app_keys`
-
-Un hueco de ancho fijo que muestra **botones distintos según la app que tiene el
-foco** en Hyprland (por la clase de su ventana). Con la acción [`keys`](#acciones),
-cada botón manda un atajo de teclado a esa ventana: atrás/adelante en el
-navegador, copiar/pegar en la terminal...
-
-```toml
-[[layers.items]]
-type = "app_keys"
-id = "app_keys"
-width = 360
-transition_ms = 150
-# default_set = "none"
-
-[[layers.items.sets]]
-id = "browser"
-class = ["zen"]
-[[layers.items.sets.children]]
-icon = "go-previous"
-action = { type = "keys", keys = "alt+left" }
-[[layers.items.sets.children]]
-label = "Copiar"
-action = { type = "keys", keys = "ctrl+c" }
-```
-
-| Campo | Por defecto | Qué hace |
-|---|---|---|
-| `id` | `"app_keys"` | |
-| `width` / `stretch` | `360` | el hueco; los botones de cada set se lo reparten a partes iguales, con el `gap` de la capa |
-| `transition_ms` | `150` | fundido al cambiar de set (0-1000; 0 = cambio seco) |
-| `default_set` | `"none"` | qué se ve si ninguna clase coincide o no hay nada enfocado: `"none"` (el hueco vacío) o el `id` de un set |
-| `[[...sets]]` | **obligatorio** (1-32) | los juegos de botones |
-
-Cada set (`[[layers.items.sets]]`):
-
-| Campo | Qué hace |
-|---|---|
-| `id` | obligatorio, único en el elemento (no `"none"`) |
-| `class` | lista de clases de ventana; coincide la clase **entera**, sin distinguir mayúsculas |
-| `title_contains` | opcional: además, el título tiene que contener este texto (sin distinguir mayúsculas). Un set necesita `class`, `title_contains` o los dos |
-| `[[...sets.children]]` | 1-12 botones |
-
-Los botones (`[[layers.items.sets.children]]`) son como los hijos de un
-`drag_children`: `label` y/o `icon` (ruta, `builtin:` o nombre del tema de
-iconos), `action` (obligatoria; cualquiera menos `hold`), `id` (por defecto
-`<elemento>.<set>.<n>`, que es lo que llega por el socket al tocarlo) y su caja:
-`shape`, `radius`, `size`, `background`, `pressed_background`, `pressed_scale`,
-`text_color`, `color`. Se dibujan exactamente como los botones de una capa.
-
-- **Gana el primer set que coincide**, en el orden del archivo.
-- **Sin polling**: sigue los eventos de Hyprland que el daemon ya escucha. Cambiar a
-  otra ventana de la misma clase, o que cambie el título sin que cambie el set, no
-  redibuja nada. Al cambiar de set hay un fundido de `transition_ms` (unos 30 fps
-  solo mientras dura); al arrancar o recargar, el set actual sale sin animación.
-- **Sin Hyprland**, o sin nada enfocado: `default_set`.
-- **Tocar un botón no cambia el foco**: la barra no es una ventana; el atajo va a
-  la ventana que ya lo tenía. Si el set cambia con el dedo encima, ese toque no
-  hace nada.
-- Puede haber varios en distintas capas (por ejemplo, otro en la capa de reposo).
-  La capa Fn no los admite. La capa Fn y la de reposo mandan como siempre.
-- **El ancho cuenta**: si la capa no tiene sitio, los elementos del final no se
-  dibujan y el log dice cuáles (`"clock" doesn't fit`). Comprueba con `--png`.
-- **Etiquetas**: se dibujan con la fuente de la barra (Noto Sans Bold), que no tiene
-  flechas como ◀ ▶ ↻ (salen como cuadros vacíos). Para eso, mejor iconos del tema:
-  `go-previous`, `go-next`, `view-refresh`, `tab-new`, `window-close`, `edit-undo`...
-
-**Qué clase tiene una app.** Con la app abierta:
-
-```sh
-hyprctl clients -j | jq -r '.[] | .class' | sort -u
-```
-
-(En este equipo: `zen`, `kitty`, `kitty-start`...) Y para previsualizar un set sin
-cambiar de ventana: `--focus-class <clase>` (ver
-[sección 10](#vista-previa-sin-tocar-la-barra---png)).
-
-`config.example.toml` trae un ejemplo comentado con zen, kitty, obsidian y
-Telegram (y huecos para Signal y Renoise).
 
 #### `spacer`
 
@@ -1911,6 +1913,87 @@ id = "esc"
 label = "esc"
 action = { type = "key", key = "KEY_ESC" }
 ```
+
+### Alternativa: `app_keys`, un hueco fijo por foco
+
+> **Alternativa** a los [botones por app de `workspaces`](#botones-por-app-app_actions),
+> que es lo recomendado: aquí los botones cambian solos con el foco, en un hueco
+> propio, sin tocar nada. Se conserva por si se prefiere; no está en los ejemplos.
+
+Un hueco de ancho fijo que muestra **botones distintos según la app que tiene el
+foco** en Hyprland (por la clase de su ventana). Con la acción [`keys`](#acciones),
+cada botón manda un atajo de teclado a esa ventana: atrás/adelante en el
+navegador, copiar/pegar en la terminal...
+
+```toml
+[[layers.items]]
+type = "app_keys"
+id = "app_keys"
+width = 360
+transition_ms = 150
+# default_set = "none"
+
+[[layers.items.sets]]
+id = "browser"
+class = ["zen"]
+[[layers.items.sets.children]]
+icon = "go-previous"
+action = { type = "keys", keys = "alt+left" }
+[[layers.items.sets.children]]
+label = "Copiar"
+action = { type = "keys", keys = "ctrl+c" }
+```
+
+| Campo | Por defecto | Qué hace |
+|---|---|---|
+| `id` | `"app_keys"` | |
+| `width` / `stretch` | `360` | el hueco; los botones de cada set se lo reparten a partes iguales, con el `gap` de la capa |
+| `transition_ms` | `150` | fundido al cambiar de set (0-1000; 0 = cambio seco) |
+| `default_set` | `"none"` | qué se ve si ninguna clase coincide o no hay nada enfocado: `"none"` (el hueco vacío) o el `id` de un set |
+| `[[...sets]]` | **obligatorio** (1-32) | los juegos de botones |
+
+Cada set (`[[layers.items.sets]]`):
+
+| Campo | Qué hace |
+|---|---|
+| `id` | obligatorio, único en el elemento (no `"none"`) |
+| `class` | lista de clases de ventana; coincide la clase **entera**, sin distinguir mayúsculas |
+| `title_contains` | opcional: además, el título tiene que contener este texto (sin distinguir mayúsculas). Un set necesita `class`, `title_contains` o los dos |
+| `[[...sets.children]]` | 1-12 botones |
+
+Los botones (`[[layers.items.sets.children]]`) son como los hijos de un
+`drag_children`: `label` y/o `icon` (ruta, `builtin:` o nombre del tema de
+iconos), `action` (obligatoria; cualquiera menos `hold`), `id` (por defecto
+`<elemento>.<set>.<n>`, que es lo que llega por el socket al tocarlo) y su caja:
+`shape`, `radius`, `size`, `background`, `pressed_background`, `pressed_scale`,
+`text_color`, `color`. Se dibujan exactamente como los botones de una capa.
+
+- **Gana el primer set que coincide**, en el orden del archivo.
+- **Sin polling**: sigue los eventos de Hyprland que el daemon ya escucha. Cambiar a
+  otra ventana de la misma clase, o que cambie el título sin que cambie el set, no
+  redibuja nada. Al cambiar de set hay un fundido de `transition_ms` (unos 30 fps
+  solo mientras dura); al arrancar o recargar, el set actual sale sin animación.
+- **Sin Hyprland**, o sin nada enfocado: `default_set`.
+- **Tocar un botón no cambia el foco**: la barra no es una ventana; el atajo va a
+  la ventana que ya lo tenía. Si el set cambia con el dedo encima, ese toque no
+  hace nada.
+- Puede haber varios en distintas capas (por ejemplo, otro en la capa de reposo).
+  La capa Fn no los admite. La capa Fn y la de reposo mandan como siempre.
+- **El ancho cuenta**: si la capa no tiene sitio, los elementos del final no se
+  dibujan y el log dice cuáles (`"clock" doesn't fit`). Comprueba con `--png`.
+- **Etiquetas**: se dibujan con la fuente de la barra (Noto Sans Bold), que no tiene
+  flechas como ◀ ▶ ↻ (salen como cuadros vacíos). Para eso, mejor iconos del tema:
+  `go-previous`, `go-next`, `view-refresh`, `tab-new`, `window-close`, `edit-undo`...
+
+**Qué clase tiene una app.** Con la app abierta:
+
+```sh
+hyprctl clients -j | jq -r '.[] | .class' | sort -u
+```
+
+(En este equipo: `zen`, `kitty`, `kitty-start`...) Y para previsualizar un set sin
+cambiar de ventana: `--focus-class <clase>` (ver
+[sección 10](#vista-previa-sin-tocar-la-barra---png)).
 
 ## 7. Recetas
 
@@ -2259,7 +2342,8 @@ una suspensión real.
 | `ipc.rs` | el socket JSON por líneas |
 | `runner.rs`, `user.rs` | lanzar comandos como el usuario de sesión |
 | `keys.rs` | teclado virtual (uinput) y acordes (`keys`) |
-| `appkeys.rs` | `app_keys`: un set de botones por clase de ventana, con fundido |
+| `appactions.rs` | botones por app de `workspaces` (`app_actions`): despliegue, pliegue y foco |
+| `appkeys.rs` | `app_keys` (alternativa): un set de botones por clase de ventana, con fundido |
 | `fnkey.rs` | la tecla Fn del teclado interno: solo lectura, filtro del kernel |
 | `fnlayer.rs` | cuándo sale la capa Fn (máquina de estados) y el fundido |
 | `idle.rs` | reposo: etapas despierta, atenuada, dormida y apagada (máquina de estados) |
@@ -2290,6 +2374,14 @@ que miden tiempos: `cargo test --release -- --ignored --nocapture`.
 Carga y **valida** el config igual que el daemon, dibuja un fotograma de 2008x60 a un
 PNG y sale. No abre DRM ni el táctil: no hace falta root ni parar el servicio. Lee el
 brillo, la batería y tu Hyprland reales; el volumen sale siempre como 50.
+
+Con `--expand <clase>` (solo `bar --png`), cada `workspaces` con `app_actions`
+para esa clase se dibuja con sus botones desplegados, sobre un Hyprland inventado
+(un workspace con una ventana de esa clase, enfocada): no hace falta Hyprland.
+
+```sh
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/zen.png --expand zen
+```
 
 Con `--focus-class <clase>` (solo `bar --png`), los `app_keys` se dibujan como si
 esa clase tuviera el foco, sin mirar Hyprland:

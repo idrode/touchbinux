@@ -45,6 +45,17 @@ pub enum Incoming {
         #[serde(default)]
         state: Option<String>,
     },
+    /// From outside (e.g. hypridle): the user is active, `{"type":"idle",
+    /// "state":"activity"}`. The daemon never reads the keyboard for this.
+    Idle { state: IdleSignal },
+}
+
+/// What an `idle` message says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdleSignal {
+    /// Wakes the bar and starts the idle count over.
+    Activity,
 }
 
 struct Client {
@@ -347,6 +358,21 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert!(matches!(&msgs[0], Incoming::Set { key, value } if key == "volume" && value == 42));
         assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn idle_messages() {
+        let (msgs, errors) = parse(
+            b"{\"type\":\"idle\",\"state\":\"activity\"}\n\
+              {\"type\":\"idle\",\"state\":\"asleep\"}\n\
+              {\"type\":\"idle\"}\n\
+              {\"type\":\"idle\",\"state\":\"activity\"\n",
+        );
+        assert!(matches!(msgs[..], [Incoming::Idle { state: IdleSignal::Activity }]), "{msgs:?}");
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors[0].contains("unknown variant `asleep`, expected `activity`"), "{}", errors[0]);
+        assert!(errors[1].contains("missing field `state`"), "{}", errors[1]);
+        assert!(errors[2].starts_with("invalid message: EOF"), "{}", errors[2]);
     }
 
     #[test]

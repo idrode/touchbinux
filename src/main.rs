@@ -42,7 +42,7 @@ use anyhow::{Result, anyhow};
 use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
 use capture::CaptureMode;
-use config::{Action, Config, ItemConfig, ItemKind, StatusIdle};
+use config::{Action, Config, ItemConfig, ItemKind, StatusIdle, WakeOn};
 use gifpick::{Loader, Reply, Request};
 use display::DrmBackend;
 use evdev::KeyCode;
@@ -54,7 +54,7 @@ use idle::{IdleMachine, Stage};
 use hyprctl::HyprAction;
 use hyprwatch::InstanceWatch;
 use icons::IconResolver;
-use ipc::{Incoming, IpcServer};
+use ipc::{IdleSignal, Incoming, IpcServer};
 use keys::VirtualKeyboard;
 use levels::{Backlight, Volume};
 use nix::{
@@ -1074,6 +1074,42 @@ impl App {
         }
     }
 
+    /// Activity at `now`: the bar wakes (if it rested) and the count starts over.
+    /// Returns whether the bar changed.
+    fn idle_activity(&mut self, now: Instant) -> bool {
+        match self.idle.machine.as_mut().and_then(|m| m.activity(now)) {
+            Some(change) => self.apply_idle(change, now),
+            None => false,
+        }
+    }
+
+    /// Whether `source` counts now: always while awake or dimmed; asleep or off,
+    /// only if it is in `wake_on`.
+    fn wakes(&self, source: WakeOn) -> bool {
+        match &self.config.idle {
+            Some(cfg) => !self.idle.stage().resting() || cfg.wakes_on(source),
+            None => false,
+        }
+    }
+
+    /// `{"type":"idle","state":"activity"}` from the socket.
+    fn idle_signal(&mut self, now: Instant) -> Result<bool, String> {
+        if self.idle.machine.is_none() {
+            return Err("no [idle] section in the config".into());
+        }
+        Ok(self.idle_activity(now))
+    }
+
+    /// While a recording goes on (the status item's, or one started from the
+    /// bar) the bar stays dimmed at most. Returns whether the bar changed.
+    fn sync_idle_hold(&mut self, now: Instant) -> bool {
+        let recording = self.status.recording() || self.recorder.recording().is_some();
+        match self.idle.machine.as_mut().and_then(|m| m.set_hold(recording)) {
+            Some(change) => self.apply_idle(change, now),
+            None => false,
+        }
+    }
+
     /// The idle timer went off.
     fn on_idle_timer(&mut self, now: Instant) -> bool {
         match self.idle.machine.as_mut().and_then(|m| m.fire(now)) {
@@ -1127,6 +1163,12 @@ impl App {
             // Awake again: the layer from before (or the Fn layer, if Fn is held).
             if self.idle.scene.take().is_some() && from == Stage::Sleep {
                 self.cross_fade = Some(len);
+            }
+            // A finger already down (the one that woke it, or one resting on the
+            // bar when Fn woke it) does nothing until it lifts.
+            if self.finger.is_some() {
+                let scene = self.fnl.scene.as_mut().unwrap_or(&mut self.scene);
+                scene.block_touch();
             }
         }
         true
@@ -1280,12 +1322,33 @@ impl App {
     /// One event of the followed finger, at canvas `at`: to the layer on screen.
     /// Returns whether the bar changed.
     fn on_touch(&mut self, phase: Phase, at: (f32, f32), t: Duration, out: &mut Vec<UiEvent>) -> bool {
-        let scene = self.fnl.scene.as_mut().unwrap_or(&mut self.scene);
-        let changed = scene.handle_touch(phase, at, t, &self.font, out);
-        self.finger = match phase {
+        let finger = match phase {
             Phase::Down | Phase::Move => Some(at),
             Phase::Up | Phase::Cancel => None,
         };
+        let mut changed = false;
+        if let Some(cfg) = &self.config.idle
+            && self.idle.machine.is_some()
+        {
+            let swallow = cfg.swallow_wake_touch;
+            if self.idle.stage().resting() {
+                // At rest a touch does nothing but, landing, wake the bar.
+                self.finger = finger;
+                if phase != Phase::Down || !self.wakes(WakeOn::Touch) {
+                    return false;
+                }
+                changed = self.idle_activity(self.epoch + t);
+                if swallow {
+                    // Woken with the finger down: it is ignored until it lifts.
+                    return changed;
+                }
+            } else if self.wakes(WakeOn::Touch) {
+                changed = self.idle_activity(self.epoch + t);
+            }
+        }
+        let scene = self.fnl.scene.as_mut().unwrap_or(&mut self.scene);
+        changed |= scene.handle_touch(phase, at, t, &self.font, out);
+        self.finger = finger;
         // After each event: a quick tap read in one batch still presses and
         // releases its key.
         self.sync_held_key();
@@ -1348,12 +1411,18 @@ impl App {
         self.fnl.machine = f.map(|(f, _)| FnMachine::new(f.mode, f.delay()));
         // The config may have changed: whatever shows is built again if needed.
         self.show_fn(false);
-        if self.fnl.machine.is_none() || !self.fnl.follow {
+        if !self.fn_wanted() || !self.fnl.follow {
             self.fnl.missing = None;
             return;
         }
         self.open_fn_keyboard();
         self.fn_resync();
+    }
+
+    /// Whether the Fn key is followed: for the Fn layer, or to wake the bar.
+    fn fn_wanted(&self) -> bool {
+        let wakes = self.config.idle.as_ref().is_some_and(|i| i.wakes_on(WakeOn::Fn));
+        self.args.scene == "bar" && (self.fnl.machine.is_some() || wakes)
     }
 
     /// Looks for the keyboard; without one, watches for it (logged once per reason).
@@ -1451,6 +1520,16 @@ impl App {
 
     /// Fn's presses and releases as read. Returns whether the bar changed.
     fn on_fn_events(&mut self, events: &[FnEvent], now: Instant) -> bool {
+        // Fn going down or up is activity (lost-event marks aren't).
+        let mut woke = false;
+        if events.iter().any(|e| *e != FnEvent::Resync) && self.wakes(WakeOn::Fn) {
+            woke = self.idle_activity(now);
+        }
+        woke | self.fn_key_events(events, now)
+    }
+
+    /// Fn's presses and releases into the Fn layer's machine.
+    fn fn_key_events(&mut self, events: &[FnEvent], now: Instant) -> bool {
         let Some(m) = &mut self.fnl.machine else {
             return false;
         };
@@ -1477,7 +1556,7 @@ impl App {
         if let Some(w) = &self.fnl.watch {
             w.drain();
         }
-        if self.fnl.keyboard.is_some() || self.fnl.machine.is_none() {
+        if self.fnl.keyboard.is_some() || !self.fn_wanted() {
             return false;
         }
         self.open_fn_keyboard();
@@ -2123,6 +2202,7 @@ fn run(
         if let Some(l) = &mut app.idle.light {
             l.poll(now);
         }
+        dirty |= app.sync_idle_hold(now);
         if let Some(b) = &mut app.backlight {
             b.poll(now);
         }
@@ -2362,8 +2442,9 @@ fn run(
                     // E.g. an automatic fold that is due but not drawn yet: the touch
                     // must see the scene as it is now.
                     let live = app.live();
-                    let scene = app.fnl.scene.as_mut().unwrap_or(&mut app.scene);
-                    dirty |= scene.advance(scene_t, &live);
+                    let t_draw = app.draw_time(scene_t);
+                    let scene = app.idle.scene.as_mut().or(app.fnl.scene.as_mut()).unwrap_or(&mut app.scene);
+                    dirty |= scene.advance(t_draw, &live);
                     // While present() blocks (~33 ms) moves pile up; only the last of
                     // each run matters, so a drag never lags behind the finger.
                     for (i, t) in touches.iter().enumerate() {
@@ -2493,6 +2574,16 @@ fn run(
                                     &epoll,
                                 ),
                             },
+                            Incoming::Idle { state: IdleSignal::Activity } => {
+                                match app.idle_signal(Instant::now()) {
+                                    Ok(redraw) => dirty |= redraw,
+                                    Err(e) => ipc.send_to(
+                                        slot,
+                                        &json!({"type": "error", "message": e}),
+                                        &epoll,
+                                    ),
+                                }
+                            }
                             Incoming::Status { id, state } => {
                                 match app.status_command(&id, state.as_deref()) {
                                     Ok(redraw) => dirty |= redraw,
@@ -3044,9 +3135,10 @@ mod tests {
         app.on_touch(Phase::Down, cap, MS(0), &mut out);
         app.on_touch(Phase::Up, cap, MS(20), &mut out);
         assert!(settle(&mut app, MS(20)).is_some(), "unfolding");
-        app.on_idle_timer(t0 + S(5));
+        // (That touch was activity: the stages count from it.)
+        app.on_idle_timer(t0 + S(6));
         assert!(app.idle.scene.is_none() && app.cross_fade.is_none(), "dim: same layer");
-        assert!(app.on_idle_timer(t0 + S(10)));
+        assert!(app.on_idle_timer(t0 + S(11)));
         assert_eq!(app.idle.stage(), Stage::Sleep);
         assert!(app.idle.scene.is_some() && app.cross_fade == Some(MS(250)));
         // The GIF (20 fps of its own) at 8 frames a second at most.
@@ -3058,7 +3150,7 @@ mod tests {
         app.scene.advance(S(11), &live);
         assert_eq!(app.scene.next_change(S(11)), None);
         // Off: no frames, no clock ticks, no battery polls.
-        app.on_idle_timer(t0 + S(20));
+        app.on_idle_timer(t0 + S(21));
         assert_eq!(app.idle.stage(), Stage::Off);
         assert_eq!((app.scene_next_change(S(21)), app.wall_period()), (None, None));
         assert!(!app.battery_shown());
@@ -3081,5 +3173,158 @@ mod tests {
         app.reload_config();
         assert_eq!(app.draw_time(S(12)), S(12));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+
+    /// A tap at `at`, at scene time `t`: what it reported.
+    fn tap_at(app: &mut App, at: (f32, f32), t: Duration) -> Vec<UiEvent> {
+        let mut out = Vec::new();
+        app.on_touch(Phase::Down, at, t, &mut out);
+        app.on_touch(Phase::Up, at, t + MS(30), &mut out);
+        out
+    }
+
+    fn tap_before() -> Vec<UiEvent> {
+        vec![UiEvent::Tap("before".into())]
+    }
+
+    #[test]
+    fn each_touch_moves_the_idle_timer_and_dimmed_touches_still_act() {
+        let dir = tmp("idle-touch");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        let before = mid(&app, "before");
+        assert_eq!(app.idle.deadline(), Some(t0 + S(5)));
+        assert_eq!(tap_at(&mut app, before, S(3)), tap_before());
+        assert_eq!(app.idle.deadline(), Some(t0 + S(3) + MS(30) + S(5)), "counted from the last touch");
+        // Dimmed: the touch acts as usual and brings the brightness back.
+        app.on_idle_timer(t0 + S(9));
+        assert_eq!(app.idle.stage(), Stage::Dim);
+        assert_eq!(tap_at(&mut app, before, S(10)), tap_before());
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 100);
+    }
+
+    #[test]
+    fn the_touch_that_wakes_the_bar_does_nothing_else() {
+        let dir = tmp("idle-swallow");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        let before = mid(&app, "before");
+        app.on_idle_timer(t0 + S(10));
+        assert_eq!(app.idle.stage(), Stage::Sleep);
+        // Down wakes it; the rest of that touch is ignored, even a drag.
+        let mut out = Vec::new();
+        assert!(app.on_touch(Phase::Down, before, S(11), &mut out));
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        app.on_touch(Phase::Move, (before.0 + 300.0, before.1), S(11) + MS(10), &mut out);
+        app.on_touch(Phase::Up, before, S(11) + MS(30), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        // The next one works.
+        assert_eq!(tap_at(&mut app, before, S(12)), tap_before());
+        // From off too.
+        app.on_idle_timer(app.epoch + S(12) + MS(30) + S(20));
+        assert_eq!(app.idle.stage(), Stage::Off);
+        assert!(tap_at(&mut app, before, S(40)).is_empty());
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        // swallow_wake_touch = false: the waking touch acts too.
+        let dir2 = tmp("idle-noswallow");
+        let (mut app, t0) = idle_app(&dir2, &format!("{IDLE}\nswallow_wake_touch = false"));
+        app.on_idle_timer(t0 + S(20));
+        assert_eq!(tap_at(&mut app, before, S(21)), tap_before());
+        assert_eq!(app.idle.stage(), Stage::Awake);
+    }
+
+    #[test]
+    fn wake_on_says_what_wakes_the_bar_at_rest() {
+        let dir = tmp("idle-wakeon");
+        let (mut app, t0) = idle_app(&dir, &format!("{IDLE}\nwake_on = ['fn']"));
+        let before = mid(&app, "before");
+        // Awake, touches still count as activity.
+        tap_at(&mut app, before, S(1));
+        assert_eq!(app.idle.deadline(), Some(t0 + S(1) + MS(30) + S(5)));
+        app.on_idle_timer(t0 + S(30));
+        assert_eq!(app.idle.stage(), Stage::Off);
+        // Asleep, a touch does nothing at all.
+        assert!(!app.on_touch(Phase::Down, before, S(31), &mut Vec::new()));
+        app.on_touch(Phase::Up, before, S(31), &mut Vec::new());
+        assert_eq!(app.idle.stage(), Stage::Off);
+        // Fn wakes it, and the Fn layer shows while it is held.
+        assert!(app.on_fn_events(&[FnEvent::Pressed], t0 + S(32)));
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        assert!(fn_shown(&app) && app.idle.scene.is_none());
+        assert!(app.shown().button_rect("f1").is_some());
+        app.on_fn_events(&[FnEvent::Released], t0 + S(33));
+        // wake_on = ['touch']: Fn at rest doesn't wake it (the Fn layer waits
+        // underneath), but Fn while awake counts.
+        let dir2 = tmp("idle-wakeon-touch");
+        let (mut app, t0) = idle_app(&dir2, &format!("{IDLE}\nwake_on = ['touch']"));
+        app.on_fn_events(&[FnEvent::Pressed, FnEvent::Released], t0 + S(2));
+        assert_eq!(app.idle.deadline(), Some(t0 + S(7)));
+        app.on_idle_timer(t0 + S(30));
+        app.on_fn_events(&[FnEvent::Pressed], t0 + S(31));
+        assert_eq!(app.idle.stage(), Stage::Off);
+        assert!(app.on_touch(Phase::Down, before, S(32), &mut Vec::new()));
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        assert!(fn_shown(&app), "awake again, with Fn still held: the Fn layer");
+    }
+
+    #[test]
+    fn a_recording_keeps_the_bar_dimmed_at_most() {
+        let dir = tmp("idle-rec");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        app.status.apply(status::Event::RecStart { since: 0.0 });
+        assert!(!app.sync_idle_hold(t0));
+        app.on_idle_timer(t0 + S(5));
+        assert_eq!(app.idle.stage(), Stage::Dim);
+        assert_eq!(app.idle.deadline(), None, "no sleep, no off: no timer");
+        // Started while off (e.g. from a Hyprland bind): back to dim.
+        app.status.apply(status::Event::RecStop { at: 1.0 });
+        app.sync_idle_hold(t0 + S(30));
+        app.on_idle_timer(t0 + S(30));
+        assert_eq!(app.idle.stage(), Stage::Off);
+        app.status.apply(status::Event::RecStart { since: 2.0 });
+        assert!(app.sync_idle_hold(t0 + S(40)));
+        assert_eq!(app.idle.stage(), Stage::Dim);
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 25);
+        assert!(app.idle.scene.is_none());
+    }
+
+    #[test]
+    fn the_socket_signal_wakes_the_bar() {
+        let dir = tmp("idle-socket");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        app.on_idle_timer(t0 + S(20));
+        assert_eq!(app.idle_signal(t0 + S(21)), Ok(true));
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        assert_eq!(app.idle.deadline(), Some(t0 + S(26)));
+        assert_eq!(app.idle_signal(t0 + S(22)), Ok(false), "already awake: only the count");
+        assert_eq!(app.idle.deadline(), Some(t0 + S(27)));
+        // Without [idle], a clear error for the client.
+        let dir2 = tmp("idle-socket-none");
+        let mut plain = fn_app(&dir2, "[fn]");
+        let err = plain.idle_signal(Instant::now()).unwrap_err();
+        assert!(err.contains("no [idle]"), "{err}");
+    }
+
+    #[test]
+    fn at_rest_nothing_runs() {
+        let dir = tmp("idle-rest");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        app.on_idle_timer(t0 + S(20));
+        ramp_done(&mut app);
+        // Off: no idle timer, no ramp, no Fn delay, no frames, no clock.
+        assert_eq!(app.idle.deadline(), None);
+        assert_eq!(app.idle.light.as_ref().unwrap().next_deadline(), None);
+        assert_eq!(app.fnl.deadline(), None);
+        assert_eq!(app.scene_next_change(S(30)), None);
+        assert_eq!(app.wall_period(), None);
+        // Asleep with a still picture: after the fade, the same.
+        let dir2 = tmp("idle-rest-still");
+        let (mut app, t0) = idle_app(&dir2, "[idle]\nsleep_after_s = 10\nsleep_layer = 'idle'\nidle_gif_fps = 0");
+        app.on_idle_timer(t0 + S(10));
+        ramp_done(&mut app);
+        assert_eq!((app.idle.stage(), app.idle.deadline()), (Stage::Sleep, None));
+        assert_eq!(app.scene_next_change(S(30)), None);
     }
 }

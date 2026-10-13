@@ -984,6 +984,50 @@ anim_ms = 200
 color = "#00ffb7"
 ```
 
+##### Icono de `brightness`: `icon_style`
+
+Por defecto (`icon_style = "sun"`) es el **sol** de siempre, con rayos que crecen
+con el nivel. Con `icon_style = "circle"` es un **anillo que se rellena por dentro**
+según el nivel, dibujado por código (sin SVG), plegado y desplegado (a la izquierda
+del slider). El sitio del icono y el resto del elemento no cambian.
+
+| Campo | Por defecto | Rango | Qué hace |
+|---|---|---|---|
+| `icon_style` | `"sun"` | `"sun"`, `"circle"` | sol o círculo. Las demás claves de esta tabla, solo con `"circle"` |
+| `circle_fill` | `"radial"` | `"radial"`, `"level"`, `"sweep"` | cómo se rellena: un disco que crece desde el centro; un líquido que sube desde abajo con el borde de arriba recto; un sector que gira como un reloj desde arriba |
+| `icon_size` | `28` | 8-60 px | diámetro exterior. No más que el sitio del icono (el alto de la fila menos 16 px; con la fila normal, 42): si no, error al cargar |
+| `ring_width` | `2.5` | 0-6 px | grosor del anillo (`0`: sin anillo) |
+| `ring_gap` | `2` | 0-6 px | hueco entre el anillo y el relleno |
+| `ring_color` | `color` | | color del anillo (con alfa: es un anillo de verdad, no se ve nada debajo) |
+| `fill_color` | `color` | | color del relleno |
+| `min_fill` | `0.0` | 0.0-0.3 | parte del interior que se ve al 0 % (para que no desaparezca); de ahí sube hasta lleno al 100 % |
+
+El relleno es **proporcional al área**: al 50 % está lleno medio interior en los tres
+modos (en `radial` el radio crece algo más deprisa al principio; en `level` el
+líquido llega justo a la mitad). Tiene que quedar sitio dentro: diámetro / 2 −
+`ring_width` − `ring_gap` de al menos 2 px (si no, error).
+
+**Animación.** Mientras arrastras el slider, el relleno sigue al dedo sin retraso.
+Si el brillo cambia desde fuera (teclas, otras apps), va hacia el valor nuevo en
+150 ms (el sol, como siempre, en 180). Unos 30 fps solo mientras se mueve; quieto,
+0 fps y sin temporizadores.
+
+```toml
+[[layers.items]]
+type = "brightness"
+icon_style = "circle"
+circle_fill = "level"     # o "radial", "sweep"
+icon_size = 28
+ring_width = 2.5
+ring_gap = 2
+min_fill = 0.05
+# ring_color / fill_color: por defecto, `color`
+```
+
+Para verlo sin tocar la barra, a un nivel fijo: `bar --png ... --brightness 0..100`
+(ver [sección 10](#vista-previa-sin-tocar-la-barra---png)). Volume no tiene (aún)
+`icon_style`.
+
 #### `gif`
 
 | Campo | Por defecto | Qué hace |
@@ -2387,6 +2431,7 @@ una suspensión real.
 | `layout.rs` | reparto de anchos (`width`/`stretch`) |
 | `widgets.rs` | reloj, batería, iconos de volumen/brillo y las carpetas |
 | `expander.rs` | sliders desplegables de volumen y brillo; el plegado (`Fold`) |
+| `levelicon.rs` | iconos de nivel dibujados por código: el sol, o el círculo de `icon_style = "circle"` (anillo y sus tres rellenos), reutilizable por volume |
 | `expandable.rs` | elementos `expandable`, `gif_picker`, `player` y `capture`: fila desplegable de hijos |
 | `gifpick.rs` | `gif_picker`: hilo que lee carpetas y GIF como el usuario de sesión |
 | `mpv.rs` | cliente del socket IPC de mpv: estado por `observe_property`, seek |
@@ -2460,6 +2505,20 @@ tira del activo abierta; `2`: además, los botones de la clase de `--expand`
 ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l1.png --level 1
 ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l2.png --level 2 --expand kitty
 ```
+
+Con `--brightness <0..100>` (solo con `--png`), `brightness` se dibuja a ese nivel
+en vez del de la retroiluminación (también sin ella). Para comparar los rellenos de
+`icon_style = "circle"`:
+
+```sh
+for b in 0 25 50 75 100; do
+  ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/brillo-$b.png --brightness $b
+done
+```
+
+`cargo test dump_circle_levels_to_png` dibuja los tres rellenos (y `min_fill`, y un
+anillo translúcido) a 0-100 %, plegados y desplegados; con
+`TOUCHBINUX_ICON_DUMP=/tmp/iconos` deja los PNG ahí para mirarlos.
 
 Con `--focus-class <clase>` (solo `bar --png`), los `app_keys` se dibujan como si
 esa clase tuviera el foco, sin mirar Hyprland:

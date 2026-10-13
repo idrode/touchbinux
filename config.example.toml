@@ -184,6 +184,15 @@ action = { type = "key", key = "KEY_NEXTSONG" }
 # volume slider, tapping the speaker mutes/unmutes.
 [[layers.items]]
 type = "brightness"
+# Its icon: the sun (default), or a ring filled inside by the level:
+# icon_style = "circle"
+# circle_fill = "radial"         # or "level" (liquid from the bottom), "sweep" (clockwise from the top)
+# icon_size = 28                 # outer diameter, 8-60 px (no more than the icon's place)
+# ring_width = 2.5               # 0-6 px
+# ring_gap = 2                   # between the ring and the fill, 0-6 px
+# ring_color = "#00ffb7"         # default: color
+# fill_color = "#00ffb7"         # default: color
+# min_fill = 0.0                 # what shows at 0 %, 0.0-0.3
 
 [[layers.items]]
 type = "volume"

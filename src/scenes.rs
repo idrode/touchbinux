@@ -11,7 +11,7 @@ use crate::{
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
         BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
-        Action, DEFAULT_MAX_ICONS, ItemConfig, WsStyle,
+        Action, DEFAULT_MAX_ICONS, ItemConfig, WsStrip, WsStyle,
         ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
@@ -2184,6 +2184,10 @@ pub fn bar_with(
                         .map(|(c, w)| (c.0, item.active_border_color.unwrap_or(c).0, w)),
                     icon_tint: item.icon_tint.map(|c| c.0),
                     strip: item.strip.unwrap_or_default(),
+                    strip_dur: match item.strip {
+                        Some(WsStrip::Tap) => item.strip_transition(),
+                        _ => workspaces::STRIP,
+                    },
                     max_icons: item.max_icons.unwrap_or(DEFAULT_MAX_ICONS),
                     class_icons: item.class_icons(),
                 };

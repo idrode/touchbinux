@@ -41,8 +41,9 @@ pub const DEFAULT_ICON_GAP: f32 = 10.0;
 pub const DEFAULT_STRIP_PAD: f32 = 10.0;
 /// Active <-> inactive (size and colour) and the press scale: 150 ms OutCubic.
 const STATE: Duration = Duration::from_millis(150);
-/// The strip opening or closing: 190 ms OutCubic.
-const STRIP: Duration = Duration::from_millis(190);
+/// The strip opening or closing: 190 ms OutCubic (strip = "tap": its own
+/// `strip_transition_ms`).
+pub const STRIP: Duration = Duration::from_millis(190);
 /// Birth and merge, linear (their curves are inside `wsbirth`).
 const BIRTH: Duration = Duration::from_millis(380);
 const DEATH: Duration = Duration::from_millis(360);
@@ -143,6 +144,8 @@ pub struct Style {
     /// Paints the strip's icons in one colour.
     pub icon_tint: Option<Rgba>,
     pub strip: WsStrip,
+    /// How long a strip takes to open or close.
+    pub strip_dur: Duration,
     pub max_icons: usize,
     /// Icon names by lowercase class, asked before the icon theme.
     pub class_icons: BTreeMap<String, String>,
@@ -384,6 +387,8 @@ impl Workspaces {
             WsStrip::Pressed => self.touched.is_some_and(|(t, _)| t == id),
             WsStrip::All => true,
             WsStrip::None => false,
+            // Opened by a tap on the active capsule (not wired yet).
+            WsStrip::Tap => false,
         }
     }
 
@@ -399,7 +404,8 @@ impl Workspaces {
                 let strip = self.strip_width(e.windows.len(), shown, font);
                 let strip = strip + strip.min(STRIP_GAP);
                 match s.strip {
-                    WsStrip::Active if view.active == Some(e.id) => w += strip,
+                    // Tap: room kept for the active one's, open or not.
+                    WsStrip::Active | WsStrip::Tap if view.active == Some(e.id) => w += strip,
                     WsStrip::All => w += strip,
                     // One at a time, under the finger: room for the widest.
                     WsStrip::Pressed => widest = widest.max(strip),
@@ -476,7 +482,7 @@ impl Workspaces {
                     dying: true,
                     neighbor,
                 });
-                c.strip.retarget(t, 0.0, STRIP);
+                c.strip.retarget(t, 0.0, self.style.strip_dur);
             } else {
                 self.caps.remove(i);
             }
@@ -523,12 +529,13 @@ impl Workspaces {
             let open = self.strip_width(windows.len(), shown, font);
             let act = if self.is_active(id) { 1.0 } else { 0.0 };
             let strip = if self.strip_wanted(id) { open } else { 0.0 };
+            let dur = self.style.strip_dur;
             let c = &mut self.caps[i];
             c.windows = windows;
             c.strip_open = open;
             if animate {
                 c.act.retarget(t, act, STATE);
-                c.strip.retarget(t, strip, STRIP);
+                c.strip.retarget(t, strip, dur);
             } else {
                 c.act = Tween::still(act);
                 c.strip = Tween::still(strip);
@@ -552,10 +559,11 @@ impl Workspaces {
             } else {
                 0.0
             };
+            let dur = self.style.strip_dur;
             let c = &mut self.caps[i];
             c.press.retarget(t, if pressed { PRESS_SCALE } else { 1.0 }, STATE);
             if !c.spawn.is_some_and(|s| s.dying) {
-                c.strip.retarget(t, strip, STRIP);
+                c.strip.retarget(t, strip, dur);
             }
         }
         true
@@ -1045,6 +1053,7 @@ pub mod tests {
             bar_border: None,
             icon_tint: None,
             strip,
+            strip_dur: STRIP,
             max_icons: 6,
             class_icons: BTreeMap::new(),
         }

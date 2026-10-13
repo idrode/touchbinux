@@ -65,6 +65,9 @@ const DEFAULT_APP_KEYS_TRANSITION_MS: u64 = 150;
 /// workspaces' app buttons: unfolding, and folding by themselves.
 const DEFAULT_APP_TRANSITION_MS: u64 = 150;
 pub const DEFAULT_APP_COLLAPSE_MS: u64 = 5000;
+/// workspaces with strip = "tap": the strip opening and closing.
+const DEFAULT_STRIP_TRANSITION_MS: u64 = 150;
+const MAX_STRIP_TRANSITION_MS: u64 = 600;
 const MAX_APP_KEYS_TRANSITION_MS: u64 = 1000;
 /// `thumb_size` of a gif_picker, px (it is also capped to the row's height).
 const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
@@ -450,6 +453,9 @@ pub enum WsStrip {
     Pressed,
     All,
     None,
+    /// The active workspace's, opened by tapping its capsule and folded after
+    /// `collapse_after_ms` without a touch (room for it is kept, as with Active).
+    Tap,
 }
 
 /// status: what it does with nothing to show.
@@ -625,6 +631,9 @@ pub struct ItemConfig {
     /// workspaces: how long those buttons take to unfold and fold, ms.
     #[serde(default)]
     pub app_transition_ms: Option<u64>,
+    /// workspaces with strip = "tap": how long the strip takes to open and close, ms.
+    #[serde(default)]
+    pub strip_transition_ms: Option<u64>,
     /// button: a row of children pulled out to its right by dragging the button
     /// rightwards (a tap still runs its `action`).
     #[serde(default)]
@@ -1100,6 +1109,7 @@ impl ItemConfig {
             transition_ms: None,
             app_actions: None,
             app_transition_ms: None,
+            strip_transition_ms: None,
             drag_children: None,
             drag_px: None,
             close_on_tap: None,
@@ -1186,12 +1196,25 @@ impl ItemConfig {
         Duration::from_millis(self.app_transition_ms.unwrap_or(DEFAULT_APP_TRANSITION_MS))
     }
 
+    /// workspaces with strip = "tap": how long its strip takes to open and close.
+    pub fn strip_transition(&self) -> Duration {
+        Duration::from_millis(self.strip_transition_ms.unwrap_or(DEFAULT_STRIP_TRANSITION_MS))
+    }
+
     /// workspaces: its app_actions and their buttons.
     fn validate_app_actions(&self, what: &str) -> Result<()> {
+        let tap = self.strip == Some(WsStrip::Tap);
+        if !tap && self.strip_transition_ms.is_some() {
+            bail!("{what}: `strip_transition_ms` only applies with strip = \"tap\"");
+        }
+        if self.strip_transition_ms.is_some_and(|t| t > MAX_STRIP_TRANSITION_MS) {
+            bail!("{what}: strip_transition_ms must be 0..={MAX_STRIP_TRANSITION_MS}");
+        }
         let Some(actions) = &self.app_actions else {
             for (field, set) in [
                 ("close_on_tap", self.close_on_tap.is_some()),
-                ("collapse_after_ms", self.collapse_after_ms.is_some()),
+                // With strip = "tap" it also folds the strip.
+                ("collapse_after_ms", self.collapse_after_ms.is_some() && !tap),
                 ("app_transition_ms", self.app_transition_ms.is_some()),
             ] {
                 if set {
@@ -1470,6 +1493,7 @@ impl ItemConfig {
                 "collapse_after_ms",
                 "close_on_tap",
                 "app_transition_ms",
+                "strip_transition_ms",
             ],
             // No action: it only shows state, it never starts anything.
             ItemKind::Status => &[
@@ -1503,6 +1527,7 @@ impl ItemConfig {
             ("sets", self.sets.is_some()),
             ("app_actions", self.app_actions.is_some()),
             ("app_transition_ms", self.app_transition_ms.is_some()),
+            ("strip_transition_ms", self.strip_transition_ms.is_some()),
             ("default_set", self.default_set.is_some()),
             ("transition_ms", self.transition_ms.is_some()),
             ("key", self.key.is_some()),
@@ -4817,6 +4842,44 @@ mod tests {
              [[layers.items.app_actions]]\nclass=['zen']\n[[layers.items.app_actions.children]]\nlabel='y'\naction={type='socket'}"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn workspaces_strip_tap() {
+        let ws = |body: &str| {
+            parse(&format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='workspaces'\n{body}"))
+        };
+        let c = ws("strip = 'tap'").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.strip, Some(WsStrip::Tap));
+        assert_eq!(item.strip_transition(), Duration::from_millis(150), "default");
+        assert_eq!(item.collapse_after(), None);
+        // Its own options; collapse_after_ms folds the strip, app_actions or not.
+        let c = ws("strip = 'tap'\nstrip_transition_ms = 600\ncollapse_after_ms = 3000").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.strip_transition(), Duration::from_millis(600));
+        assert_eq!(item.collapse_after(), Some(Duration::from_millis(3000)));
+        assert!(ws("strip = 'tap'\nstrip_transition_ms = 0").is_ok());
+        // With app_actions, every option of theirs.
+        let c = ws_apps("strip = 'tap'\ncollapse_after_ms = 4000\nclose_on_tap = true\napp_transition_ms = 200").unwrap();
+        assert_eq!(c.layers[0].items[0].strip, Some(WsStrip::Tap));
+        for (body, want) in [
+            ("strip = 'tap'\nstrip_transition_ms = 601", "strip_transition_ms must be 0..=600"),
+            ("strip = 'tap'\nstrip_transition_ms = -1", "invalid value"),
+            ("strip_transition_ms = 100", "`strip_transition_ms` only applies with strip = \"tap\""),
+            ("strip = 'active'\nstrip_transition_ms = 100", "only applies with strip = \"tap\""),
+            ("strip = 'tap'\ncollapse_after_ms = 100", "collapse_after_ms must be"),
+            ("strip = 'tap'\nclose_on_tap = true", "`close_on_tap` only applies with `app_actions`"),
+            ("strip = 'tap'\napp_transition_ms = 100", "`app_transition_ms` only applies with `app_actions`"),
+            ("strip = 'tapped'", "unknown variant `tapped`"),
+            ("collapse_after_ms = 3000", "`collapse_after_ms` only applies with `app_actions`"),
+        ] {
+            let err = format!("{:#}", ws(body).expect_err(body));
+            assert!(err.contains(want), "{body}: {err}");
+        }
+        // Elsewhere it is an unknown key.
+        let err = format!("{:#}", one_item("", "type='clock'\nstrip_transition_ms=100").unwrap_err());
+        assert!(err.contains("strip_transition_ms"), "{err}");
     }
 }
 

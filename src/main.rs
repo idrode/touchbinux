@@ -137,13 +137,14 @@ const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] \
-                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>] [--level 0|1|2]]\n\
+                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>] [--level 0|1|2] [--brightness 0..100]]\n\
                      --status (previews only): rec | rec_done | shot | rec_shot\n\
                      --layer (previews only): the bar scene's layer to draw, e.g. fn\n\
                      --focus-class (previews only): app_keys show this window class's set\n\
                      --expand (previews only): workspaces with this class's app buttons out\n\
                      --level (previews only): workspaces at that level on a made-up Hyprland: 0 at rest, \
-                     1 the active strip out (strip = \"tap\"), 2 also --expand's app buttons";
+                     1 the active strip out (strip = \"tap\"), 2 also --expand's app buttons\n\
+                     --brightness (previews only): the brightness level shown, instead of the backlight's";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -188,6 +189,8 @@ struct Args {
     /// `--png` only: workspaces drawn at this level (0..=2) on a made-up
     /// Hyprland whose active workspace has a few windows.
     level: Option<u8>,
+    /// `--png` only: the brightness shown (0..=100), instead of the backlight's.
+    brightness: Option<u8>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -201,6 +204,7 @@ fn parse_args() -> Result<Args> {
         focus_class: None,
         expand: None,
         level: None,
+        brightness: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -221,6 +225,13 @@ fn parse_args() -> Result<Args> {
             "--layer" => args.layer = Some(it.next().ok_or(anyhow!(USAGE))?),
             "--focus-class" => args.focus_class = Some(it.next().ok_or(anyhow!(USAGE))?),
             "--expand" => args.expand = Some(it.next().ok_or(anyhow!(USAGE))?),
+            "--brightness" => {
+                let n = it.next().ok_or(anyhow!(USAGE))?;
+                match n.parse::<u8>() {
+                    Ok(v @ 0..=100) => args.brightness = Some(v),
+                    _ => return Err(anyhow!("--brightness must be 0 to 100, not {n:?}\n{USAGE}")),
+                }
+            }
             "--level" => {
                 let n = it.next().ok_or(anyhow!(USAGE))?;
                 match n.parse::<u8>() {
@@ -245,6 +256,9 @@ fn parse_args() -> Result<Args> {
     }
     if args.level.is_some() && (args.png.is_none() || args.scene != "bar") {
         return Err(anyhow!("--level only goes with bar --png\n{USAGE}"));
+    }
+    if args.brightness.is_some() && args.png.is_none() {
+        return Err(anyhow!("--brightness only goes with --png\n{USAGE}"));
     }
     if args.level == Some(2) && args.expand.is_none() {
         return Err(anyhow!("--level 2 needs --expand <class>: whose app buttons to draw\n{USAGE}"));
@@ -1932,7 +1946,8 @@ fn main() -> Result<()> {
         }
         let (w, h) = PREVIEW_SIZE;
         let mut backlight = Backlight::find().ok();
-        let brightness = backlight.as_mut().and_then(|b| b.read_percent().ok());
+        let read = || backlight.as_mut().and_then(|b| b.read_percent().ok());
+        let brightness = args.brightness.or_else(read);
         let parts = AppParts {
             args,
             config_path,
@@ -2904,6 +2919,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3019,6 +3035,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3272,6 +3289,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3367,6 +3385,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3636,6 +3655,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3820,7 +3840,7 @@ mod tests {
         );
         fs::write(&path, toml).unwrap();
         let parts = AppParts {
-            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None, level: None },
+            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None, level: None, brightness: None },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
             font: Font::find(FONT_CANDIDATES),
@@ -3881,6 +3901,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -4002,6 +4023,7 @@ mod tests {
                 focus_class: None,
                 expand: None,
                 level: None,
+                brightness: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),

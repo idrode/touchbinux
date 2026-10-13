@@ -5,7 +5,8 @@
 //!
 //! The circle's inside fills in proportion to the level by area, in one of three
 //! ways (`CircleFill`): a disc from the centre, liquid from the bottom, a sector
-//! from the top. The ring is a real ring (one polygon with a hole), so a
+//! from the top. A fourth, the moon, shows its phases instead: lit from the right,
+//! new at 0, first quarter at 50, full at 100, over a faint unlit disc. The ring is a real ring (one polygon with a hole), so a
 //! translucent ring_color shows nothing under it, and the fill keeps `ring_gap`
 //! px clear of it.
 
@@ -38,6 +39,8 @@ pub struct CircleLook {
     pub fill_color: Rgba,
     /// What shows at level 0, as a fraction of the inside (0: nothing).
     pub min_fill: f32,
+    /// The moon's unlit disc (transparent: none). Unused by the other fills.
+    pub dark_color: Rgba,
 }
 
 /// How a level item draws its icon.
@@ -81,6 +84,9 @@ impl CircleLook {
         }
         let ri = self.inner_radius();
         let f = fraction(level, self.min_fill);
+        if self.fill == CircleFill::Moon && ri > 0.0 && self.dark_color.3 > 0 {
+            canvas.fill_circle(cx, cy, ri, self.dark_color);
+        }
         if f <= 0.0 || ri <= 0.0 {
             return;
         }
@@ -89,6 +95,7 @@ impl CircleLook {
             _ if f >= 1.0 => canvas.fill_circle(cx, cy, ri, self.fill_color),
             CircleFill::Level => canvas.fill_polygon(&liquid(cx, cy, ri, f), self.fill_color),
             CircleFill::Sweep => canvas.fill_polygon(&sector(cx, cy, ri, f), self.fill_color),
+            CircleFill::Moon => canvas.fill_polygon(&moon(cx, cy, ri, f), self.fill_color),
         }
     }
 }
@@ -156,6 +163,28 @@ fn sector(cx: f32, cy: f32, r: f32, f: f32) -> Vec<(f32, f32)> {
     pts
 }
 
+/// The lit part of a moon of radius `r` at phase `f` (0 new, 0.5 first quarter,
+/// 1 full), as one closed outline: the right half circle from top to bottom, then
+/// the terminator back up, half an ellipse with semi-axes `r cos(pi f)` across
+/// (bulging right while a crescent, left once gibbous) and `r` down. Lit area:
+/// (1 - cos(pi f)) / 2 of the disc.
+pub fn moon(cx: f32, cy: f32, r: f32, f: f32) -> Vec<(f32, f32)> {
+    let rx = r * (std::f32::consts::PI * f.clamp(0.0, 1.0)).cos();
+    // At least 32 points a half, about one a px of arc on bigger ones.
+    let n = ((r * std::f32::consts::PI).ceil() as usize).max(32);
+    let half = |rx: f32, a0: f32, a1: f32, skip_ends: bool| {
+        let range = if skip_ends { 1..n } else { 0..n + 1 };
+        range.map(move |i| {
+            let a = a0 + (a1 - a0) * i as f32 / n as f32;
+            (cx + rx * a.cos(), cy + r * a.sin())
+        })
+    };
+    // Top (-pi/2) through the right (0) to the bottom (pi/2); then back.
+    let mut pts: Vec<_> = half(r, -FRAC_PI_2, FRAC_PI_2, false).collect();
+    pts.extend(half(rx, FRAC_PI_2, -FRAC_PI_2, true));
+    pts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +202,7 @@ mod tests {
             ring_color: MINT,
             fill_color: WHITE,
             min_fill: 0.0,
+            dark_color: Rgba(0, 0, 0, 0),
         }
     }
 
@@ -306,6 +336,65 @@ mod tests {
         };
         assert!(partial(19.0, 20.5), "the ring's outer edge");
         assert!(partial(14.0, 15.5), "the fill's edge");
+    }
+
+    /// A polygon's area (shoelace), signed: positive clockwise on screen.
+    fn area(pts: &[(f32, f32)]) -> f32 {
+        let n = pts.len();
+        (0..n).map(|i| {
+            let ((x0, y0), (x1, y1)) = (pts[i], pts[(i + 1) % n]);
+            x0 * y1 - x1 * y0
+        })
+        .sum::<f32>()
+            / 2.0
+    }
+
+    #[test]
+    fn the_moons_lit_area_grows_from_new_to_full() {
+        let (r, disc) = (15.0, PI * 15.0 * 15.0);
+        let lit = |f: f32| area(&moon(30.0, 30.0, r, f)) / disc;
+        assert!(lit(0.0).abs() < 1e-3, "new: {}", lit(0.0));
+        assert!((lit(0.5) - 0.5).abs() < 2e-3, "first quarter: {}", lit(0.5));
+        assert!((lit(1.0) - 1.0).abs() < 2e-3, "full: {}", lit(1.0));
+        let mut last = lit(0.0);
+        for i in 1..=1000 {
+            let f = i as f32 / 1000.0;
+            let a = lit(f);
+            assert!(a >= last - 1e-5, "{f}: {a} < {last}");
+            assert!((a - (1.0 - (PI * f).cos()) / 2.0).abs() < 3e-3, "{f}: {a}");
+            last = a;
+        }
+        // Smooth even when small: at least 32 points a half.
+        assert!(moon(30.0, 30.0, 4.0, 0.3).len() >= 64);
+    }
+
+    #[test]
+    fn the_moon_is_lit_from_the_right() {
+        let l = look(CircleFill::Moon);
+        // Drawn: the same areas as the outline's, antialiased.
+        for (level, want) in [(0.0, 0.0), (50.0, 0.5), (100.0, 1.0), (25.0, 0.1464)] {
+            let got = filled(&draw(&l, level), 15.0);
+            assert!((got - want).abs() < 0.02, "{level}: {got}");
+        }
+        let at = |level, x, y| px(&draw(&l, level), x, y)[0];
+        // Crescent: the right edge, not the middle nor the left.
+        assert_eq!(at(20.0, 43, 30), 0xff);
+        assert_eq!((at(20.0, 30, 30), at(20.0, 17, 30)), (0, 0));
+        // First quarter: the straight terminator through the centre.
+        assert_eq!((at(50.0, 31, 30), at(50.0, 28, 30)), (0xff, 0));
+        // Gibbous: past the centre, the left edge still dark.
+        assert_eq!((at(80.0, 25, 30), at(80.0, 16, 30)), (0xff, 0));
+        // The unlit disc, faint, under it; none outside the inside.
+        let dark = CircleLook { dark_color: WHITE.with_alpha(0x26), ..l };
+        let c = draw(&dark, 20.0);
+        assert_eq!(px(&c, 43, 30)[0], 0xff);
+        let p = px(&c, 20, 30)[0];
+        assert!(p > 0x20 && p < 0x2c, "{p:#x}");
+        assert_eq!(px(&c, 30, 30 - 16)[..3], [0, 0, 0], "the gap");
+        assert!(px(&draw(&dark, 0.0), 30, 30)[0] > 0x20, "new: only the dark disc");
+        // min_fill starts it past new.
+        let m = CircleLook { min_fill: 0.2, ..l };
+        assert!(filled(&draw(&m, 0.0), 15.0) > 0.05);
     }
 
     #[test]

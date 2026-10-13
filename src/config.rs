@@ -472,6 +472,8 @@ pub enum CircleFill {
     Level,
     /// A sector turning clockwise from the top.
     Sweep,
+    /// Phases of the moon: new at 0, first quarter at half, full at the top.
+    Moon,
 }
 
 /// workspaces: which capsules show their strip of window icons.
@@ -744,6 +746,9 @@ pub struct ItemConfig {
     pub fill_color: Option<Color>,
     #[serde(default)]
     pub min_fill: Option<f32>,
+    /// circle_fill = "moon": the disc's unlit part (default: fill_color, faint).
+    #[serde(default)]
+    pub moon_dark_color: Option<Color>,
     /// workspaces: icon (theme name or absolute path) by window class, before the
     /// icon theme is asked; classes compared in lowercase.
     #[serde(default)]
@@ -1170,6 +1175,7 @@ impl ItemConfig {
             ring_color: None,
             fill_color: None,
             min_fill: None,
+            moon_dark_color: None,
             inactive_color: None,
             style: None,
             dot_size: None,
@@ -1475,6 +1481,7 @@ impl ItemConfig {
                 "ring_color",
                 "fill_color",
                 "min_fill",
+                "moon_dark_color",
             ],
             ItemKind::Gif => &["id", "path", "play", "action"],
             ItemKind::Text => &["id", "key", "action", "text_color"],
@@ -1626,6 +1633,7 @@ impl ItemConfig {
             ("ring_color", self.ring_color.is_some()),
             ("fill_color", self.fill_color.is_some()),
             ("min_fill", self.min_fill.is_some()),
+            ("moon_dark_color", self.moon_dark_color.is_some()),
             ("class_icons", self.class_icons.is_some()),
             ("inactive_color", self.inactive_color.is_some()),
             ("style", self.style.is_some()),
@@ -1880,6 +1888,7 @@ impl ItemConfig {
                 ("ring_color", self.ring_color.is_some()),
                 ("fill_color", self.fill_color.is_some()),
                 ("min_fill", self.min_fill.is_some()),
+                ("moon_dark_color", self.moon_dark_color.is_some()),
             ] {
                 if set {
                     bail!("{what}: `{field}` only applies with icon_style = \"circle\"");
@@ -1898,6 +1907,9 @@ impl ItemConfig {
         }
         if self.min_fill.is_some_and(|f| !MIN_FILL.contains(&f)) {
             bail!("{what}: min_fill must be in {MIN_FILL:?} (a fraction of the inside)");
+        }
+        if self.moon_dark_color.is_some() && self.circle_fill != Some(CircleFill::Moon) {
+            bail!("{what}: `moon_dark_color` only applies with circle_fill = \"moon\"");
         }
         let d = self.icon_size.unwrap_or(DEFAULT_CIRCLE_SIZE);
         let (w, g) = (self.ring_width.unwrap_or(DEFAULT_RING_WIDTH), self.ring_gap.unwrap_or(DEFAULT_RING_GAP));
@@ -5024,10 +5036,14 @@ mod tests {
         assert_eq!((item.icon_style, item.circle_fill), (Some(IconStyle::Circle), Some(CircleFill::Sweep)));
         assert_eq!((item.icon_size, item.ring_width, item.ring_gap, item.min_fill), (Some(30.0), Some(2.5), Some(1.0), Some(0.1)));
         assert_eq!(item.ring_color.map(|c| c.0), Some(Rgba(0, 0xff, 0xb7, 0x80)));
-        for fill in ["radial", "level", "sweep"] {
+        for fill in ["radial", "level", "sweep", "moon"] {
             assert!(b(&format!("icon_style = 'circle'\ncircle_fill = '{fill}'")).is_ok(), "{fill}");
         }
         // Edges of the ranges.
+        let c = b("icon_style = 'circle'\ncircle_fill = 'moon'\nmoon_dark_color = '#00000000'").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.circle_fill, Some(CircleFill::Moon));
+        assert_eq!(item.moon_dark_color.map(|c| c.0), Some(Rgba(0, 0, 0, 0)));
         for ok in ["ring_width = 0", "ring_width = 6\nicon_size = 40", "ring_gap = 0", "min_fill = 0.3", "min_fill = 0.0", "icon_size = 60"] {
             assert!(b(&format!("icon_style = 'circle'\n{ok}")).is_ok(), "{ok}");
         }
@@ -5047,6 +5063,10 @@ mod tests {
             ("icon_style = 'sun'\nring_width = 2", "`ring_width` only applies with icon_style = \"circle\""),
             ("icon_size = 28", "`icon_size` only applies with icon_style = \"circle\""),
             ("min_fill = 0.1", "`min_fill` only applies"),
+            ("moon_dark_color = '#101010'", "`moon_dark_color` only applies with icon_style = \"circle\""),
+            ("icon_style = 'circle'\nmoon_dark_color = '#101010'", "`moon_dark_color` only applies with circle_fill = \"moon\""),
+            ("icon_style = 'circle'\ncircle_fill = 'level'\nmoon_dark_color = '#101010'", "only applies with circle_fill = \"moon\""),
+            ("icon_style = 'circle'\ncircle_fill = 'moon'\nmoon_dark_color = 'dark'", "moon_dark_color"),
         ] {
             let err = format!("{:#}", b(body).expect_err(body));
             assert!(err.contains(want), "{body}: {err}");

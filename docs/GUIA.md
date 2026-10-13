@@ -994,18 +994,28 @@ del slider). El sitio del icono y el resto del elemento no cambian.
 | Campo | Por defecto | Rango | Qué hace |
 |---|---|---|---|
 | `icon_style` | `"sun"` | `"sun"`, `"circle"` | sol o círculo. Las demás claves de esta tabla, solo con `"circle"` |
-| `circle_fill` | `"radial"` | `"radial"`, `"level"`, `"sweep"` | cómo se rellena: un disco que crece desde el centro; un líquido que sube desde abajo con el borde de arriba recto; un sector que gira como un reloj desde arriba |
+| `circle_fill` | `"radial"` | `"radial"`, `"level"`, `"sweep"`, `"moon"` | cómo se rellena: un disco que crece desde el centro; un líquido que sube desde abajo con el borde de arriba recto; un sector que gira como un reloj desde arriba; las fases de la luna (ver abajo) |
 | `icon_size` | `28` | 8-60 px | diámetro exterior. No más que el sitio del icono (el alto de la fila menos 16 px; con la fila normal, 42): si no, error al cargar |
 | `ring_width` | `2.5` | 0-6 px | grosor del anillo (`0`: sin anillo) |
 | `ring_gap` | `2` | 0-6 px | hueco entre el anillo y el relleno |
 | `ring_color` | `color` | | color del anillo (con alfa: es un anillo de verdad, no se ve nada debajo) |
 | `fill_color` | `color` | | color del relleno |
 | `min_fill` | `0.0` | 0.0-0.3 | parte del interior que se ve al 0 % (para que no desaparezca); de ahí sube hasta lleno al 100 % |
+| `moon_dark_color` | `fill_color` tenue (alfa ~15 %) | | solo con `circle_fill = "moon"`: el disco de la parte no iluminada; `"#00000000"` lo quita. En otro modo, error |
 
 El relleno es **proporcional al área**: al 50 % está lleno medio interior en los tres
 modos (en `radial` el radio crece algo más deprisa al principio; en `level` el
 líquido llega justo a la mitad). Tiene que quedar sitio dentro: diámetro / 2 −
 `ring_width` − `ring_gap` de al menos 2 px (si no, error).
+
+**`circle_fill = "moon"`.** Las fases de la luna, iluminada desde la derecha: al
+0 % luna nueva (solo el anillo y el disco oscuro), creciente hasta el 50 % (cuarto
+creciente: la mitad derecha, con el terminador recto), gibosa después y llena al
+100 %. El terminador es media elipse de ancho `r · cos(π · nivel)`; aquí el área
+iluminada no es proporcional al nivel (es (1 − cos(π · nivel)) / 2: cambia más
+despacio en los extremos). La parte no iluminada es un disco en
+`moon_dark_color`. `min_fill` también vale (por defecto 0, para ver la luna nueva).
+La animación es la misma que en los otros modos.
 
 **Animación.** Mientras arrastras el slider, el relleno sigue al dedo sin retraso.
 Si el brillo cambia desde fuera (teclas, otras apps), va hacia el valor nuevo en
@@ -1016,7 +1026,7 @@ Si el brillo cambia desde fuera (teclas, otras apps), va hacia el valor nuevo en
 [[layers.items]]
 type = "brightness"
 icon_style = "circle"
-circle_fill = "level"     # o "radial", "sweep"
+circle_fill = "level"     # o "radial", "sweep", "moon"
 icon_size = 28
 ring_width = 2.5
 ring_gap = 2
@@ -2516,7 +2526,7 @@ for b in 0 25 50 75 100; do
 done
 ```
 
-`cargo test dump_circle_levels_to_png` dibuja los tres rellenos (y `min_fill`, y un
+`cargo test dump_circle_levels_to_png` dibuja los cuatro rellenos (y `min_fill`, y un
 anillo translúcido) a 0-100 %, plegados y desplegados; con
 `TOUCHBINUX_ICON_DUMP=/tmp/iconos` deja los PNG ahí para mirarlos.
 

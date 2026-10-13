@@ -1746,14 +1746,17 @@ fn circle_look(item: &ItemConfig, color: Rgba, h: f32, layer: &str, id: &str) ->
              which is {side} px in this row"
         );
     }
+    let fill_color = item.fill_color.map_or(color, |c| c.0);
     Ok(CircleLook {
         fill: item.circle_fill.unwrap_or_default(),
         diameter,
         ring_width: item.ring_width.unwrap_or(DEFAULT_RING_WIDTH),
         ring_gap: item.ring_gap.unwrap_or(DEFAULT_RING_GAP),
         ring_color: item.ring_color.map_or(color, |c| c.0),
-        fill_color: item.fill_color.map_or(color, |c| c.0),
+        fill_color,
         min_fill: item.min_fill.unwrap_or(0.0),
+        // Faint: about 15 % of the fill's own alpha.
+        dark_color: item.moon_dark_color.map_or(fill_color.with_alpha((fill_color.3 as u32 * 0x26 / 0xff) as u8), |c| c.0),
     })
 }
 
@@ -6365,6 +6368,7 @@ mod tests {
                 assert_eq!((l.ring_color, l.fill_color), (Rgba(0x12, 0x34, 0x56, 0xff), Rgba(0x12, 0x34, 0x56, 0xff)));
                 assert_eq!((l.diameter, l.ring_width, l.ring_gap, l.min_fill), (28.0, 2.5, 2.0, 0.0));
                 assert_eq!(l.fill, crate::config::CircleFill::Radial);
+                assert_eq!(l.dark_color, Rgba(0x12, 0x34, 0x56, 0x26), "the moon's unlit disc");
             }
             other => panic!("{other:?}"),
         }
@@ -6393,6 +6397,7 @@ mod tests {
             ("sweep", "circle_fill = 'sweep'"),
             ("radial-min", "circle_fill = 'radial'\nmin_fill = 0.15"),
             ("level-alpha", "circle_fill = 'level'\nring_color = '#00ffb760'"),
+            ("moon", "circle_fill = 'moon'"),
         ] {
             for level in [0u8, 12, 25, 50, 75, 100] {
                 let mut s = menu_scene(&font, &bright_layer(&format!("anim_ms = 0\nicon_style = 'circle'\n{extra}")));
@@ -6424,7 +6429,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(n, 5 * 6 * 2);
+        assert_eq!(n, 6 * 6 * 2);
     }
 }
 

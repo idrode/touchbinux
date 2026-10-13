@@ -1003,7 +1003,7 @@ del slider). El sitio del icono y el resto del elemento no cambian.
 | `min_fill` | `0.0` | 0.0-0.3 | parte del interior que se ve al 0 % (para que no desaparezca); de ahí sube hasta lleno al 100 % |
 | `moon_dark_color` | `fill_color` tenue (alfa ~15 %) | | solo con `circle_fill = "moon"`: el disco de la parte no iluminada; `"#00000000"` lo quita. En otro modo, error |
 
-El relleno es **proporcional al área**: al 50 % está lleno medio interior en los tres
+El relleno es **proporcional al área**: al 50 % está lleno medio interior en los cuatro
 modos (en `radial` el radio crece algo más deprisa al principio; en `level` el
 líquido llega justo a la mitad). Tiene que quedar sitio dentro: diámetro / 2 −
 `ring_width` − `ring_gap` de al menos 2 px (si no, error).
@@ -1011,9 +1011,9 @@ líquido llega justo a la mitad). Tiene que quedar sitio dentro: diámetro / 2 �
 **`circle_fill = "moon"`.** Las fases de la luna, iluminada desde la derecha: al
 0 % luna nueva (solo el anillo y el disco oscuro), creciente hasta el 50 % (cuarto
 creciente: la mitad derecha, con el terminador recto), gibosa después y llena al
-100 %. El terminador es media elipse de ancho `r · cos(π · nivel)`; aquí el área
-iluminada no es proporcional al nivel (es (1 − cos(π · nivel)) / 2: cambia más
-despacio en los extremos). La parte no iluminada es un disco en
+100 %. El área iluminada también es proporcional al nivel (al 15 %, el 15 % del
+disco): la fase se calcula como f = acos(1 − 2 · nivel) / π y el terminador es
+media elipse de ancho `r · cos(π · f)`. La parte no iluminada es un disco en
 `moon_dark_color`. `min_fill` también vale (por defecto 0, para ver la luna nueva).
 La animación es la misma que en los otros modos.
 

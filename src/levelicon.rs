@@ -5,8 +5,8 @@
 //!
 //! The circle's inside fills in proportion to the level by area, in one of three
 //! ways (`CircleFill`): a disc from the centre, liquid from the bottom, a sector
-//! from the top. A fourth, the moon, shows its phases instead: lit from the right,
-//! new at 0, first quarter at 50, full at 100, over a faint unlit disc. The ring is a real ring (one polygon with a hole), so a
+//! from the top. A fourth, the moon, fills by area too, as its phases: lit from
+//! the right, new at 0, first quarter at 50, full at 100, over a faint unlit disc. The ring is a real ring (one polygon with a hole), so a
 //! translucent ring_color shows nothing under it, and the fill keeps `ring_gap`
 //! px clear of it.
 
@@ -95,7 +95,7 @@ impl CircleLook {
             _ if f >= 1.0 => canvas.fill_circle(cx, cy, ri, self.fill_color),
             CircleFill::Level => canvas.fill_polygon(&liquid(cx, cy, ri, f), self.fill_color),
             CircleFill::Sweep => canvas.fill_polygon(&sector(cx, cy, ri, f), self.fill_color),
-            CircleFill::Moon => canvas.fill_polygon(&moon(cx, cy, ri, f), self.fill_color),
+            CircleFill::Moon => canvas.fill_polygon(&moon(cx, cy, ri, moon_phase(f)), self.fill_color),
         }
     }
 }
@@ -161,6 +161,13 @@ fn sector(cx: f32, cy: f32, r: f32, f: f32) -> Vec<(f32, f32)> {
     let mut pts = vec![(cx, cy)];
     pts.extend(arc(cx, cy, r, -FRAC_PI_2, -FRAC_PI_2 + TAU * f));
     pts
+}
+
+/// The phase whose lit area is `lit` (0..=1, clamped) of the disc: the inverse
+/// of `moon`'s (1 - cos(pi f)) / 2, so the moon fills in proportion to the level
+/// like the other fills.
+pub fn moon_phase(lit: f32) -> f32 {
+    (1.0 - 2.0 * lit.clamp(0.0, 1.0)).clamp(-1.0, 1.0).acos() / std::f32::consts::PI
 }
 
 /// The lit part of a moon of radius `r` at phase `f` (0 new, 0.5 first quarter,
@@ -237,7 +244,7 @@ mod tests {
 
     #[test]
     fn each_fill_covers_its_level_by_area() {
-        for fill in [CircleFill::Radial, CircleFill::Level, CircleFill::Sweep] {
+        for fill in [CircleFill::Radial, CircleFill::Level, CircleFill::Sweep, CircleFill::Moon] {
             let l = look(fill);
             let ri = l.inner_radius();
             assert_eq!(ri, 15.0);
@@ -254,7 +261,7 @@ mod tests {
         // Each tenth of a percent covers a little more, never less, and never more
         // than a quarter-pixel row at once (the antialiasing's step: tiny-skia
         // samples 4 sub-rows a pixel, so the liquid's flat top moves by those).
-        for fill in [CircleFill::Radial, CircleFill::Level, CircleFill::Sweep] {
+        for fill in [CircleFill::Radial, CircleFill::Level, CircleFill::Sweep, CircleFill::Moon] {
             let l = look(fill);
             let mut last = -1.0;
             for i in 0..=200 {
@@ -350,18 +357,21 @@ mod tests {
     }
 
     #[test]
-    fn the_moons_lit_area_grows_from_new_to_full() {
+    fn the_moons_lit_area_is_the_level() {
         let (r, disc) = (15.0, PI * 15.0 * 15.0);
-        let lit = |f: f32| area(&moon(30.0, 30.0, r, f)) / disc;
+        // The outline at level `l`: its phase, then the geometry.
+        let lit = |l: f32| area(&moon(30.0, 30.0, r, moon_phase(l))) / disc;
         assert!(lit(0.0).abs() < 1e-3, "new: {}", lit(0.0));
         assert!((lit(0.5) - 0.5).abs() < 2e-3, "first quarter: {}", lit(0.5));
         assert!((lit(1.0) - 1.0).abs() < 2e-3, "full: {}", lit(1.0));
+        assert_eq!((moon_phase(0.0), moon_phase(0.5), moon_phase(1.0)), (0.0, 0.5, 1.0));
+        assert_eq!((moon_phase(-0.5), moon_phase(1.5)), (0.0, 1.0), "clamped");
         let mut last = lit(0.0);
         for i in 1..=1000 {
-            let f = i as f32 / 1000.0;
-            let a = lit(f);
-            assert!(a >= last - 1e-5, "{f}: {a} < {last}");
-            assert!((a - (1.0 - (PI * f).cos()) / 2.0).abs() < 3e-3, "{f}: {a}");
+            let l = i as f32 / 1000.0;
+            let a = lit(l);
+            assert!(a >= last - 1e-5, "{l}: {a} < {last}");
+            assert!((a - l).abs() < 3e-3, "{l}: {a}");
             last = a;
         }
         // Smooth even when small: at least 32 points a half.
@@ -372,7 +382,7 @@ mod tests {
     fn the_moon_is_lit_from_the_right() {
         let l = look(CircleFill::Moon);
         // Drawn: the same areas as the outline's, antialiased.
-        for (level, want) in [(0.0, 0.0), (50.0, 0.5), (100.0, 1.0), (25.0, 0.1464)] {
+        for (level, want) in [(0.0, 0.0), (50.0, 0.5), (100.0, 1.0), (25.0, 0.25), (85.0, 0.85)] {
             let got = filled(&draw(&l, level), 15.0);
             assert!((got - want).abs() < 0.02, "{level}: {got}");
         }

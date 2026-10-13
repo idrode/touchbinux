@@ -82,6 +82,7 @@ impl IdleMachine {
         self.desktop = on.then_some([false; 3]);
     }
 
+    #[cfg(test)]
     pub fn follows_desktop(&self) -> bool {
         self.desktop.is_some()
     }

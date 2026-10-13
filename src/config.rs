@@ -259,6 +259,11 @@ impl IdleConfig {
         self.wake_on.contains(&w)
     }
 
+    /// Whether the desktop's activity counts too (if the compositor can say).
+    pub fn uses_desktop(&self) -> bool {
+        self.activity_from.contains(&ActivityFrom::Desktop)
+    }
+
     fn validate(&self, layers: &[LayerConfig], fn_layer: Option<&str>) -> Result<()> {
         for (key, v) in [
             ("dim_after_s", self.dim_after_s),

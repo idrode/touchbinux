@@ -47,7 +47,8 @@ use anyhow::{Result, anyhow};
 use battery::{Battery, BatteryStatus, Uevents};
 use canvas::{Canvas, Font, Rect, Rgba, Svg};
 use capture::CaptureMode;
-use config::{Action, Config, ItemConfig, ItemKind, Loading, StatusIdle, WakeOn};
+use config::{Action, Config, IdleConfig, ItemConfig, ItemKind, Loading, StatusIdle, WakeOn};
+use desktopidle::{DesktopEvent, DesktopIdle};
 use gifpick::{Fresh, GifCache, Loader, PickerShow, Reply, Request};
 use display::DrmBackend;
 use evdev::KeyCode;
@@ -170,6 +171,7 @@ const TOKEN_FN_KEYS: u64 = 18;
 const TOKEN_FN_NODES: u64 = 19;
 const TOKEN_FN_TIMER: u64 = 20;
 const TOKEN_IDLE_TIMER: u64 = 21;
+const TOKEN_DESKTOP_IDLE: u64 = 22;
 const IPC_CLIENT_BASE: u64 = 100;
 
 struct Args {
@@ -377,6 +379,14 @@ struct IdleSide {
     light: Option<BarLight>,
     /// The sleep layer's scene, while asleep (or off after sleeping).
     scene: Option<Scene>,
+    /// Follow the desktop's activity when `activity_from` asks (the daemon only).
+    follow_desktop: bool,
+    /// The compositor's idle notifications, while connected.
+    desktop: Option<DesktopIdle>,
+    /// Changes with each connection (epoll).
+    desktop_id: u64,
+    /// Why the desktop isn't followed, as last logged (once per reason).
+    desktop_missing: Option<String>,
 }
 
 impl IdleSide {
@@ -1173,6 +1183,8 @@ impl App {
         let from = self.idle.stage();
         let cfg = self.config.idle.as_ref().filter(|_| self.args.scene == "bar");
         self.idle.machine = cfg.map(|c| IdleMachine::new(c, now));
+        // New times (or none): new notifications from the compositor.
+        self.sync_desktop_idle(true);
         if self.idle.machine.is_none() {
             // Dropped: the normal brightness comes back.
             self.idle.light = None;
@@ -1182,6 +1194,113 @@ impl App {
             self.open_light(&dir);
         }
         self.apply_idle((from, Stage::Awake), now)
+    }
+
+    /// Follows the desktop's activity for `[idle]` when `activity_from` has
+    /// "desktop" and the compositor can say (Hyprland running, with
+    /// ext-idle-notify-v1): with `fresh` on a new connection (the machine was
+    /// just made), else only if there is none (Hyprland came back). Otherwise
+    /// the bar's activity alone counts, as before (logged once per reason).
+    fn sync_desktop_idle(&mut self, fresh: bool) {
+        let timeouts = match &self.idle.machine {
+            Some(m) if self.idle.follow_desktop && self.config.idle.as_ref().is_some_and(IdleConfig::uses_desktop) => {
+                m.timeouts()
+            }
+            _ => Vec::new(),
+        };
+        if timeouts.is_empty() {
+            // Not asked for (or no stage to wait for): nothing to say about it.
+            self.idle.desktop = None;
+            self.idle.desktop_missing = None;
+            return;
+        }
+        if !fresh && self.idle.desktop.is_some() {
+            return;
+        }
+        self.idle.desktop = None;
+        let connected = self.desktop_socket().and_then(|socket| {
+            let d = DesktopIdle::connect(&socket, timeouts)?;
+            Ok((socket, d))
+        });
+        match connected {
+            Ok((socket, d)) => {
+                if self.idle.desktop_missing.take().is_some() || fresh {
+                    eprintln!(
+                        "idle: following the desktop's activity on {} (only idle and resumed, \
+                         no input device is read)",
+                        socket.display()
+                    );
+                }
+                self.idle.desktop = Some(d);
+                self.idle.desktop_id += 1;
+                if let Some(m) = &mut self.idle.machine {
+                    m.set_desktop(true);
+                }
+            }
+            Err(e) => self.desktop_lost(format!("{e:#}")),
+        }
+    }
+
+    /// The session user's Wayland socket, where Hyprland is (checked as for the
+    /// commands run in the session: in their private runtime dir, theirs).
+    fn desktop_socket(&self) -> Result<PathBuf> {
+        let user = self.runner.user().ok_or_else(|| anyhow!("no session user (run_as)"))?;
+        let hypr = self.hypr.session_env().ok_or_else(|| anyhow!("Hyprland not connected"))?;
+        let env = user::session_env(user, Some(&hypr));
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        match (get("XDG_RUNTIME_DIR"), get("WAYLAND_DISPLAY")) {
+            (Some(dir), Some(display)) => Ok(Path::new(&dir).join(display)),
+            _ => Err(anyhow!("no Wayland socket of {} in its runtime dir", user.name)),
+        }
+    }
+
+    /// The desktop can't be followed (`why`): the bar's activity alone counts.
+    fn desktop_lost(&mut self, why: String) {
+        self.idle.desktop = None;
+        if let Some(m) = &mut self.idle.machine {
+            m.set_desktop(false);
+        }
+        if self.idle.desktop_missing.as_ref() != Some(&why) {
+            eprintln!("idle: desktop activity unavailable ({why}); counting the bar's only");
+            self.idle.desktop_missing = Some(why);
+        }
+    }
+
+    /// The compositor's connection is readable. Returns whether the bar changed.
+    fn on_desktop_readable(&mut self, now: Instant) -> bool {
+        let Some(d) = &mut self.idle.desktop else {
+            return false;
+        };
+        let mut events = Vec::new();
+        let read = d.read(&mut events);
+        let changed = self.on_desktop_events(&events, now);
+        if let Err(e) = read {
+            // Hyprland went away (it is waited for again) or lacks the protocol.
+            self.desktop_lost(format!("{e:#}"));
+        }
+        changed
+    }
+
+    /// What the compositor said, into the idle machine. A resume wakes the bar
+    /// like a touch would, but swallows nothing. Returns whether the bar changed.
+    fn on_desktop_events(&mut self, events: &[DesktopEvent], now: Instant) -> bool {
+        let mut changed = false;
+        for &e in events {
+            let Some(m) = &mut self.idle.machine else {
+                break;
+            };
+            let change = match e {
+                DesktopEvent::Idled(stage) => {
+                    eprintln!("idle: desktop idle for {stage:?}'s time");
+                    m.desktop_idled(stage, now)
+                }
+                DesktopEvent::Resumed => m.desktop_resumed(),
+            };
+            if let Some(change) = change {
+                changed |= self.apply_idle(change, now);
+            }
+        }
+        changed
     }
 
     /// Opens the bar's backlight and keeps its normal brightness in the state file.
@@ -2065,6 +2184,8 @@ fn main() -> Result<()> {
                 }),
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
+        app.idle.follow_desktop = true;
+        app.sync_desktop_idle(true);
         let result = run(&mut drm, &sigfd, &mut touch, &mut ipc, &mut app);
         // However it ends, no key is left down on the virtual keyboard: a chord
         // half sent goes out to its end (its modifiers up).
@@ -2296,6 +2417,8 @@ fn watch_hypr(
         }
     }
     app.runner.set_hypr(app.hypr.session_env());
+    // Hyprland came or went: the desktop's idle comes from it.
+    app.sync_desktop_idle(false);
     if let Some(fd) = app.hypr.event_fd() {
         epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_HYPR))?;
         retry.unset()?;
@@ -2416,6 +2539,8 @@ fn run(
     // The same for the Fn keyboard and the watch for it while it is missing.
     let mut fn_keys: Option<u64> = None;
     let mut fn_nodes: Option<u64> = None;
+    // The same for the compositor's idle notifications.
+    let mut desktop_idle: Option<u64> = None;
     // The Fn layer's delay: only while Fn is held and the layer waits to show.
     let mut fn_timer = OneShot::new(TOKEN_FN_TIMER);
     // The next idle stage: none once off (or held at Dim by a recording).
@@ -2467,6 +2592,12 @@ fn run(
         {
             epoll.add(w, EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_FN_NODES))?;
             fn_nodes = Some(app.fnl.watch_id);
+        }
+        if let Some(d) = &app.idle.desktop
+            && desktop_idle != Some(app.idle.desktop_id)
+        {
+            epoll.add(d.fd(), EpollEvent::new(EpollFlags::EPOLLIN, TOKEN_DESKTOP_IDLE))?;
+            desktop_idle = Some(app.idle.desktop_id);
         }
         fn_timer.sync(&epoll, app.fnl.deadline(), now)?;
         idle_timer.sync(&epoll, app.idle.deadline(), now)?;
@@ -2672,6 +2803,7 @@ fn run(
                     idle_timer.drain()?;
                     dirty |= app.on_idle_timer(Instant::now());
                 }
+                TOKEN_DESKTOP_IDLE => dirty |= app.on_desktop_readable(Instant::now()),
                 TOKEN_STATUS_SHOTS => {
                     let at = app.scene_now();
                     if app.shot_watch.as_mut().is_some_and(ShotWatch::read) {
@@ -3477,6 +3609,116 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+
+    /// As if the compositor were followed (no real connection in tests).
+    fn follow_desktop(app: &mut App) {
+        app.idle.machine.as_mut().unwrap().set_desktop(true);
+    }
+
+    #[test]
+    fn the_desktop_and_the_bar_must_both_be_idle() {
+        let dir = tmp("idle-desktop");
+        let (mut app, t0) = idle_app(&dir, IDLE);
+        follow_desktop(&mut app);
+        let before = mid(&app, "before");
+        // Someone typing: the bar untouched for long, still awake, no timer.
+        assert_eq!(app.idle.deadline(), None);
+        assert!(!app.on_idle_timer(t0 + S(60)));
+        // Touched at 3 s; the compositor idle for dim's 5 s at 5 s: the time left.
+        assert_eq!(tap_at(&mut app, before, S(3)), tap_before());
+        let touched = t0 + S(3) + MS(30);
+        assert!(!app.on_desktop_events(&[DesktopEvent::Idled(Stage::Dim)], t0 + S(5)));
+        assert_eq!(app.idle.deadline(), Some(touched + S(5)));
+        assert!(app.on_idle_timer(touched + S(5)));
+        ramp_done(&mut app);
+        assert_eq!((app.idle.stage(), light(&dir)), (Stage::Dim, 25));
+        // Both idle for sleep's time: the sleep layer at once.
+        assert!(app.on_desktop_events(&[DesktopEvent::Idled(Stage::Sleep)], touched + S(10)));
+        assert_eq!(app.idle.stage(), Stage::Sleep);
+        assert!(app.idle.scene.is_some());
+        // The mouse moves: awake at the normal brightness, the layer from before.
+        assert!(app.on_desktop_events(&[DesktopEvent::Resumed, DesktopEvent::Resumed], touched + S(11)));
+        assert_eq!(app.idle.stage(), Stage::Awake);
+        assert!(app.idle.scene.is_none() && std::ptr::eq(app.shown(), &app.scene));
+        ramp_done(&mut app);
+        assert_eq!(light(&dir), 100);
+        assert_eq!(app.idle.deadline(), None, "waiting for the compositor again");
+        // That resume swallowed nothing: the next touch acts at once.
+        assert_eq!(tap_at(&mut app, before, S(20)), tap_before());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_desktop_resume_wakes_the_bar_from_off_whatever_wake_on_says() {
+        let dir = tmp("idle-desktop-off");
+        let (mut app, t0) = idle_app(&dir, &format!("{IDLE}\nwake_on = ['fn']"));
+        follow_desktop(&mut app);
+        let ev = [DesktopEvent::Idled(Stage::Dim), DesktopEvent::Idled(Stage::Sleep), DesktopEvent::Idled(Stage::Off)];
+        assert!(app.on_desktop_events(&ev, t0 + S(20)));
+        ramp_done(&mut app);
+        assert_eq!((app.idle.stage(), light(&dir)), (Stage::Off, 0));
+        assert!(app.on_desktop_events(&[DesktopEvent::Resumed], t0 + S(30)));
+        ramp_done(&mut app);
+        assert_eq!((app.idle.stage(), light(&dir)), (Stage::Awake, 100));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_a_compositor_or_with_touch_only_it_is_the_bar_alone() {
+        // activity_from = ['touch']: not even tried, the bar alone as before.
+        let dir = tmp("idle-touch-only");
+        let (mut app, t0) = idle_app(&dir, &format!("{IDLE}\nactivity_from = ['touch']"));
+        app.idle.follow_desktop = true;
+        app.sync_idle(t0);
+        assert!(!app.idle.machine.as_ref().unwrap().follows_desktop());
+        assert_eq!(app.idle.desktop_missing, None, "nothing to warn about");
+        assert_eq!(app.idle.deadline(), Some(t0 + S(5)));
+        assert!(app.on_idle_timer(t0 + S(5)));
+        // The default (both), but no session user or Hyprland here: a warning,
+        // then the bar alone (at run time; the file is valid).
+        let dir2 = tmp("idle-no-compositor");
+        let (mut app, t0) = idle_app(&dir2, IDLE);
+        app.idle.follow_desktop = true;
+        app.sync_idle(t0);
+        assert!(app.idle.desktop.is_none());
+        assert!(!app.idle.machine.as_ref().unwrap().follows_desktop());
+        assert!(app.idle.desktop_missing.as_deref().is_some_and(|w| w.contains("no session user")));
+        assert_eq!(app.idle.deadline(), Some(t0 + S(5)));
+        assert!(app.on_idle_timer(t0 + S(10)));
+        assert_eq!(app.idle.stage(), Stage::Sleep);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&dir2).unwrap();
+    }
+
+    /// The whole way, against the Hyprland of the user running the test: the App
+    /// finds its Wayland socket, subscribes, and dims when the compositor says
+    /// (dim_after_s = 5: leave the keyboard and mouse alone for it). Ignored: it
+    /// needs a session. `cargo test idle_desktop_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn idle_desktop_live() {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        let dir = tmp("idle-desktop-live");
+        let (mut app, _) = idle_app(&dir, IDLE);
+        let uid = nix::unistd::getuid().as_raw();
+        app.hypr = Hypr::new(Some(uid));
+        app.hypr.connect().unwrap();
+        app.runner.set_user(Some(user::SessionUser::from_uid(uid).unwrap()));
+        app.runner.set_hypr(app.hypr.session_env());
+        app.idle.follow_desktop = true;
+        let t0 = Instant::now();
+        app.sync_idle(t0);
+        assert!(app.idle.desktop.is_some(), "{:?}", app.idle.desktop_missing);
+        assert!(app.idle.machine.as_ref().unwrap().follows_desktop());
+        while t0.elapsed() < S(60) && app.idle.stage() == Stage::Awake {
+            let fd = app.idle.desktop.as_ref().unwrap().fd();
+            poll(&mut [PollFd::new(fd, PollFlags::POLLIN)], PollTimeout::from(1000u16)).unwrap();
+            app.on_desktop_readable(Instant::now());
+        }
+        assert_eq!(app.idle.stage(), Stage::Dim);
+        eprintln!("dimmed after {:?}", t0.elapsed());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A tap at `at`, at scene time `t`: what it reported.
     fn tap_at(app: &mut App, at: (f32, f32), t: Duration) -> Vec<UiEvent> {

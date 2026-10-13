@@ -7,6 +7,9 @@
 //! The row is a little scene of layer buttons (as in `app_keys`), so children
 //! look and press like any button. Its keys only go out once the window has the
 //! focus: until Hyprland says so, taps on the row do nothing.
+//!
+//! With strip = "tap" the row sits over an open strip: the handle goes back to it,
+//! anything else folds both (the scene reads why with `take_closed`).
 
 use crate::{
     appkeys::{button, row_scene},
@@ -50,6 +53,17 @@ pub struct Open {
     pub on_workspace: bool,
 }
 
+/// Why the row folded by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closed {
+    /// Its handle was tapped.
+    Handle,
+    /// `collapse_after_ms` without a touch.
+    Timeout,
+    /// A button was tapped with close_on_tap.
+    Tap,
+}
+
 /// Where a touch on the unfolded item is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Part {
@@ -69,6 +83,8 @@ pub struct AppActions {
     open: Option<Open>,
     /// What the finger came down on.
     touch: Option<Part>,
+    /// Why it last folded by itself, until the scene takes it.
+    closed: Option<Closed>,
 }
 
 impl AppActions {
@@ -133,6 +149,7 @@ impl AppActions {
             close_on_tap: item.close_on_tap.unwrap_or(false),
             open: None,
             touch: None,
+            closed: None,
         })
     }
 
@@ -170,6 +187,11 @@ impl AppActions {
         true
     }
 
+    /// Why it folded by itself since last asked, if it did.
+    pub fn take_closed(&mut self) -> Option<Closed> {
+        self.closed.take()
+    }
+
     /// The row that is out (or folding).
     pub fn opened(&self) -> Option<&Open> {
         self.open.as_ref()
@@ -186,6 +208,9 @@ impl AppActions {
 
     pub fn advance(&mut self, t: Duration, live: &Live) -> bool {
         let changed = self.fold.advance(t);
+        if changed {
+            self.closed = Some(Closed::Timeout);
+        }
         if !self.fold.is_active(t) {
             self.open = None;
         }
@@ -243,6 +268,7 @@ impl AppActions {
             if open.focused {
                 if !taps.is_empty() && self.close_on_tap {
                     self.fold.collapse(t);
+                    self.closed = Some(Closed::Tap);
                     changed = true;
                 }
                 out.extend(taps);
@@ -257,6 +283,7 @@ impl AppActions {
             self.fold.touch_up(t);
             if phase == Phase::Up && on_handle {
                 self.fold.collapse(t);
+                self.closed = Some(Closed::Handle);
                 changed = true;
             }
         }

@@ -4,14 +4,14 @@
 
 use crate::{
     anim::Animated,
-    appactions::{AppActions, Open},
+    appactions::{AppActions, Closed, Open},
     border::Border,
     appkeys::AppKeys,
     capture::{self, RecLook},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
         BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
-        Action, DEFAULT_MAX_ICONS, ItemConfig, WsStrip, WsStyle,
+        Action, DEFAULT_APP_COLLAPSE_MS, DEFAULT_MAX_ICONS, ItemConfig, WsStrip, WsStyle,
         ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
@@ -583,7 +583,7 @@ impl Scene {
             changed |= m.advance(t, live);
         }
         for (w, _) in &mut self.workspaces {
-            w.advance(t);
+            changed |= w.advance(t);
         }
         for a in &mut self.app_keys {
             changed |= a.advance(t, live);
@@ -591,7 +591,7 @@ impl Scene {
         for a in &mut self.ws_apps {
             changed |= a.advance(t, live);
         }
-        changed
+        changed | self.settle_app_rows(t)
     }
 
     /// Window `addr` was tapped in workspaces item `item`'s strip (and gets the
@@ -621,7 +621,24 @@ impl Scene {
         };
         eprintln!("workspaces: {:?} buttons out", win.class);
         apps.open(open, t, animate);
+        // strip = "tap": the strip under them waits for them.
+        self.workspaces[i].0.hold_strip();
         true
+    }
+
+    /// strip = "tap": app rows that folded by themselves take their strip with
+    /// them, except from the handle, which goes back to it (its count started
+    /// again). Returns whether a strip folds.
+    fn settle_app_rows(&mut self, t: Duration) -> bool {
+        let mut changed = false;
+        for (apps, (ws, _)) in self.ws_apps.iter_mut().zip(&mut self.workspaces) {
+            match apps.take_closed() {
+                Some(Closed::Handle) => ws.release_strip(t),
+                Some(Closed::Timeout | Closed::Tap) => changed |= ws.fold_strip(t, true),
+                None => {}
+            }
+        }
+        changed
     }
 
     /// Hyprland's state changed: an unfolded app row learns that its window has
@@ -630,7 +647,7 @@ impl Scene {
     /// another app or workspace. Returns whether anything changed.
     pub fn sync_app_rows(&mut self, state: &HyprState, t: Duration, font: &Font) -> bool {
         let mut changed = false;
-        for apps in &mut self.ws_apps {
+        for (apps, (ws, _)) in self.ws_apps.iter_mut().zip(&mut self.workspaces) {
             let Some(open) = apps.opened_mut() else {
                 continue;
             };
@@ -647,6 +664,13 @@ impl Scene {
             let other_ws = open.on_workspace && state.active_workspace != Some(open.workspace);
             if gone || other_app || other_ws {
                 changed |= apps.close(t, true, font);
+                // strip = "tap": another app goes back to the strip, its count
+                // started again; the rest fold it too.
+                if other_app && !gone && !other_ws {
+                    ws.release_strip(t);
+                } else {
+                    changed |= ws.fold_strip(t, true);
+                }
             }
         }
         changed
@@ -887,6 +911,7 @@ impl Scene {
                     self.workspaces.iter().position(|(w, _)| contains(w.rect, x, y))
                 {
                     let hit = self.workspaces[i].0.hit(x, y, t);
+                    self.workspaces[i].0.hold_strip();
                     self.ws_target = hit.clone();
                     self.ws_hover = hit;
                     self.ws_touch(i, true, t);
@@ -996,6 +1021,7 @@ impl Scene {
                 match capture {
                     Capture::WsApps(i) => {
                         changed |= self.ws_apps[i].handle_touch(phase, (x, y), t, font, out);
+                        changed |= self.settle_app_rows(t);
                     }
                     Capture::AppKeys(i) => {
                         changed |= self.app_keys[i].handle_touch(phase, (x, y), t, font, out);
@@ -1033,10 +1059,17 @@ impl Scene {
                         self.ws_hover = self.workspaces[i].0.hit(x, y, t);
                         let pick = self.ws_pick(i);
                         let id = self.workspaces[i].0.id.clone();
+                        // strip = "tap": each touch starts its count again.
+                        self.workspaces[i].0.release_strip(t);
                         if phase == Phase::Up {
                             match (state, pick) {
                                 (PullState::Tap, Some(Hit::Workspace(ws))) => {
-                                    out.push(UiEvent::Workspace(id, ws.to_string()));
+                                    // The active one with strip = "tap" opens or
+                                    // folds its strip (never "switches" to itself:
+                                    // workspace_back_and_forth would leave it).
+                                    if self.workspaces[i].0.tap_workspace(ws, t).is_none() {
+                                        out.push(UiEvent::Workspace(id, ws.to_string()));
+                                    }
                                 }
                                 (PullState::Tap, Some(Hit::Window(addr))) => {
                                     out.push(UiEvent::FocusWindow(id, format!("0x{addr}")));
@@ -1250,9 +1283,13 @@ impl Scene {
         for a in &mut self.app_keys {
             a.interrupt(t, font);
         }
-        // App buttons fold at once (Fn, rest).
+        // App buttons and tapped strips fold at once (Fn, rest).
         for a in &mut self.ws_apps {
             a.close(t, false, font);
+            a.take_closed();
+        }
+        for (w, _) in &mut self.workspaces {
+            w.fold_strip(t, false);
         }
     }
 
@@ -2188,6 +2225,7 @@ pub fn bar_with(
                         Some(WsStrip::Tap) => item.strip_transition(),
                         _ => workspaces::STRIP,
                     },
+                    collapse: item.collapse_after().unwrap_or(Duration::from_millis(DEFAULT_APP_COLLAPSE_MS)),
                     max_icons: item.max_icons.unwrap_or(DEFAULT_MAX_ICONS),
                     class_icons: item.class_icons(),
                 };
@@ -4698,12 +4736,17 @@ mod tests {
 
     /// The centre of workspace `id`'s pill, or of window `addr`'s icon.
     fn ws_point(s: &Scene, what: &Hit) -> (f32, f32) {
+        ws_point_at(s, what, Duration::ZERO)
+    }
+
+    /// The same, as things are at `t`.
+    fn ws_point_at(s: &Scene, what: &Hit, t: Duration) -> (f32, f32) {
         let w = &s.workspaces[0].0;
         let r = w.rect;
         let y = r.y + r.h / 2.0;
         let xs: Vec<f32> = (r.x as i32..(r.x + r.w) as i32)
             .map(|x| x as f32)
-            .filter(|&x| w.hit(x, y, Duration::ZERO).as_ref() == Some(what))
+            .filter(|&x| w.hit(x, y, t).as_ref() == Some(what))
             .collect();
         ((xs[0] + xs[xs.len() - 1]) / 2.0, y)
     }
@@ -5771,5 +5814,325 @@ mod tests {
         let err = format!("{:#}", bar_with(W, H, &font, &layer, &mut icons, Some(&st)).err().unwrap());
         assert!(err.contains("the app_actions of \"kitty\" need") && err.contains("make the item at least"), "{err}");
     }
-}
 
+    // strip = "tap": three levels (workspaces; the active one's strip; an app's
+    // buttons over it).
+
+    fn tap_scene(font: &Font, extra: &str, st: &HyprState) -> Scene {
+        ws_scene(font, &apps_layer(&format!("strip = 'tap'\n{extra}")), Some(st))
+    }
+
+    /// Whether the strip is out, and the row's class if one is.
+    fn level(s: &Scene) -> u8 {
+        match (s.workspaces[0].0.strip_out(), s.app_row("ws")) {
+            (_, Some(_)) => 2,
+            (true, None) => 1,
+            (false, None) => 0,
+        }
+    }
+
+    /// Taps workspace `ws`'s capsule at `t`; the events it sent.
+    fn tap_ws(s: &mut Scene, ws: i64, t: Duration, font: &Font) -> Vec<UiEvent> {
+        let w = &s.workspaces[0].0;
+        let at = (w.place_of(ws, t).1, w.rect.y + w.rect.h / 2.0);
+        tap(s, at, t, font).1
+    }
+
+    /// Taps window `addr`'s icon at `t` as the daemon does (focus, then its
+    /// buttons if any). Returns whether they came out.
+    fn tap_icon(s: &mut Scene, st: &HyprState, addr: &str, t: Duration, font: &Font) -> bool {
+        let at = ws_point_at(s, &Hit::Window(addr.into()), t);
+        let (_, ev) = tap(s, at, t, font);
+        assert_eq!(ev, vec![UiEvent::FocusWindow("ws".into(), format!("0x{addr}"))]);
+        s.open_app_row("ws", &format!("0x{addr}"), st, t, true)
+    }
+
+    /// At level 1 by 300 ms (tapped at 0), at rest.
+    fn at_level_1(font: &Font, extra: &str, st: &HyprState) -> Scene {
+        let mut s = tap_scene(font, extra, st);
+        assert!(tap_ws(&mut s, 2, MS(0), font).is_empty());
+        s.advance(MS(300), &live());
+        assert_eq!(level(&s), 1);
+        s
+    }
+
+    #[test]
+    fn tap_mode_rests_at_level_0_with_no_frames() {
+        let Some(font) = font() else { return };
+        let st = ws_state();
+        let mut s = tap_scene(&font, "", &st);
+        s.advance(MS(0), &live());
+        assert_eq!(level(&s), 0);
+        assert_eq!(s.next_change(MS(0)), None, "no frames, no timers");
+        let w = &s.workspaces[0].0;
+        let r = w.rect;
+        let icons = (r.x as i32..(r.x + r.w) as i32)
+            .any(|x| matches!(w.hit(x as f32, r.y + r.h / 2.0, MS(0)), Some(Hit::Window(_))));
+        assert!(!icons, "no strip to tap");
+    }
+
+    #[test]
+    fn tap_mode_another_workspace_switches_and_opens_nothing() {
+        let Some(font) = font() else { return };
+        let st = ws_state();
+        let mut s = tap_scene(&font, "", &st);
+        let ev = tap_ws(&mut s, 4, MS(0), &font);
+        assert_eq!(ev, vec![UiEvent::Workspace("ws".into(), "4".into())]);
+        s.advance(MS(300), &live());
+        assert_eq!(level(&s), 0);
+        assert_eq!(s.next_change(MS(300)), None);
+    }
+
+    #[test]
+    fn tap_mode_the_active_one_opens_its_strip_until_collapse_after_ms() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        let mut s = tap_scene(&font, "", &st);
+        let ev = tap_ws(&mut s, 2, MS(1000), &font);
+        assert!(ev.is_empty(), "never a switch to itself: {ev:?}");
+        assert_eq!(level(&s), 1);
+        // Opens in strip_transition_ms (150 by default) at frame rate, then rests
+        // until the fold's moment: one wake-up.
+        assert_eq!(s.next_change(MS(1149)), Some(MS(1149)));
+        s.advance(MS(1150), &live);
+        assert_eq!(s.next_change(MS(1150)), Some(MS(6000)));
+        // The icons are there to tap.
+        let (p, _) = s.workspaces[0].0.place_of(2, MS(1150));
+        assert_eq!(p, 90.0, "two icons: as wide as with strip = 'active'");
+        assert!(!s.advance(MS(5999), &live));
+        assert!(s.advance(MS(6000), &live), "folds by itself");
+        assert_eq!(level(&s), 0);
+        assert_eq!(s.next_change(MS(6100)), Some(MS(6100)), "closing");
+        s.advance(MS(6150), &live);
+        assert_eq!(s.next_change(MS(6150)), None, "back to no frames");
+        assert_eq!(s.workspaces[0].0.place_of(2, MS(6150)).0, 0.0);
+    }
+
+    #[test]
+    fn tap_mode_tapping_the_active_one_again_folds_it() {
+        let Some(font) = font() else { return };
+        let st = ws_state();
+        let mut s = at_level_1(&font, "", &st);
+        assert!(tap_ws(&mut s, 2, MS(1000), &font).is_empty());
+        assert_eq!(level(&s), 0);
+    }
+
+    #[test]
+    fn tap_mode_an_empty_workspace_opens_nothing() {
+        let Some(font) = font() else { return };
+        let mut st = ws_state();
+        st.workspaces.insert(3, "3".into());
+        st.active_workspace = Some(3);
+        st.focused = None;
+        let mut s = tap_scene(&font, "", &st);
+        let ev = tap_ws(&mut s, 3, MS(0), &font);
+        assert!(ev.is_empty(), "{ev:?}");
+        assert_eq!(level(&s), 0);
+        s.advance(MS(300), &live());
+        assert_eq!(s.next_change(MS(300)), None);
+    }
+
+    #[test]
+    fn tap_mode_each_touch_starts_the_count_again() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        let mut s = at_level_1(&font, "", &st);
+        // firefox has no buttons: focus only, the strip stays, its count anew.
+        assert!(!tap_icon(&mut s, &st, "b2", MS(3000), &font));
+        assert_eq!(level(&s), 1);
+        s.advance(MS(3200), &live);
+        assert_eq!(s.next_change(MS(3200)), Some(MS(8000)));
+        // A finger held on it: no fold until it lifts.
+        let at = ws_point_at(&s, &Hit::Window("b2".into()), MS(3200));
+        s.handle_touch(Phase::Down, at, MS(4000), &font, &mut Vec::new());
+        s.advance(MS(9000), &live);
+        assert_eq!(level(&s), 1, "held");
+        s.handle_touch(Phase::Up, at, MS(9000), &font, &mut Vec::new());
+        s.advance(MS(9200), &live);
+        assert_eq!(s.next_change(MS(9200)), Some(MS(14000)));
+    }
+
+    #[test]
+    fn tap_mode_level_2_and_the_handle_back_to_the_strip() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        let mut s = at_level_1(&font, "", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        assert_eq!(level(&s), 2);
+        s.advance(MS(1200), &live);
+        // Only the row's count runs (the strip under it waits).
+        assert_eq!(s.next_change(MS(1200)), Some(MS(6000)));
+        assert!(s.workspaces[0].0.strip_out());
+        // Its buttons send their keys.
+        let at = row_point(&s, 0, 2);
+        let (_, ev) = tap(&mut s, at, MS(2000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("ws.kitty.1".into())]);
+        assert_eq!(level(&s), 2, "close_on_tap = false by default");
+        // The handle: back to the strip, its count running from now.
+        let at = handle_point(&s);
+        let (_, ev) = tap(&mut s, at, MS(3000), &font);
+        assert!(ev.is_empty(), "{ev:?}");
+        assert_eq!(level(&s), 1);
+        s.advance(MS(3200), &live);
+        assert_eq!(s.next_change(MS(3200)), Some(MS(8000)));
+        // The strip's icons work again.
+        assert!(!tap_icon(&mut s, &st, "b2", MS(4000), &font));
+        assert_eq!(level(&s), 1);
+    }
+
+    #[test]
+    fn tap_mode_level_2_folds_everything_after_collapse_after_ms() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        let mut s = at_level_1(&font, "collapse_after_ms = 2000", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        s.advance(MS(2999), &live);
+        assert_eq!(level(&s), 2);
+        assert!(s.advance(MS(3000), &live));
+        assert_eq!(level(&s), 0, "row and strip at once");
+        s.advance(MS(3300), &live);
+        assert_eq!(s.next_change(MS(3300)), None);
+    }
+
+    #[test]
+    fn tap_mode_close_on_tap_folds_to_level_0() {
+        let Some(font) = font() else { return };
+        let st = ws_state();
+        let mut s = at_level_1(&font, "close_on_tap = true", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        s.advance(MS(1300), &live());
+        let at = row_point(&s, 1, 2);
+        let (_, ev) = tap(&mut s, at, MS(2000), &font);
+        assert_eq!(ev, vec![UiEvent::Tap("ws.kitty.2".into())]);
+        assert_eq!(level(&s), 0);
+    }
+
+    #[test]
+    fn tap_mode_folds_on_another_workspace() {
+        let Some(font) = font() else { return };
+        let mut icons = IconResolver::new(None, 36);
+        let st = ws_state();
+        let mut to4 = st.clone();
+        to4.active_workspace = Some(4);
+        // From level 1, by keyboard (only Hyprland's word).
+        let mut s = at_level_1(&font, "", &st);
+        assert!(s.set_workspaces(&to4, MS(1000), &font, &mut icons));
+        assert_eq!(level(&s), 0);
+        s.advance(MS(1300), &live());
+        assert_eq!(s.next_change(MS(1300)), None);
+        // From level 1, tapping another one: a switch, folded once it happens.
+        let mut s = at_level_1(&font, "", &st);
+        let ev = tap_ws(&mut s, 4, MS(1000), &font);
+        assert_eq!(ev, vec![UiEvent::Workspace("ws".into(), "4".into())]);
+        s.set_workspaces(&to4, MS(1050), &font, &mut icons);
+        assert_eq!(level(&s), 0);
+        // From level 2.
+        let mut s = at_level_1(&font, "", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        s.set_workspaces(&to4, MS(2000), &font, &mut icons);
+        s.sync_app_rows(&to4, MS(2000), &font);
+        assert_eq!(level(&s), 0);
+        s.advance(MS(2300), &live());
+        assert_eq!(s.next_change(MS(2300)), None);
+        // Back on 2 later: shut until tapped again.
+        let mut s2 = st.clone();
+        s2.active_workspace = Some(2);
+        s.set_workspaces(&s2, MS(3000), &font, &mut icons);
+        assert_eq!(level(&s), 0);
+    }
+
+    #[test]
+    fn tap_mode_the_rows_window_closing_folds_everything() {
+        let Some(font) = font() else { return };
+        let mut icons = IconResolver::new(None, 36);
+        let st = ws_state();
+        let mut s = at_level_1(&font, "", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        let mut gone = st.clone();
+        gone.windows.retain(|w| w.addr != "a1");
+        gone.focused = Some("b2".into());
+        s.set_workspaces(&gone, MS(2000), &font, &mut icons);
+        assert!(s.sync_app_rows(&gone, MS(2000), &font));
+        assert_eq!(level(&s), 0);
+        // Every window of the workspace gone at level 1: folded too.
+        let mut s = at_level_1(&font, "", &st);
+        let mut empty = st.clone();
+        empty.windows.retain(|w| w.workspace != 2);
+        empty.focused = None;
+        s.set_workspaces(&empty, MS(2000), &font, &mut icons);
+        assert_eq!(level(&s), 0);
+    }
+
+    #[test]
+    fn tap_mode_another_class_focused_goes_back_to_the_strip() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        let mut s = at_level_1(&font, "", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        let mut ff = st.clone();
+        ff.focused = Some("b2".into());
+        assert!(s.sync_app_rows(&ff, MS(2000), &font));
+        assert_eq!(level(&s), 1);
+        s.advance(MS(2300), &live);
+        assert_eq!(s.next_change(MS(2300)), Some(MS(7000)));
+        // Another window of the same class keeps the row.
+        let mut s = at_level_1(&font, "", &st);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        let mut k2 = st.clone();
+        k2.windows.push(crate::workspaces::tests::win("e5", "kitty", 2));
+        k2.focused = Some("e5".into());
+        assert!(!s.sync_app_rows(&k2, MS(2000), &font));
+        assert_eq!(level(&s), 2);
+    }
+
+    #[test]
+    fn tap_mode_fn_or_rest_folds_at_once() {
+        let Some(font) = font() else { return };
+        let st = ws_state();
+        for level2 in [false, true] {
+            let mut s = at_level_1(&font, "", &st);
+            if level2 {
+                assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+            }
+            s.interrupt(None, MS(1100), &font);
+            assert_eq!(level(&s), 0);
+            assert_eq!(s.next_change(MS(1100)), None, "no animation, no timer");
+            assert_eq!(s.workspaces[0].0.place_of(2, MS(1100)).0, 0.0, "shut now");
+        }
+    }
+
+    #[test]
+    fn other_strip_modes_are_as_before() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        // "active": the active one's strip at rest, a tap on it is a switch, and
+        // the handle goes back to it.
+        let mut s = ws_scene(&font, &apps_layer(""), Some(&st));
+        assert_eq!(s.workspaces[0].0.place_of(2, MS(0)).0, 90.0);
+        assert!(!s.workspaces[0].0.strip_out());
+        let ev = tap_ws(&mut s, 2, MS(0), &font);
+        assert_eq!(ev, vec![UiEvent::Workspace("ws".into(), "2".into())]);
+        assert!(tap_icon(&mut s, &st, "a1", MS(1000), &font));
+        let at = handle_point(&s);
+        tap(&mut s, at, MS(2000), &font);
+        s.advance(MS(2300), &live);
+        assert_eq!(s.app_row("ws"), None);
+        assert_eq!(s.next_change(MS(2300)), None, "no strip timer");
+        assert_eq!(s.workspaces[0].0.place_of(2, MS(2300)).0, 90.0);
+        // "pressed", "all", "none": a tap on the active one is a switch too.
+        for mode in ["pressed", "all", "none"] {
+            let toml = ws_layer(false).replace("width = 600", &format!("width = 600\nstrip = '{mode}'"));
+            let mut s = ws_scene(&font, &toml, Some(&st));
+            let ev = tap_ws(&mut s, 2, MS(0), &font);
+            assert_eq!(ev, vec![UiEvent::Workspace("ws".into(), "2".into())], "{mode}");
+            s.advance(MS(300), &live);
+            assert_eq!(s.next_change(MS(300)), None, "{mode}");
+        }
+    }
+}

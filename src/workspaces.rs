@@ -12,11 +12,17 @@
 //! What it shows is a `WsView`, a projection of the daemon's `HyprState` keeping only
 //! what is drawn: events that don't change it (a window's title...) cost no frame.
 //! Everything moves as a function of the scene time; at rest it schedules no frames.
+//!
+//! With strip = "tap" the active workspace's strip stays shut until its capsule is
+//! tapped; then it stays out until `collapse_after_ms` pass without a touch (one
+//! wake-up, no frames), the workspace changes, its windows go, or the scene
+//! folds it (Fn, rest, the app buttons over it folding by themselves).
 
 use crate::{
     anim::{Tween, ease_in_out},
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
     config::{WS_ALL, WsShow, WsStrip},
+    expander::Fold,
     frame::DEFAULT_PRESSED,
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
@@ -146,6 +152,8 @@ pub struct Style {
     pub strip: WsStrip,
     /// How long a strip takes to open or close.
     pub strip_dur: Duration,
+    /// strip = "tap": how long its strip stays out without a touch.
+    pub collapse: Duration,
     pub max_icons: usize,
     /// Icon names by lowercase class, asked before the icon theme.
     pub class_icons: BTreeMap<String, String>,
@@ -342,6 +350,10 @@ pub struct Workspaces {
     touched: Option<(i64, bool)>,
     /// A first list of workspaces has been shown: only what comes after is born.
     populated: bool,
+    /// strip = "tap": open = the active workspace's strip is out; its count to the
+    /// automatic fold, held while a finger is on the item or app buttons cover it.
+    /// Only its timing is used (it doesn't animate: the strips do).
+    tap: Fold,
 }
 
 impl Workspaces {
@@ -350,7 +362,6 @@ impl Workspaces {
             id: id.to_string(),
             rect,
             show,
-            style,
             view: WsView::default(),
             caps: Vec::new(),
             shown: 0,
@@ -358,6 +369,8 @@ impl Workspaces {
             glyphs: HashMap::new(),
             touched: None,
             populated: false,
+            tap: Fold::new(Duration::ZERO, style.collapse),
+            style,
         }
     }
 
@@ -387,9 +400,85 @@ impl Workspaces {
             WsStrip::Pressed => self.touched.is_some_and(|(t, _)| t == id),
             WsStrip::All => true,
             WsStrip::None => false,
-            // Opened by a tap on the active capsule (not wired yet).
-            WsStrip::Tap => false,
+            WsStrip::Tap => self.is_active(id) && self.tap.is_open(),
         }
+    }
+
+    /// strip = "tap".
+    fn tap_mode(&self) -> bool {
+        self.style.strip == WsStrip::Tap
+    }
+
+    /// strip = "tap" and the active workspace's strip is out (or opening).
+    pub fn strip_out(&self) -> bool {
+        self.tap_mode() && self.tap.is_open()
+    }
+
+    /// Every strip heads for what it should show now (at once if not `animate`).
+    fn retarget_strips(&mut self, t: Duration, animate: bool) {
+        for i in 0..self.caps.len() {
+            if self.caps[i].spawn.is_some_and(|s| s.dying) {
+                continue;
+            }
+            let to = if self.strip_wanted(self.caps[i].id) { self.caps[i].strip_open } else { 0.0 };
+            let dur = self.style.strip_dur;
+            let c = &mut self.caps[i];
+            if animate {
+                c.strip.retarget(t, to, dur);
+            } else {
+                c.strip = Tween::still(to);
+            }
+        }
+    }
+
+    /// strip = "tap": workspace `ws` was tapped. On the active one it opens the
+    /// strip (if it has windows) or folds it, and returns `Some(changed)`; `None`
+    /// means it is a tap to switch to `ws`, as in the other modes.
+    pub fn tap_workspace(&mut self, ws: i64, t: Duration) -> Option<bool> {
+        if !self.tap_mode() || !self.is_active(ws) {
+            return None;
+        }
+        Some(if self.tap.is_open() { self.fold_strip(t, true) } else { self.open_strip(t, true) })
+    }
+
+    /// strip = "tap": the active workspace's strip comes out (at once if not
+    /// `animate`: previews), its count to the automatic fold started. Without
+    /// windows nothing happens (the press already bounced its capsule).
+    pub fn open_strip(&mut self, t: Duration, animate: bool) -> bool {
+        let Some(active) = self.view.active else {
+            return false;
+        };
+        let empty = self.view.entry(active).is_none_or(|e| e.windows.is_empty());
+        if !self.tap_mode() || empty || self.tap.is_open() {
+            return false;
+        }
+        self.tap.expand(t);
+        self.retarget_strips(t, animate);
+        true
+    }
+
+    /// strip = "tap": the strip folds (at once, without animating, if not
+    /// `animate`: Fn, rest). Returns whether it was out.
+    pub fn fold_strip(&mut self, t: Duration, animate: bool) -> bool {
+        if !self.strip_out() {
+            return false;
+        }
+        self.tap.close_now();
+        self.retarget_strips(t, animate);
+        true
+    }
+
+    /// A finger is on the item, or app buttons cover the strip: it doesn't fold
+    /// by itself until `release_strip`.
+    pub fn hold_strip(&mut self) {
+        if self.strip_out() {
+            self.tap.touch_down();
+        }
+    }
+
+    /// The count to the automatic fold starts again from `t`.
+    pub fn release_strip(&mut self, t: Duration) {
+        self.tap.touch_up(t);
     }
 
     /// What fits in the row at rest: which workspaces (dropping those furthest from
@@ -452,6 +541,11 @@ impl Workspaces {
             return false;
         }
         let animate = animate && self.populated;
+        // strip = "tap": another workspace, or none of its windows left, folds it.
+        let empty = |v: &WsView| v.active.and_then(|a| v.entry(a)).is_none_or(|e| e.windows.is_empty());
+        if self.tap.is_open() && (view.active != self.view.active || empty(&view)) {
+            self.tap.close_now();
+        }
         let (visible, shown) = self.fit(&view, font);
         self.shown = shown;
         self.hidden = view.workspaces.len() - visible.len();
@@ -578,9 +672,14 @@ impl Workspaces {
             .map(|j| self.caps[j].id)
     }
 
-    /// Drops what has finished merging away, and the record of finished births.
-    /// Draws the same either way.
-    pub fn advance(&mut self, t: Duration) {
+    /// Drops what has finished merging away, and the record of finished births
+    /// (draws the same either way). strip = "tap": folds the strip once its time
+    /// has come. Returns whether that started.
+    pub fn advance(&mut self, t: Duration) -> bool {
+        let folds = self.tap.advance(t);
+        if folds {
+            self.retarget_strips(t, true);
+        }
         self.caps
             .retain(|c| !c.spawn.is_some_and(|s| s.dying && s.done(t)));
         for c in &mut self.caps {
@@ -588,9 +687,11 @@ impl Workspaces {
                 c.spawn = None;
             }
         }
+        folds
     }
 
-    /// Frames only while something moves.
+    /// Frames only while something moves; strip = "tap", one wake-up for the
+    /// automatic fold while the strip is out.
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
         let moving = self.caps.iter().any(|c| {
             c.act.running(t)
@@ -598,7 +699,8 @@ impl Workspaces {
                 || c.strip.running(t)
                 || c.spawn.is_some_and(|s| !s.done(t))
         });
-        moving.then_some(t)
+        let fold = self.strip_out().then(|| self.tap.next_change(t)).flatten();
+        [moving.then_some(t), fold].into_iter().flatten().min()
     }
 
     /// How active (0..1) the capsules in a birth or merge look at `t`, by index:
@@ -700,6 +802,13 @@ impl Workspaces {
             .filter(|p| (x - p.cx()).abs() <= (MIN_TOUCH / 2.0).max(p.w / 2.0))
             .min_by(|a, b| (x - a.cx()).abs().total_cmp(&(x - b.cx()).abs()))
             .map(|p| Hit::Workspace(self.caps[p.i].id))
+    }
+
+    /// Workspace `id`'s strip width and capsule's centre at `t` (tests).
+    #[cfg(test)]
+    pub fn place_of(&self, id: i64, t: Duration) -> (f32, f32) {
+        let (placed, _) = self.place(t);
+        placed.iter().find(|p| self.caps[p.i].id == id).map_or((0.0, 0.0), |p| (p.strip_w, p.cx()))
     }
 
     /// `class`'s icon as its strips draw it, centred in `cell`.
@@ -1054,6 +1163,7 @@ pub mod tests {
             icon_tint: None,
             strip,
             strip_dur: STRIP,
+            collapse: MS(5000),
             max_icons: 6,
             class_icons: BTreeMap::new(),
         }

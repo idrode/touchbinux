@@ -1429,7 +1429,8 @@ aparece.
 | `active_orientation` | `"horizontal"` | `"horizontal"`, `"vertical"` | solo `dots`: en vertical la píldora mide `dot_size` de ancho y `active_width` de alto, que debe caber en la fila (si no, error; con el `active_width` por defecto, 64, no cabe: hay que bajarlo) |
 | `bar_long`, `bar_short` | `28`, `16` | 2-60 px | solo `capsule`: ejes de la cápsula (14:8 como en la isla). `bar_short` menor que `bar_long`; `bar_long` no más que la fila |
 | `gap` | `8` (`dots`), `6` (`capsule`) | 0-40 px | entre cápsulas |
-| `strip` | `"active"` | `"active"`, `"pressed"`, `"all"`, `"none"` | qué tiras se abren: la del activo siempre; la de la cápsula bajo el dedo, mientras se pulsa; todas; ninguna |
+| `strip` | `"active"` | `"active"`, `"pressed"`, `"all"`, `"none"`, `"tap"` | qué tiras se abren: la del activo siempre; la de la cápsula bajo el dedo, mientras se pulsa; todas; ninguna; la del activo al tocar su cápsula ([`strip = "tap"`](#la-tira-al-tocar-strip--tap)) |
+| `strip_transition_ms` | `150` | 0-600 | solo con `strip = "tap"`: lo que tarda la tira en abrirse y cerrarse (en los demás modos, 190 ms fijos) |
 | `strip_background` | `"#1a1d1c"` | | fondo de la tira (radio completo) |
 | `icon_size` | `30` | 8-64 px | lado de los iconos de ventana (no más que la fila) |
 | `icon_gap` | `10` | 0-40 px | entre iconos |
@@ -1508,7 +1509,8 @@ para la misma clase. Los PNG del tema se dibujan a su tamaño, centrados; los SV
 `icon_size`. La ventana enfocada lleva un recuadro claro detrás.
 
 **Si no cabe** en `width` (con las tiras que `strip` abre en reposo; con
-`"pressed"`, sitio para la más ancha): primero se quitan iconos de las tiras (más
+`"pressed"`, sitio para la más ancha; con `"tap"`, sitio para la del activo
+aunque esté cerrada, como con `"active"`): primero se quitan iconos de las tiras (más
 "+N"), y después workspaces, empezando por el más lejano al activo, con un "+N" al
 final. El activo siempre se ve.
 
@@ -1549,6 +1551,69 @@ class_icons = { "kitty" = "utilities-terminal", "zen" = "zen-browser" }
 overview_action = { type = "key", key = "KEY_F15" }   # p. ej. un bind de Hyprland
 ```
 
+##### La tira al tocar: `strip = "tap"`
+
+La barra en reposo solo muestra los workspaces; las ventanas aparecen cuando se
+piden, en tres niveles:
+
+| Nivel | Qué se ve | Cómo se llega |
+|---|---|---|
+| 0 | los workspaces (círculos y la píldora activa) | en reposo |
+| 1 | además, la tira con los iconos de las ventanas del activo, junto a su píldora | tocar la píldora **activa** |
+| 2 | los botones de la app (`app_actions`) con su icono como asa, en el sitio del elemento | tocar el icono de una app de la tira que tenga botones |
+
+- **Tocar otro workspace** cambia a él, como siempre, y no despliega nada.
+- **Tocar la píldora activa** abre su tira; tocarla otra vez la cierra. Al
+  activo nunca se le manda «cambia a ti mismo» (con `workspace_back_and_forth` de
+  Hyprland eso te llevaría al anterior). Si no tiene ventanas, no pasa nada (solo
+  el rebote de la pulsación).
+- **Un icono de la tira** enfoca esa ventana; si su clase tiene `app_actions`, se
+  despliegan sus botones (nivel 2); si no, la tira sigue abierta.
+- **El asa** (el icono de la app en el nivel 2) vuelve a la tira, con su plazo
+  empezando de nuevo.
+
+**Plazo.** La tira se cierra sola tras `collapse_after_ms` (5000 por defecto) sin
+tocar el elemento; cada toque lo reinicia y un dedo apoyado lo detiene. Con los
+botones fuera cuenta el plazo de los botones; si vence, se pliega todo a nivel 0.
+
+**Se pliega todo a nivel 0** al vencer el plazo; al cambiar de workspace (teclado,
+ratón o tocando otro); si se cierra la ventana de los botones o el workspace se
+queda sin ventanas; con `close_on_tap = true`, al pulsar un botón; y con la capa
+Fn o el reposo, al momento y sin animación. Si el **foco pasa a una ventana de
+otra app** con los botones fuera, se vuelve a la tira (nivel 1) con el plazo de
+nuevo en marcha.
+
+**Aspecto.** La tira es la misma de `strip = "active"` (fondo, iconos, borde,
+`strip_height`, `icon_size`...): se abre junto a la píldora empujando a los demás
+workspaces, en `strip_transition_ms` (150 ms) a ~30 fps, y quieta se ve igual que
+en `"active"`. El ancho del elemento no cambia nunca: el hueco de la tira está
+reservado (ver «Si no cabe» arriba), así que en reposo queda espacio libre a la
+derecha de los workspaces. Los botones del nivel 2 son los de
+[`app_actions`](#botones-por-app-app_actions), con su fundido.
+
+**Coste.** En reposo (nivel 0), nada: ni fotogramas ni temporizadores. Con la tira
+o los botones fuera y quietos, un único despertar pendiente (el del plazo). Solo
+hay fotogramas mientras algo se mueve.
+
+```toml
+[[layers.items]]
+type = "workspaces"
+width = 520
+strip = "tap"
+collapse_after_ms = 5000      # la tira (y los botones) se cierran tras esto sin tocar
+strip_transition_ms = 150     # al abrir y cerrar la tira (0-600)
+# + los [[layers.items.app_actions]] que quieras (ver abajo)
+```
+
+Para verlo sin Hyprland: `bar --png ... --level 0|1|2` (el 2 con `--expand
+<clase>`; ver [sección 10](#vista-previa-sin-tocar-la-barra---png)).
+
+**Probarlo en la barra:** tras `./install.sh` y reiniciar el servicio, toca la
+píldora activa (se abre la tira), espera 5 s (se cierra), ábrela y toca kitty (o
+la app con botones: nivel 2), toca el asa (vuelve a la tira), cambia de workspace
+con el teclado (se cierra todo). El journal (`journalctl -u touchbinux -f`) dice
+`workspaces: "kitty" buttons out` al desplegar los botones.
+
 ##### Botones por app: `app_actions`
 
 Al **tocar el icono de una app** en la tira, además de darle el foco (como
@@ -1580,7 +1645,7 @@ action = { type = "keys", keys = "ctrl+c" }
 | Campo (en `workspaces`) | Por defecto | Qué hace |
 |---|---|---|
 | `[[...app_actions]]` | — | las apps con botones (1-32) |
-| `collapse_after_ms` | `5000` | tiempo sin tocar nada del desplegable hasta que se pliega solo (500-60000). Cada toque lo reinicia |
+| `collapse_after_ms` | `5000` | tiempo sin tocar nada del desplegable hasta que se pliega solo (500-60000). Cada toque lo reinicia. Con `strip = "tap"` es también el de la tira (y vale sin `app_actions`) |
 | `close_on_tap` | `false` | si pulsar un botón lo pliega |
 | `app_transition_ms` | `150` | duración del despliegue y del pliegue (0-1000) |
 
@@ -1592,7 +1657,8 @@ Cada `[[layers.items.app_actions]]`:
 | `title_contains` | opcional: además, el título contiene este texto (sin distinguir mayúsculas). Se mira al tocar el icono |
 | `[[...app_actions.children]]` | 1-12 botones, como los hijos de un `drag_children`: `label` y/o `icon`, `action`, `id` (por defecto `<elemento>.<primera clase>.<n>`, p. ej. `workspaces.zen.1`, que es lo que llega por el socket) y su caja (`shape`, `radius`, `size`, `background`, `pressed_background`, `pressed_scale`, `text_color`, `color`, `border_*`). Sin `hold` |
 
-**Cuándo se pliega:** al tocar el asa (el icono de la app); tras
+**Cuándo se pliega** (con `strip = "tap"`, ver [arriba](#la-tira-al-tocar-strip--tap)
+qué pasa con la tira): al tocar el asa (el icono de la app); tras
 `collapse_after_ms` sin tocarlo; con `close_on_tap = true`, al pulsar un botón;
 cuando el foco pasa a una ventana de **otra** app (a otra ventana de la misma, no)
 o a otro workspace; si la ventana se cierra o cambia de clase. La capa Fn y el
@@ -1616,7 +1682,7 @@ cortas, **520 px** (el ancho habitual) bastan.
 
 - Con `strip = "none"` no hay iconos que tocar: `app_actions` es un error ahí. Con
   `strip = "active"` solo se ven (y se pueden tocar) los del workspace activo;
-  con `"all"`, los de todos.
+  con `"all"`, los de todos; con `"tap"`, los del activo una vez abierta su tira.
 - Sin botones para esa clase, tocar el icono solo hace foco, como antes.
 - En reposo no cuesta nada: desplegado y quieto, solo queda pendiente el momento
   del pliegue automático (un único temporizador); plegado, nada. Durante el
@@ -2328,7 +2394,7 @@ una suspensión real.
 | `capture.rs` | `capture`: modos e iconos, seguimiento de `wf-recorder`, indicador de grabación |
 | `status.rs` | `status`: estado compartido (grabación, captura), lo que muestra cada elemento en cada instante y su dibujo |
 | `statussrc.rs` | `status`: vigilancia de la carpeta de capturas (inotify) y de los procesos que graban (`/proc` y pidfd) |
-| `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, círculos y píldora o cápsulas, tiras de iconos; nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
+| `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, círculos y píldora o cápsulas, tiras de iconos (y la de `strip = "tap"` con su plazo); nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
 | `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |
@@ -2342,7 +2408,7 @@ una suspensión real.
 | `ipc.rs` | el socket JSON por líneas |
 | `runner.rs`, `user.rs` | lanzar comandos como el usuario de sesión |
 | `keys.rs` | teclado virtual (uinput) y acordes (`keys`) |
-| `appactions.rs` | botones por app de `workspaces` (`app_actions`): despliegue, pliegue y foco |
+| `appactions.rs` | botones por app de `workspaces` (`app_actions`): despliegue, pliegue (y por qué se plegó, para la tira de `strip = "tap"`) y foco |
 | `appkeys.rs` | `app_keys` (alternativa): un set de botones por clase de ventana, con fundido |
 | `fnkey.rs` | la tecla Fn del teclado interno: solo lectura, filtro del kernel |
 | `fnlayer.rs` | cuándo sale la capa Fn (máquina de estados) y el fundido |
@@ -2381,6 +2447,18 @@ para esa clase se dibuja con sus botones desplegados, sobre un Hyprland inventad
 
 ```sh
 ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/zen.png --expand zen
+```
+
+Con `--level 0|1|2` (solo `bar --png`), los `workspaces` se dibujan en ese nivel de
+[`strip = "tap"`](#la-tira-al-tocar-strip--tap) sobre otro Hyprland inventado:
+workspaces 1 (activo), 2 y 3; en el 1, una ventana de la clase de `--expand` (kitty
+si no se da) y una de firefox; en el 2, una de Code. `0`: en reposo; `1`: con la
+tira del activo abierta; `2`: además, los botones de la clase de `--expand`
+(obligatorio con `2`). Sin `strip = "tap"`, el `1` se ve como el `0` (y lo avisa).
+
+```sh
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l1.png --level 1
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l2.png --level 2 --expand kitty
 ```
 
 Con `--focus-class <clase>` (solo `bar --png`), los `app_keys` se dibujan como si

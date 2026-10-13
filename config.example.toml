@@ -367,7 +367,9 @@ format = "%H:%M"
 # pill dot_size high and active_width long, in active_color. style = "capsule":
 # inactive, a horizontal bar; active, the same turned upright. Beside a capsule a strip of its windows' icons
 # opens (strip = "active": the active one's; "pressed": under the finger; "all";
-# "none"). New workspaces are born out of their neighbour, closed ones merge back.
+# "none"; "tap": the active one's when you tap its capsule, folded again after
+# collapse_after_ms without a touch, another workspace, Fn or rest; room for it
+# is kept either way). New workspaces are born out of their neighbour, closed ones merge back.
 # Tap a capsule to go to that workspace, an icon to focus that window (sent on
 # Hyprland's control socket). Icons: class_icons, then your theme, else an initial.
 # [[layers.items]]
@@ -384,7 +386,8 @@ format = "%H:%M"
 # # bar_long = 28                  #   nor active_orientation then): axes, px
 # # bar_short = 16                 #   (14:8 like the island)
 # gap = 8                          # between capsules (default 6 with capsules)
-# strip = "active"
+# strip = "active"                 # or "tap" (see above), then also
+# # strip_transition_ms = 150      #   opening and closing the strip (0-600)
 # strip_background = "#1a1d1c"
 # icon_size = 30
 # icon_gap = 10
@@ -409,7 +412,9 @@ format = "%H:%M"
 # # chord) go to that window once it has the focus. They must fit in `width`
 # # (the load error says how wide it must be). The bar's font has no arrows
 # # (◀ ↻...): use icons from your theme (Freedesktop names) or text.
-# collapse_after_ms = 5000         # default
+# # With strip = "tap" they unfold over its open strip: their icon goes back to
+# # it, anything else folds both.
+# collapse_after_ms = 5000         # default (with strip = "tap", the strip's too)
 # close_on_tap = false             # default: a button doesn't fold them
 # app_transition_ms = 150          # unfolding and folding (0-1000)
 # [[layers.items.app_actions]]

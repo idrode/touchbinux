@@ -411,8 +411,9 @@ Cómo se comporta:
 ### Reposo: `[idle]`
 
 Como en el Mac: sin uso, la barra se **atenúa**, luego **duerme** (una capa mínima,
-por ejemplo solo un GIF, muy tenue) y al final se **apaga**. Un toque o la tecla Fn
-la despiertan. Sin la sección `[idle]` no cambia nada: el daemon ni toca el brillo.
+por ejemplo solo un GIF, muy tenue) y al final se **apaga**. «Sin uso» es **sin
+actividad ni en la barra ni en el teclado, el ratón o el touchpad**; cualquiera de
+ellos la despierta. Sin la sección `[idle]` no cambia nada: el daemon ni toca el brillo.
 
 ```toml
 [idle]
@@ -423,6 +424,7 @@ sleep_layer = "idle"
 sleep_level = 0.10
 off_after_s = 300
 wake_on = ["touch", "fn"]
+activity_from = ["touch", "desktop"]
 swallow_wake_touch = true
 fade_ms = 250
 idle_gif_fps = 8
@@ -436,7 +438,8 @@ idle_gif_fps = 8
 | `sleep_layer` | — | id de una `[[layers]]` | la capa del reposo. No puede ser la de `[fn]` ni la de inicio, y necesita `sleep_after_s` |
 | `sleep_level` | `0.10` | 0.0-1.0 | brillo dormida, fracción del normal |
 | `off_after_s` | `0` | 0-86400 | hasta **apagar**: brillo 0 y no se dibuja nada |
-| `wake_on` | `["touch", "fn"]` | `touch`, `fn` | qué la despierta dormida o apagada (al menos uno) |
+| `wake_on` | `["touch", "fn"]` | `touch`, `fn` | qué de la barra la despierta dormida o apagada (al menos uno) |
+| `activity_from` | `["touch", "desktop"]` | `touch`, `desktop` | qué cuenta como actividad: la barra (siempre, `touch` es obligatorio) y el escritorio (teclado, ratón, touchpad, según Hyprland). `["touch"]`: solo la barra, como antes |
 | `swallow_wake_touch` | `true` | | el toque que la despierta no hace nada más (ni toque, ni arrastre) |
 | `fade_ms` | `250` | 0-2000 | rampa de brillo al bajar de etapa. Al despertar, 150 ms como mucho |
 | `idle_gif_fps` | `8` | 0-30 | fotogramas por segundo de la capa dormida, como mucho. `0`: se dibuja una vez, con los GIF en su primer fotograma |
@@ -446,25 +449,54 @@ uses (las distintas de 0) tienen que ser crecientes (`dim < sleep < off`). Puede
 quitar cualquiera; sin `sleep_layer` y con `off_after_s` a la vez es un error (las
 dos apagarían).
 
-**Qué es actividad.** Cualquier toque en la barra y pulsar o soltar Fn. Despierta,
-la barra atenuada sigue funcionando normal: el toque actúa y devuelve el brillo.
-Dormida o apagada, solo despierta lo que esté en `wake_on`; lo demás se ignora. El
-**teclado no cuenta** (leerlo obligaría al daemon a ver todo lo que escribes; ver
-[SECURITY.md](SECURITY.md#reposo-sin-leer-el-teclado)). Para que escribir la
-mantenga despierta, que te avise tu sesión por el socket:
+**Qué es actividad.**
+
+- **En la barra**: cualquier toque, pulsar o soltar Fn, y el aviso del socket
+  (`{"type":"idle","state":"activity"}`). Despierta, la barra atenuada sigue
+  funcionando normal: el toque actúa y devuelve el brillo. Dormida o apagada, de
+  la barra solo despierta lo que esté en `wake_on`; lo demás se ignora.
+- **En el escritorio** (`activity_from` con `"desktop"`, por defecto): teclear,
+  mover el ratón o usar el touchpad. Lo cuenta **Hyprland**, no el daemon: por el
+  protocolo Wayland `ext-idle-notify-v1`, el daemon le pide un aviso por etapa
+  («avísame tras `dim_after_s` sin entrada», otro para `sleep_after_s`, otro para
+  `off_after_s`) y Hyprland solo le contesta **«inactivo»** o **«activo otra
+  vez»**. **No se lee ningún dispositivo de entrada**: el daemon no ve ninguna
+  tecla ni movimiento, ni cuándo ocurren, solo esos dos avisos (ver
+  [SECURITY.md](SECURITY.md#reposo-sin-leer-el-teclado)).
+
+Una etapa llega cuando se cumplen **las dos cosas**: sus segundos sin tocar la
+barra **y** Hyprland ha avisado de que lleva ese mismo tiempo sin entrada. Si
+Hyprland avisa pero tocaste la barra hace menos, espera lo que falte desde el
+toque. Cuando Hyprland dice «activo otra vez», la barra despierta como con un
+toque (brillo normal, la capa de antes), sea cual sea `wake_on`, y **no se traga
+nada**: el primer toque después funciona. Los toques en la barra no llegan a
+Hyprland (el daemon tiene el táctil para él solo), pero las teclas virtuales que
+mandan sus botones sí, como cualquier teclado. El toque que despierta la barra sí
+sigue `swallow_wake_touch`.
+
+Se conecta a la sesión del usuario de `run_as` (el socket Wayland de su
+Hyprland, en `/run/user/<uid>`), como hace con los workspaces. Si no puede (sin
+Hyprland, sin usuario de sesión, o un compositor sin el protocolo), lo dice **una
+vez** en el log (`idle: desktop activity unavailable (...)`) y cuenta solo la
+barra, como con `["touch"]`. El archivo es válido igual: eso se mira al
+ejecutar, no al cargar. Si Hyprland se reinicia, se vuelve a conectar.
+
+**Inhibidores.** Si algo **inhibe el reposo** en Hyprland, la barra no se
+atenúa, no duerme ni se apaga: Hyprland no avisa de «inactivo» mientras dure, y
+si empieza con la barra ya en reposo, avisa de «activo» y la barra despierta.
+Comprobado en el código de Hyprland 0.56.2 (`IdleNotify.cpp`, `IdleInhibitor.cpp`):
+cuentan los inhibidores Wayland (`idle-inhibit`) de ventanas **visibles**, que
+usan mpv y los navegadores con vídeo, y las reglas de ventana `idleinhibit`
+(`always`, `focus`, `fullscreen`). No cuentan los que solo piden la inhibición
+por D-Bus (`org.freedesktop.ScreenSaver`): esos los atiende hypridle, no
+Hyprland. Para tener la barra despierta con una app concreta, una regla
+`idleinhibit` en Hyprland es lo más directo.
+
+Con `activity_from = ["touch"]`, escribir no la mantiene despierta; si aun así lo
+quieres, que te avise tu sesión por el socket:
 
 ```sh
 echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
-```
-
-Por ejemplo, desde hypridle (**no probado**: hypridle no está instalado en este
-equipo), un `listener` que avise al volver de la inactividad del sistema:
-
-```
-listener {
-    timeout = 25
-    on-resume = echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
-}
 ```
 
 Con `wake_on = ["fn"]` el daemon abre el lector de Fn aunque no haya `[fn]` (el
@@ -494,7 +526,8 @@ Cómo se comporta:
   `appletb_backlight` en `/sys/class/backlight`): no se atenúa (dormida y apagada
   siguen; apagada manda un fotograma negro). El log lo dice al arrancar.
 - **Coste**: despierta o atenuada, como siempre (0 fps quieta) más un temporizador
-  para la siguiente etapa; dormida, `idle_gif_fps` fotogramas por segundo (ninguno
+  para la siguiente etapa (con el escritorio, solo cuando Hyprland ya ha avisado
+  y falta tiempo desde el último toque; si no, ninguno: se espera su aviso); dormida, `idle_gif_fps` fotogramas por segundo (ninguno
   con `0`); apagada, ningún fotograma y ningún temporizador de reposo, reloj ni
   batería.
 
@@ -2627,22 +2660,41 @@ Con tiempos cortos, en una copia de tu config (no hace falta tocar
 
 ```toml
 [idle]
-dim_after_s = 5
-sleep_after_s = 10
+dim_after_s = 10
+sleep_after_s = 20
 sleep_layer = "idle"
-off_after_s = 20
+off_after_s = 40
 ```
 
 ```sh
-cargo test idle                 # etapas, brillo, despertar, socket (reloj simulado)
+cargo test idle                 # etapas, brillo, despertar, escritorio, socket (reloj simulado)
+cargo test idle_desktop_live -- --ignored --nocapture   # contra tu Hyprland, sin root: no toques nada 5 s
 ./target/debug/touchbinux bar --config <copia> --png /tmp/idle.png --layer idle
 sudo systemctl stop touchbinux
 sudo ./target/debug/touchbinux bar --config <copia>
 ```
 
 En el log: `idle: backlight /sys/class/backlight/228600000.dsi.0 (normal N of 255)`
-y, sin tocar nada, `idle: Awake -> Dim` a los 5 s, `Dim -> Sleep` a los 10 s y
-`Sleep -> Off` a los 20 s. El brillo se puede mirar en otra terminal:
+e `idle: following the desktop's activity on /run/user/<uid>/wayland-1 (...)`. Luego:
+
+1. **Todo quieto** (ni barra, ni teclado, ni ratón): `idle: desktop idle for
+   Dim's time` y `idle: Awake -> Dim` a los 10 s, `Dim -> Sleep` a los 20 s y
+   `Sleep -> Off` a los 40 s.
+2. **Teclear sin tocar la barra** (en otra ventana, sin parar): no pasa de
+   despierta, aunque pasen más de 40 s. Al dejar de teclear, 10 s después se
+   atenúa.
+3. **Mover el ratón** con la barra atenuada, dormida o apagada: despierta al
+   momento (`idle: Off -> Awake`), con el brillo normal y la capa de antes, y el
+   primer toque en la barra ya funciona.
+4. **Tocar la barra sin tocar el teclado**: con todo quieto hasta que se atenúe
+   (10 s), un toque la despierta; Hyprland sigue «inactivo», así que vuelve a
+   atenuarse 10 s después **de ese toque** (no antes). Toca un hueco o un botón
+   que no mande teclas: los que emiten teclas virtuales llegan a Hyprland como
+   teclear y cuentan también como actividad del escritorio.
+5. **Inhibidor**: un vídeo en mpv a la vista (o una regla `idleinhibit always`):
+   no pasa de despierta; si empieza con la barra en reposo, la despierta.
+6. **Solo la barra**: con `activity_from = ["touch"]` en la copia, el log no dice
+   nada del escritorio y, aunque teclees, se atenúa a los 10 s de no tocarla. El brillo se puede mirar en otra terminal:
 
 ```sh
 watch -n 0.2 cat /sys/class/backlight/228600000.dsi.0/brightness

@@ -186,13 +186,26 @@ Sin `[fn]` (ni `wake_on` con `fn` en `[idle]`) no se abre ningún teclado.
 toques en la barra (su propio dispositivo) y la tecla Fn, por el mismo lector de
 arriba y **con el mismo filtro**: el kernel le sigue pasando solo `KEY_FN`.
 
-Que escribir en el teclado mantenga la barra despierta **no se implementa, a
+Que el daemon **lea** el teclado o el ratón para eso **no se implementa, a
 propósito, por privacidad**: haría falta quitar el filtro y que un proceso root
 recibiera cada pulsación, aunque solo fuera para mirar la hora. No
 hay opción `keyboard` en `wake_on` y el config la rechaza (`unknown variant`).
 
-La alternativa es que avise la **sesión del usuario**, que ya ve el teclado: el
-socket acepta `{"type":"idle","state":"activity"}` (solo de root o del usuario de
+Lo que sí hace (`activity_from` con `"desktop"`, por defecto) es **preguntar al
+compositor**, que ya ve la entrada: por `ext-idle-notify-v1` sobre el socket
+Wayland del usuario de sesión, pide un aviso por etapa y Hyprland solo le manda
+«inactivo durante N ms» y «activo otra vez». Ni teclas, ni posiciones, ni la hora
+de cada pulsación: un cambio de estado como mucho por etapa. En esa conexión solo
+se enlazan el notificador y un `wl_seat` (el protocolo pide uno; no se crean
+teclado ni puntero, y los eventos del seat se ignoran). El socket se valida como
+el entorno de los comandos (`/run/user/<uid>` privado del usuario, socket suyo).
+Las lecturas y escrituras no bloquean (`MSG_DONTWAIT`): un Hyprland colgado no
+para el bucle. Un compositor malicioso solo podría mandar «inactivo» o «activo»
+(atenuar o despertar la barra), y el parser es Rust seguro (`wayland-backend`,
+sin libwayland).
+
+Otra vía, para quien use `activity_from = ["touch"]`, es que avise la **sesión
+del usuario**: el socket acepta `{"type":"idle","state":"activity"}` (solo de root o del usuario de
 sesión, como el resto del socket) y lo trata como un toque. hypridle u otro
 programa de la sesión puede mandarlo (ver `docs/GUIA.md`, «Reposo»). Por esa vía
 solo llega «hay actividad», nunca qué se ha tecleado. Cualquier otro

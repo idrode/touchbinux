@@ -632,6 +632,11 @@ format = "%H:%M"
 # sleep_level = 0.10
 # off_after_s = 300                # brightness 0 and nothing drawn
 # wake_on = ["touch", "fn"]        # touch | fn
+# activity_from = ["touch", "desktop"]  # what counts as activity: the bar always;
+#                                  #   "desktop" = keyboard/mouse/touchpad as Hyprland
+#                                  #   reports idle/resumed (ext-idle-notify-v1). No
+#                                  #   input device is read: only those two signals.
+#                                  #   Idle inhibitors (fullscreen video) keep it awake.
 # swallow_wake_touch = true        # the waking touch does nothing else
 # fade_ms = 250                    # brightness ramp (waking: 150 ms at most)
 # idle_gif_fps = 8                 # sleep layer's frames a second (0 = still)

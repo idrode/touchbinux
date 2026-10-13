@@ -136,11 +136,13 @@ const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] \
-                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>]]\n\
+                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>] [--level 0|1|2]]\n\
                      --status (previews only): rec | rec_done | shot | rec_shot\n\
                      --layer (previews only): the bar scene's layer to draw, e.g. fn\n\
                      --focus-class (previews only): app_keys show this window class's set\n\
-                     --expand (previews only): workspaces with this class's app buttons out";
+                     --expand (previews only): workspaces with this class's app buttons out\n\
+                     --level (previews only): workspaces at that level on a made-up Hyprland: 0 at rest, \
+                     1 the active strip out (strip = \"tap\"), 2 also --expand's app buttons";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -182,6 +184,9 @@ struct Args {
     /// `--png` only: workspaces drawn with one window of this class, its
     /// app buttons out (no Hyprland needed).
     expand: Option<String>,
+    /// `--png` only: workspaces drawn at this level (0..=2) on a made-up
+    /// Hyprland whose active workspace has a few windows.
+    level: Option<u8>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -194,6 +199,7 @@ fn parse_args() -> Result<Args> {
         layer: None,
         focus_class: None,
         expand: None,
+        level: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -214,6 +220,13 @@ fn parse_args() -> Result<Args> {
             "--layer" => args.layer = Some(it.next().ok_or(anyhow!(USAGE))?),
             "--focus-class" => args.focus_class = Some(it.next().ok_or(anyhow!(USAGE))?),
             "--expand" => args.expand = Some(it.next().ok_or(anyhow!(USAGE))?),
+            "--level" => {
+                let n = it.next().ok_or(anyhow!(USAGE))?;
+                match n.parse::<u8>() {
+                    Ok(l @ 0..=2) => args.level = Some(l),
+                    _ => return Err(anyhow!("--level must be 0, 1 or 2, not {n:?}\n{USAGE}")),
+                }
+            }
             _ => return Err(anyhow!("unknown argument {arg:?}\n{USAGE}")),
         }
     }
@@ -228,6 +241,12 @@ fn parse_args() -> Result<Args> {
     }
     if args.expand.is_some() && (args.png.is_none() || args.scene != "bar") {
         return Err(anyhow!("--expand only goes with bar --png\n{USAGE}"));
+    }
+    if args.level.is_some() && (args.png.is_none() || args.scene != "bar") {
+        return Err(anyhow!("--level only goes with bar --png\n{USAGE}"));
+    }
+    if args.level == Some(2) && args.expand.is_none() {
+        return Err(anyhow!("--level 2 needs --expand <class>: whose app buttons to draw\n{USAGE}"));
     }
     Ok(args)
 }
@@ -1488,17 +1507,53 @@ impl App {
             focused: Some("preview".into()),
         });
         self.scene = self.build_scene()?;
-        let items: Vec<String> = self
-            .config
-            .layers
-            .iter()
-            .flat_map(|l| &l.items)
-            .filter(|i| i.kind == ItemKind::Workspaces)
-            .filter_map(|i| i.id().map(String::from))
-            .collect();
+        let items = self.workspaces_ids();
         let opened = items.iter().any(|id| self.open_app_row(id, "preview", false));
         if !opened {
             eprintln!("--expand: no workspaces item with app_actions for {class:?} on this layer");
+        }
+        Ok(())
+    }
+
+    /// Every workspaces item's id, on any layer.
+    fn workspaces_ids(&self) -> Vec<String> {
+        let items = self.config.layers.iter().flat_map(|l| &l.items);
+        let ws = items.filter(|i| i.kind == ItemKind::Workspaces);
+        ws.filter_map(|i| i.id().map(String::from)).collect()
+    }
+
+    /// `--level <n>`: Hyprland made up with workspaces 1 (active), 2 and 3; on 1,
+    /// a window of `class` (focused; kitty without --expand) and one of firefox
+    /// (kitty if that is `class`), on 2 one of Code. Level 1 opens every
+    /// strip = "tap" item's strip, 2 also `class`'s app buttons over it.
+    fn level_preview(&mut self, level: u8, class: Option<&str>) -> Result<()> {
+        let first = class.unwrap_or("kitty");
+        let second = if first.eq_ignore_ascii_case("firefox") { "kitty" } else { "firefox" };
+        let win = |addr: &str, class: &str, workspace| hypr::Window {
+            addr: addr.into(),
+            class: class.into(),
+            title: String::new(),
+            workspace,
+        };
+        self.fake_hypr = Some(hypr::HyprState {
+            workspaces: [1, 2, 3].map(|i| (i, i.to_string())).into(),
+            active_workspace: Some(1),
+            windows: vec![win("preview", first, 1), win("preview2", second, 1), win("preview3", "Code", 2)],
+            focused: Some("preview".into()),
+        });
+        self.scene = self.build_scene()?;
+        if level == 0 {
+            return Ok(());
+        }
+        let t = self.epoch.elapsed();
+        if !self.scene.open_strips(t) {
+            eprintln!("--level {level}: no workspaces item with strip = \"tap\" on this layer (their strips are as at rest)");
+        }
+        if level == 2 {
+            let items = self.workspaces_ids();
+            if !items.iter().any(|id| self.open_app_row(id, "preview", false)) {
+                eprintln!("--level 2: no workspaces item with app_actions for {first:?} on this layer");
+            }
         }
         Ok(())
     }
@@ -1892,8 +1947,10 @@ fn main() -> Result<()> {
             touchbar_light: None,
         };
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
-        if let Some(class) = app.args.expand.clone() {
-            app.expand_preview(&class)?;
+        match (app.args.level, app.args.expand.clone()) {
+            (Some(level), class) => app.level_preview(level, class.as_deref())?,
+            (None, Some(class)) => app.expand_preview(&class)?,
+            (None, None) => {}
         }
         // Give mpv a moment to report its state, so the preview shows it.
         if let Some(m) = &mut app.mpv {
@@ -2845,6 +2902,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -2959,6 +3017,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3211,6 +3270,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3305,6 +3365,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3573,6 +3634,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3757,7 +3819,7 @@ mod tests {
         );
         fs::write(&path, toml).unwrap();
         let parts = AppParts {
-            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None },
+            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None, level: None },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
             font: Font::find(FONT_CANDIDATES),
@@ -3817,6 +3879,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3937,6 +4000,7 @@ mod tests {
                 layer: None,
                 focus_class: None,
                 expand: None,
+                level: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),

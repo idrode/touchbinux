@@ -626,6 +626,16 @@ impl Scene {
         true
     }
 
+    /// strip = "tap": every such item's strip out at once (previews). Returns
+    /// whether any came out.
+    pub fn open_strips(&mut self, t: Duration) -> bool {
+        let mut any = false;
+        for (w, _) in &mut self.workspaces {
+            any |= w.open_strip(t, false);
+        }
+        any
+    }
+
     /// strip = "tap": app rows that folded by themselves take their strip with
     /// them, except from the handle, which goes back to it (its count started
     /// again). Returns whether a strip folds.
@@ -6135,4 +6145,30 @@ mod tests {
             assert_eq!(s.next_change(MS(300)), None, "{mode}");
         }
     }
+
+    #[test]
+    fn tap_mode_strip_slides_out_and_rests_as_strip_active() {
+        let Some(font) = font() else { return };
+        let live = live();
+        let st = ws_state();
+        let frame = |s: &mut Scene, t: u64| {
+            let mut c = Canvas::new(W, H).unwrap();
+            s.advance(MS(t), &live);
+            s.draw(&mut c, MS(t), &font, &live).unwrap();
+            c.data().to_vec()
+        };
+        let mut s = tap_scene(&font, "", &st);
+        let rest = frame(&mut s, 0);
+        tap_ws(&mut s, 2, MS(1000), &font);
+        let half = frame(&mut s, 1075);
+        let open = frame(&mut s, 1150);
+        assert!(half != rest && half != open, "in between half way");
+        // Out, it looks as strip = "active" always does.
+        let mut a = ws_scene(&font, &apps_layer(""), Some(&st));
+        assert!(open == frame(&mut a, 0));
+        // Folded by its count, as at rest again.
+        frame(&mut s, 6000);
+        assert!(frame(&mut s, 6150) == rest);
+    }
 }
+

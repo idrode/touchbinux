@@ -19,6 +19,7 @@ mod hypr;
 mod hyprctl;
 mod hyprwatch;
 mod icons;
+mod desktopidle;
 mod idle;
 mod ipc;
 mod keys;

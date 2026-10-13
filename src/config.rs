@@ -75,6 +75,14 @@ const THUMB_SIZE: std::ops::RangeInclusive<u32> = 8..=200;
 const SEEK_HEIGHT: std::ops::RangeInclusive<f32> = 1.0..=40.0;
 /// workspaces: default `width` (the most it takes), `max_icons` and their ranges.
 pub const DEFAULT_WS_WIDTH: f32 = 400.0;
+/// brightness with icon_style = "circle": defaults and ranges of its look.
+pub const DEFAULT_CIRCLE_SIZE: f32 = 28.0;
+pub const DEFAULT_RING_WIDTH: f32 = 2.5;
+pub const DEFAULT_RING_GAP: f32 = 2.0;
+const CIRCLE_SIZE: std::ops::RangeInclusive<f32> = 8.0..=60.0;
+const RING_WIDTH: std::ops::RangeInclusive<f32> = 0.0..=6.0;
+const RING_GAP: std::ops::RangeInclusive<f32> = 0.0..=6.0;
+const MIN_FILL: std::ops::RangeInclusive<f32> = 0.0..=0.3;
 pub const DEFAULT_MAX_ICONS: usize = 6;
 pub const DEFAULT_BAR_LONG: f32 = 28.0;
 pub const DEFAULT_BAR_SHORT: f32 = 16.0;
@@ -442,6 +450,30 @@ pub enum ItemKind {
     Spacer,
 }
 
+/// brightness: how its icon shows the level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconStyle {
+    /// A sun whose rays grow with it.
+    #[default]
+    Sun,
+    /// A ring filled inside (`circle_fill`).
+    Circle,
+}
+
+/// icon_style = "circle": how the inside fills with the level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CircleFill {
+    /// A disc growing from the centre.
+    #[default]
+    Radial,
+    /// Liquid rising from the bottom, its top flat.
+    Level,
+    /// A sector turning clockwise from the top.
+    Sweep,
+}
+
 /// workspaces: which capsules show their strip of window icons.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -693,9 +725,25 @@ pub struct ItemConfig {
     /// workspaces: most window icons in the active pill (then "+N").
     #[serde(default)]
     pub max_icons: Option<usize>,
-    /// workspaces: side of the window icons, px (default: the row's icon size).
+    /// workspaces: side of the window icons, px (default: the row's icon size);
+    /// brightness with icon_style = "circle": the circle's outer diameter.
     #[serde(default)]
     pub icon_size: Option<f32>,
+    /// brightness: "sun" (default) or "circle", and the circle's look.
+    #[serde(default)]
+    pub icon_style: Option<IconStyle>,
+    #[serde(default)]
+    pub circle_fill: Option<CircleFill>,
+    #[serde(default)]
+    pub ring_width: Option<f32>,
+    #[serde(default)]
+    pub ring_gap: Option<f32>,
+    #[serde(default)]
+    pub ring_color: Option<Color>,
+    #[serde(default)]
+    pub fill_color: Option<Color>,
+    #[serde(default)]
+    pub min_fill: Option<f32>,
     /// workspaces: icon (theme name or absolute path) by window class, before the
     /// icon theme is asked; classes compared in lowercase.
     #[serde(default)]
@@ -1115,6 +1163,13 @@ impl ItemConfig {
             close_on_tap: None,
             max_icons: None,
             icon_size: None,
+            icon_style: None,
+            circle_fill: None,
+            ring_width: None,
+            ring_gap: None,
+            ring_color: None,
+            fill_color: None,
+            min_fill: None,
             inactive_color: None,
             style: None,
             dot_size: None,
@@ -1395,7 +1450,7 @@ impl ItemConfig {
             ],
             ItemKind::Clock => &["id", "format", "action", "text_color"],
             ItemKind::Battery => &["id", "icon_dir", "action", "text_color"],
-            ItemKind::Volume | ItemKind::Brightness => &[
+            ItemKind::Volume => &[
                 "id",
                 "action",
                 "color",
@@ -1403,6 +1458,23 @@ impl ItemConfig {
                 "expand_width",
                 "collapse_after_ms",
                 "text_color",
+            ],
+            ItemKind::Brightness => &[
+                "id",
+                "action",
+                "color",
+                "anim_ms",
+                "expand_width",
+                "collapse_after_ms",
+                "text_color",
+                "icon_style",
+                "circle_fill",
+                "icon_size",
+                "ring_width",
+                "ring_gap",
+                "ring_color",
+                "fill_color",
+                "min_fill",
             ],
             ItemKind::Gif => &["id", "path", "play", "action"],
             ItemKind::Text => &["id", "key", "action", "text_color"],
@@ -1547,6 +1619,13 @@ impl ItemConfig {
             ("close_on_tap", self.close_on_tap.is_some()),
             ("max_icons", self.max_icons.is_some()),
             ("icon_size", self.icon_size.is_some()),
+            ("icon_style", self.icon_style.is_some()),
+            ("circle_fill", self.circle_fill.is_some()),
+            ("ring_width", self.ring_width.is_some()),
+            ("ring_gap", self.ring_gap.is_some()),
+            ("ring_color", self.ring_color.is_some()),
+            ("fill_color", self.fill_color.is_some()),
+            ("min_fill", self.min_fill.is_some()),
             ("class_icons", self.class_icons.is_some()),
             ("inactive_color", self.inactive_color.is_some()),
             ("style", self.style.is_some()),
@@ -1714,6 +1793,9 @@ impl ItemConfig {
         if self.kind == ItemKind::Workspaces {
             self.validate_workspaces(&what)?;
         }
+        if self.kind == ItemKind::Brightness {
+            self.validate_level_icon(&what)?;
+        }
         if self.kind == ItemKind::Status {
             self.validate_status(&what)?;
         }
@@ -1783,6 +1865,47 @@ impl ItemConfig {
             if action.held_key().is_some() && (self.kind != ItemKind::Button || self.drags()) {
                 bail!("{what}: `hold` only works on a button without drag_children");
             }
+        }
+        Ok(())
+    }
+
+    /// brightness: icon_style and, with "circle", its look.
+    fn validate_level_icon(&self, what: &str) -> Result<()> {
+        if self.icon_style != Some(IconStyle::Circle) {
+            for (field, set) in [
+                ("circle_fill", self.circle_fill.is_some()),
+                ("icon_size", self.icon_size.is_some()),
+                ("ring_width", self.ring_width.is_some()),
+                ("ring_gap", self.ring_gap.is_some()),
+                ("ring_color", self.ring_color.is_some()),
+                ("fill_color", self.fill_color.is_some()),
+                ("min_fill", self.min_fill.is_some()),
+            ] {
+                if set {
+                    bail!("{what}: `{field}` only applies with icon_style = \"circle\"");
+                }
+            }
+            return Ok(());
+        }
+        if self.icon_size.is_some_and(|d| !CIRCLE_SIZE.contains(&d)) {
+            bail!("{what}: icon_size (the circle's diameter) must be in {CIRCLE_SIZE:?} px");
+        }
+        if self.ring_width.is_some_and(|w| !RING_WIDTH.contains(&w)) {
+            bail!("{what}: ring_width must be in {RING_WIDTH:?} px");
+        }
+        if self.ring_gap.is_some_and(|g| !RING_GAP.contains(&g)) {
+            bail!("{what}: ring_gap must be in {RING_GAP:?} px");
+        }
+        if self.min_fill.is_some_and(|f| !MIN_FILL.contains(&f)) {
+            bail!("{what}: min_fill must be in {MIN_FILL:?} (a fraction of the inside)");
+        }
+        let d = self.icon_size.unwrap_or(DEFAULT_CIRCLE_SIZE);
+        let (w, g) = (self.ring_width.unwrap_or(DEFAULT_RING_WIDTH), self.ring_gap.unwrap_or(DEFAULT_RING_GAP));
+        if d / 2.0 - w - g < 2.0 {
+            bail!(
+                "{what}: icon_size {d} leaves no room to fill inside ring_width {w} and ring_gap {g} \
+                 (the inside needs at least 4 px across): make it bigger or the ring thinner"
+            );
         }
         Ok(())
     }
@@ -4880,6 +5003,57 @@ mod tests {
         // Elsewhere it is an unknown key.
         let err = format!("{:#}", one_item("", "type='clock'\nstrip_transition_ms=100").unwrap_err());
         assert!(err.contains("strip_transition_ms"), "{err}");
+    }
+
+    #[test]
+    fn brightness_circle_icon() {
+        let b = |body: &str| one_item("", &format!("type='brightness'\n{body}"));
+        // Default: the sun, nothing else set.
+        let c = b("").unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!(item.icon_style, None);
+        assert_eq!(item.icon_style.unwrap_or_default(), IconStyle::Sun);
+        assert!(b("icon_style = 'sun'").is_ok());
+        // Every key.
+        let c = b(
+            "icon_style = 'circle'\ncircle_fill = 'sweep'\nicon_size = 30\nring_width = 2.5\n\
+             ring_gap = 1\nring_color = '#00ffb780'\nfill_color = '#ffffff'\nmin_fill = 0.1",
+        )
+        .unwrap();
+        let item = &c.layers[0].items[0];
+        assert_eq!((item.icon_style, item.circle_fill), (Some(IconStyle::Circle), Some(CircleFill::Sweep)));
+        assert_eq!((item.icon_size, item.ring_width, item.ring_gap, item.min_fill), (Some(30.0), Some(2.5), Some(1.0), Some(0.1)));
+        assert_eq!(item.ring_color.map(|c| c.0), Some(Rgba(0, 0xff, 0xb7, 0x80)));
+        for fill in ["radial", "level", "sweep"] {
+            assert!(b(&format!("icon_style = 'circle'\ncircle_fill = '{fill}'")).is_ok(), "{fill}");
+        }
+        // Edges of the ranges.
+        for ok in ["ring_width = 0", "ring_width = 6\nicon_size = 40", "ring_gap = 0", "min_fill = 0.3", "min_fill = 0.0", "icon_size = 60"] {
+            assert!(b(&format!("icon_style = 'circle'\n{ok}")).is_ok(), "{ok}");
+        }
+        for (body, want) in [
+            ("icon_style = 'moon'", "unknown variant `moon`"),
+            ("icon_style = 'circle'\ncircle_fill = 'spiral'", "unknown variant `spiral`"),
+            ("icon_style = 'circle'\nicon_size = 7", "icon_size (the circle's diameter) must be in 8.0..=60.0 px"),
+            ("icon_style = 'circle'\nicon_size = 61", "must be in 8.0..=60.0"),
+            ("icon_style = 'circle'\nring_width = -0.5", "ring_width must be in 0.0..=6.0 px"),
+            ("icon_style = 'circle'\nring_width = 6.5", "ring_width must be in 0.0..=6.0 px"),
+            ("icon_style = 'circle'\nring_gap = 7", "ring_gap must be in 0.0..=6.0 px"),
+            ("icon_style = 'circle'\nmin_fill = 0.31", "min_fill must be in 0.0..=0.3"),
+            ("icon_style = 'circle'\nmin_fill = -0.1", "min_fill must be in"),
+            ("icon_style = 'circle'\nring_color = 'green'", "ring_color"),
+            ("icon_style = 'circle'\nicon_size = 12\nring_width = 3\nring_gap = 2", "leaves no room to fill inside"),
+            ("circle_fill = 'level'", "`circle_fill` only applies with icon_style = \"circle\""),
+            ("icon_style = 'sun'\nring_width = 2", "`ring_width` only applies with icon_style = \"circle\""),
+            ("icon_size = 28", "`icon_size` only applies with icon_style = \"circle\""),
+            ("min_fill = 0.1", "`min_fill` only applies"),
+        ] {
+            let err = format!("{:#}", b(body).expect_err(body));
+            assert!(err.contains(want), "{body}: {err}");
+        }
+        // Not on volume (yet).
+        let err = format!("{:#}", one_item("", "type='volume'\nicon_style='circle'").unwrap_err());
+        assert!(err.contains("`icon_style` is not valid for a volume"), "{err}");
     }
 }
 

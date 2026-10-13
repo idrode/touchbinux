@@ -11,7 +11,8 @@ use crate::{
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba, Svg},
     config::{
         BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
-        Action, DEFAULT_APP_COLLAPSE_MS, DEFAULT_MAX_ICONS, ItemConfig, WsStrip, WsStyle,
+        Action, DEFAULT_APP_COLLAPSE_MS, DEFAULT_CIRCLE_SIZE, DEFAULT_MAX_ICONS, DEFAULT_RING_GAP,
+        DEFAULT_RING_WIDTH, IconStyle, ItemConfig, WsStrip, WsStyle,
         ItemKind, LayerConfig,
     },
     expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
@@ -23,6 +24,7 @@ use crate::{
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
+    levelicon::{CircleLook, LevelIcon},
     status,
     touch::Phase,
     workspaces::{self, Hit, Workspaces, WsView},
@@ -1733,6 +1735,28 @@ pub fn icon_size(canvas_h: u32) -> u32 {
 }
 
 /// Side of the square icon drawn in a button `button_h` px tall.
+/// A brightness item's icon_style = "circle" look; `color` is the item's. Its
+/// diameter must fit the icon's place in a row `h` high (the layout stays).
+fn circle_look(item: &ItemConfig, color: Rgba, h: f32, layer: &str, id: &str) -> Result<CircleLook> {
+    let diameter = item.icon_size.unwrap_or(DEFAULT_CIRCLE_SIZE);
+    let side = icon_side(h);
+    if diameter > side {
+        bail!(
+            "layer {layer:?}: brightness {id:?}: icon_size {diameter} px doesn't fit the icon's place, \
+             which is {side} px in this row"
+        );
+    }
+    Ok(CircleLook {
+        fill: item.circle_fill.unwrap_or_default(),
+        diameter,
+        ring_width: item.ring_width.unwrap_or(DEFAULT_RING_WIDTH),
+        ring_gap: item.ring_gap.unwrap_or(DEFAULT_RING_GAP),
+        ring_color: item.ring_color.map_or(color, |c| c.0),
+        fill_color: item.fill_color.map_or(color, |c| c.0),
+        min_fill: item.min_fill.unwrap_or(0.0),
+    })
+}
+
 pub fn icon_side(button_h: f32) -> f32 {
     (button_h - 2.0 * PADDING).max(1.0).floor()
 }
@@ -2076,9 +2100,11 @@ pub fn bar_with(
                 );
                 let color = item.color.map_or(DEFAULT_FILL, |c| c.0);
                 let open = expanded_rect(rect, area, width);
-                scene
-                    .expanders
-                    .push(Expander::new(id, level, rect, open, color, frame, fold));
+                let mut e = Expander::new(id, level, rect, open, color, frame, fold);
+                if item.icon_style == Some(IconStyle::Circle) {
+                    e.icon = LevelIcon::Circle(circle_look(item, color, rect.h, &layer.id, id)?);
+                }
+                scene.expanders.push(e);
             }
             ItemKind::Gif => {
                 let icon = gif_icon(item, rect, &mut scaled_gifs);
@@ -6169,6 +6195,236 @@ mod tests {
         // Folded by its count, as at rest again.
         frame(&mut s, 6000);
         assert!(frame(&mut s, 6150) == rest);
+    }
+
+    // brightness's icon: the sun (default) or a filled circle.
+
+    fn bright_layer(extra: &str) -> String {
+        format!(
+            "[[layers]]\nid = 'main'\n[[layers.items]]\ntype = 'brightness'\nid = 'bright'\n\
+             shape = 'circle'\n{extra}\n"
+        )
+    }
+
+    fn live_at(brightness: u8) -> Live {
+        Live { brightness: Some(brightness), ..live() }
+    }
+
+    /// The icon's square, folded (a circle item: the icon alone, centred) and
+    /// unfolded (at the slider's left): font-independent pixels.
+    fn bright_icon_squares(s: &Scene) -> [Rect; 2] {
+        let e = &s.expanders[0];
+        let side = icon_side(e.rect.h);
+        let y = (e.rect.y + (e.rect.h - side) / 2.0).round();
+        let folded = Rect::new((e.rect.x + (e.rect.w - side) / 2.0).round(), y, side, side);
+        let unfolded = Rect::new((e.open_rect.x + 2.0 * PADDING).round(), y, side, side);
+        [folded, unfolded]
+    }
+
+    fn eat_square(h: &mut u64, c: &Canvas, r: Rect) {
+        for y in r.y as u32..(r.y + r.h) as u32 {
+            for x in r.x as u32..(r.x + r.w) as u32 {
+                for b in pixel(c, x as f32, y as f32) {
+                    *h = (*h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+    }
+
+    /// Folded at 70, following 30 and 100 from outside, dragged unfolded: the
+    /// icon's square in each frame.
+    fn sun_run_hash(extra: &str, font: &Font) -> u64 {
+        let mut s = menu_scene(font, &bright_layer(extra));
+        let [folded, unfolded] = bright_icon_squares(&s);
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        let mut c = Canvas::new(W, H).unwrap();
+        let mut frame = |s: &mut Scene, t: u64, b: u8, sq: Rect, h: &mut u64| {
+            let live = live_at(b);
+            s.advance(MS(t), &live);
+            s.draw(&mut c, MS(t), font, &live).unwrap();
+            eat_square(h, &c, sq);
+        };
+        frame(&mut s, 0, 70, folded, &mut h);
+        for t in [1000, 1030, 1090, 1179, 1180, 1300] {
+            frame(&mut s, t, 30, folded, &mut h);
+        }
+        for t in [2000, 2045, 2180] {
+            frame(&mut s, t, 100, folded, &mut h);
+        }
+        // Unfolded (anim_ms 0), dragged to 10 then 60.
+        let at = mid(s.expanders[0].rect);
+        s.handle_touch(Phase::Down, at, MS(3000), font, &mut Vec::new());
+        s.handle_touch(Phase::Up, at, MS(3000), font, &mut Vec::new());
+        frame(&mut s, 3001, 100, unfolded, &mut h);
+        let e = &s.expanders[0];
+        let y = e.open_rect.y + e.open_rect.h / 2.0;
+        let xs = (e.open_rect.x as i32..(e.open_rect.x + e.open_rect.w) as i32).map(|x| x as f32);
+        let x_of = |v: u8| xs.clone().find(|&x| e.value_at(x, font) >= v).unwrap();
+        let (x10, x60) = (x_of(10), x_of(60));
+        s.handle_touch(Phase::Down, (x10, y), MS(3500), font, &mut Vec::new());
+        for t in [3500, 3560, 3700] {
+            frame(&mut s, t, 100, unfolded, &mut h);
+        }
+        s.handle_touch(Phase::Move, (x60, y), MS(3700), font, &mut Vec::new());
+        for t in [3700, 3760, 3900] {
+            frame(&mut s, t, 100, unfolded, &mut h);
+        }
+        h
+    }
+
+    /// The sun draws exactly what it drew before icon_style existed (hash taken
+    /// from that code, 9e17779), with no keys and with icon_style = "sun".
+    #[test]
+    fn the_sun_is_as_before() {
+        let Some(font) = font() else { return };
+        assert_eq!(sun_run_hash("anim_ms = 0", &font), SUN_HASH);
+        assert_eq!(sun_run_hash("anim_ms = 0\nicon_style = 'sun'", &font), SUN_HASH);
+    }
+
+    const SUN_HASH: u64 = 0xac4c_df7c_3e8b_84ca;
+
+    const CIRCLE: &str = "anim_ms = 0\nicon_style = 'circle'\nring_color = '#ff0000'\nfill_color = '#0000ff'";
+
+    #[test]
+    fn the_circle_follows_outside_changes_in_150_ms_then_rests() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, &bright_layer(CIRCLE));
+        s.advance(MS(0), &live_at(70));
+        assert_eq!(s.expanders[0].shown_level(MS(0)), 70.0, "the first level at once");
+        assert_eq!(s.next_change(MS(0)), None, "at rest: no frames, no timers");
+        // Keys or another app: 30, eased over 150 ms at frame rate.
+        s.advance(MS(1000), &live_at(30));
+        assert_eq!(s.next_change(MS(1000)), Some(MS(1000)));
+        let half = s.expanders[0].shown_level(MS(1075));
+        assert!(half > 30.0 && half < 50.0, "{half}");
+        assert_eq!(s.next_change(MS(1149)), Some(MS(1149)));
+        s.advance(MS(1150), &live_at(30));
+        assert_eq!(s.expanders[0].shown_level(MS(1150)), 30.0);
+        assert_eq!(s.next_change(MS(1150)), None, "0 fps again");
+        // A new level half way heads there from where it is, no jump.
+        s.advance(MS(2000), &live_at(90));
+        let a = s.expanders[0].shown_level(MS(2050));
+        s.advance(MS(2050), &live_at(10));
+        assert!((s.expanders[0].shown_level(MS(2050)) - a).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_circle_follows_a_dragging_finger_at_once() {
+        let Some(font) = font() else { return };
+        let mut s = menu_scene(&font, &bright_layer(CIRCLE));
+        let mut out = Vec::new();
+        s.advance(MS(0), &live_at(70));
+        let at = mid(s.expanders[0].rect);
+        s.handle_touch(Phase::Down, at, MS(100), &font, &mut out);
+        s.handle_touch(Phase::Up, at, MS(100), &font, &mut out);
+        s.advance(MS(200), &live_at(70));
+        let e = &s.expanders[0];
+        let y = e.open_rect.y + e.open_rect.h / 2.0;
+        let xs: Vec<f32> = (e.open_rect.x as i32..(e.open_rect.x + e.open_rect.w) as i32).map(|x| x as f32).collect();
+        let x_of = |v: u8| *xs.iter().find(|&&x| e.value_at(x, &font) >= v).unwrap();
+        let (x20, x55) = (x_of(20), x_of(55));
+        s.handle_touch(Phase::Down, (x20, y), MS(300), &font, &mut out);
+        s.advance(MS(300), &live_at(70));
+        assert_eq!(s.expanders[0].shown_level(MS(300)), 20.0, "no lag behind the finger");
+        s.handle_touch(Phase::Move, (x55, y), MS(320), &font, &mut out);
+        s.advance(MS(320), &live_at(70));
+        assert_eq!(s.expanders[0].shown_level(MS(320)), 55.0);
+        // Still under the finger: nothing moves, so no frames for the icon.
+        assert_eq!(s.next_change(MS(320)), None);
+    }
+
+    #[test]
+    fn the_circle_shows_folded_and_unfolded() {
+        let Some(font) = font() else { return };
+        let red = |c: &Canvas, r: Rect| {
+            let (cx, cy) = r.center();
+            // The ring's top (diameter 28: 14 up, 2.5 thick) in red, its middle blue at 100.
+            is(pixel(c, cx, cy - 12.75), [0xff, 0, 0]) && is(pixel(c, cx, cy), [0, 0, 0xff])
+        };
+        let mut s = menu_scene(&font, &bright_layer(CIRCLE));
+        let [folded, unfolded] = bright_icon_squares(&s);
+        let mut c = Canvas::new(W, H).unwrap();
+        let live = live_at(100);
+        s.advance(MS(0), &live);
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        assert!(red(&c, folded), "folded");
+        let at = mid(s.expanders[0].rect);
+        s.handle_touch(Phase::Down, at, MS(100), &font, &mut Vec::new());
+        s.handle_touch(Phase::Up, at, MS(100), &font, &mut Vec::new());
+        s.advance(MS(200), &live);
+        s.draw(&mut c, MS(200), &font, &live).unwrap();
+        assert!(red(&c, unfolded), "unfolded, at the slider's left");
+    }
+
+    #[test]
+    fn the_circle_defaults_to_the_items_colour_and_must_fit() {
+        let Some(font) = font() else { return };
+        let s = menu_scene(&font, &bright_layer("icon_style = 'circle'\ncolor = '#123456'"));
+        match s.expanders[0].icon {
+            LevelIcon::Circle(l) => {
+                assert_eq!((l.ring_color, l.fill_color), (Rgba(0x12, 0x34, 0x56, 0xff), Rgba(0x12, 0x34, 0x56, 0xff)));
+                assert_eq!((l.diameter, l.ring_width, l.ring_gap, l.min_fill), (28.0, 2.5, 2.0, 0.0));
+                assert_eq!(l.fill, crate::config::CircleFill::Radial);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(menu_scene(&font, &bright_layer("")).expanders[0].icon, LevelIcon::Sun(_)));
+        // Bigger than the icon's place in this row (60 - 2 margins - 2 x 8): error.
+        let cfg: Config = toml::from_str(&bright_layer("icon_style = 'circle'\nicon_size = 60")).unwrap();
+        let layer = cfg.default_layer().unwrap();
+        let mut icons = IconResolver::new(None, icon_size(H));
+        let err = format!("{:#}", bar(W, H, &font, &layer, &mut icons).err().unwrap());
+        assert!(err.contains("icon_size 60 px doesn't fit the icon's place"), "{err}");
+    }
+
+    /// Every fill at 0, 12.5, 25, 50, 75, 100 % (and min_fill, a translucent
+    /// ring), folded and unfolded, as PNGs to look at: in a temporary folder that
+    /// goes away, or in $TOUCHBINUX_ICON_DUMP if set (then kept).
+    #[test]
+    fn dump_circle_levels_to_png() {
+        let Some(font) = font() else { return };
+        let tmp = tempfile::Builder::new().prefix("touchbinux-circle-").tempdir().unwrap();
+        let dir = std::env::var_os("TOUCHBINUX_ICON_DUMP").map_or(tmp.path().to_path_buf(), std::path::PathBuf::from);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut n = 0;
+        for (name, extra) in [
+            ("radial", "circle_fill = 'radial'"),
+            ("level", "circle_fill = 'level'"),
+            ("sweep", "circle_fill = 'sweep'"),
+            ("radial-min", "circle_fill = 'radial'\nmin_fill = 0.15"),
+            ("level-alpha", "circle_fill = 'level'\nring_color = '#00ffb760'"),
+        ] {
+            for level in [0u8, 12, 25, 50, 75, 100] {
+                let mut s = menu_scene(&font, &bright_layer(&format!("anim_ms = 0\nicon_style = 'circle'\n{extra}")));
+                let [folded, unfolded] = bright_icon_squares(&s);
+                let live = live_at(level);
+                for (state, sq) in [("folded", folded), ("unfolded", unfolded)] {
+                    if state == "unfolded" {
+                        let at = mid(s.expanders[0].rect);
+                        s.handle_touch(Phase::Down, at, MS(100), &font, &mut Vec::new());
+                        s.handle_touch(Phase::Up, at, MS(100), &font, &mut Vec::new());
+                    }
+                    let mut c = Canvas::new(W, H).unwrap();
+                    s.advance(MS(200), &live);
+                    s.draw(&mut c, MS(200), &font, &live).unwrap();
+                    // The item's place (unfolded: its left part), 1:1.
+                    let r = if state == "folded" { s.expanders[0].rect } else { Rect::new(sq.x - 16.0, 0.0, 260.0, H as f32) };
+                    let (x0, w) = (r.x.max(0.0) as u32, (r.w as u32).min(W - r.x.max(0.0) as u32));
+                    let mut out = Canvas::new(w, H).unwrap();
+                    for y in 0..H {
+                        for x in 0..w {
+                            let p = pixel(&c, (x0 + x) as f32, y as f32);
+                            out.fill_rect(x as f32, y as f32, 1.0, 1.0, Rgba(p[0], p[1], p[2], 0xff));
+                        }
+                    }
+                    let path = dir.join(format!("{name}-{level:03}-{state}.png"));
+                    out.save_png(&path).unwrap();
+                    assert!(path.exists());
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 5 * 6 * 2);
     }
 }
 

@@ -11,8 +11,9 @@ use crate::{
     anim::Tween,
     canvas::{Canvas, Font, Rect, Rgba},
     frame::{Frame, Shape},
+    levelicon::LevelIcon,
     scenes::{PADDING, icon_side},
-    widgets::{DIM, ICON, Level, Live, SpeakerLook, TEXT, WAVE_THRESHOLDS, draw_speaker, draw_sun},
+    widgets::{DIM, ICON, Level, Live, SpeakerLook, TEXT, WAVE_THRESHOLDS, draw_speaker},
 };
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ pub const DEFAULT_COLLAPSE_AFTER: Duration = Duration::from_millis(3000);
 pub const DEFAULT_FILL: Rgba = Rgba(0x00, 0xff, 0xb7, 0xff);
 /// The empty part of the track (also the player's seek bar).
 pub const TRACK: Rgba = Rgba(0x55, 0x55, 0x58, 0xff);
-/// How long a wave takes to appear or go, and the sun's rays to follow the level.
+/// How long a wave takes to appear or go (the level icon: `LevelIcon::anim`).
 const LEVEL_ANIM: Duration = Duration::from_millis(180);
 const TRACK_H: f32 = 8.0;
 /// Between the icon or the value and the track.
@@ -197,7 +198,9 @@ pub struct Expander {
     pub drag: Option<u8>,
     /// Whether there is anything to control (no backlight: no brightness).
     pub available: bool,
-    /// The level the icon shows (sun rays), following the real one smoothly.
+    /// Brightness: how its icon shows the level (the sun by default).
+    pub icon: LevelIcon,
+    /// The level the icon shows, following the real one smoothly.
     shown: Tween,
     /// How much of each speaker wave is out.
     waves: [Tween; 3],
@@ -224,6 +227,7 @@ impl Expander {
             fold,
             drag: None,
             available: true,
+            icon: LevelIcon::Sun(ICON),
             shown: Tween::still(f32::NAN),
             waves: [Tween::still(f32::NAN); 3],
         }
@@ -261,12 +265,24 @@ impl Expander {
         // NaN: never drawn yet, so start at the current level without animating.
         let first = self.shown.target().is_nan();
         let dur = if first { Duration::ZERO } else { LEVEL_ANIM };
-        self.shown.retarget(t, v as f32, dur);
-        for (wave, &threshold) in self.waves.iter_mut().zip(&WAVE_THRESHOLDS) {
-            let out = !muted && v > threshold;
-            wave.retarget(t, if out { 1.0 } else { 0.0 }, dur);
+        // The circle follows a finger on the slider at once, the rest in its time.
+        let icon_dur = if first { Duration::ZERO } else { self.icon.anim(self.drag.is_some()) };
+        self.shown.retarget(t, v as f32, icon_dur);
+        // The speaker's waves: volume only (on brightness they'd cost frames for
+        // nothing drawn).
+        if self.level == Level::Volume {
+            for (wave, &threshold) in self.waves.iter_mut().zip(&WAVE_THRESHOLDS) {
+                let out = !muted && v > threshold;
+                wave.retarget(t, if out { 1.0 } else { 0.0 }, dur);
+            }
         }
         self.fold.advance(t)
+    }
+
+    /// The level the icon shows at `t` (tests).
+    #[cfg(test)]
+    pub fn shown_level(&self, t: Duration) -> f32 {
+        self.shown.value(t)
     }
 
     fn swaying(&self) -> bool {
@@ -408,7 +424,7 @@ impl Expander {
             }
             Level::Brightness => {
                 let shown = self.shown.value(t);
-                draw_sun(canvas, icon, if shown.is_nan() { 0.0 } else { shown }, ICON);
+                self.icon.draw(canvas, icon, if shown.is_nan() { 0.0 } else { shown });
             }
         }
     }

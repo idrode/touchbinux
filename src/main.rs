@@ -23,6 +23,7 @@ mod idle;
 mod ipc;
 mod keys;
 mod layout;
+mod levelicon;
 mod levels;
 mod mpv;
 mod player;

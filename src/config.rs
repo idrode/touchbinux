@@ -161,6 +161,17 @@ pub enum WakeOn {
     Fn,
 }
 
+/// What counts as activity for `[idle]` (`activity_from`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActivityFrom {
+    /// Touches on the bar (and Fn, and the socket's activity signal).
+    Touch,
+    /// The keyboard, mouse and touchpad, as the compositor tells it: only
+    /// "idle" and "resumed" (ext-idle-notify-v1), never what was pressed.
+    Desktop,
+}
+
 /// `loading` of a gif_picker: what shows while a newly chosen GIF loads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -196,6 +207,9 @@ pub struct IdleConfig {
     pub sleep_layer: Option<String>,
     #[serde(default = "default_wake_on")]
     pub wake_on: Vec<WakeOn>,
+    /// What counts as activity: the bar always; the desktop too by default.
+    #[serde(default = "default_activity_from")]
+    pub activity_from: Vec<ActivityFrom>,
     /// The touch that wakes the bar from sleep or off does nothing else.
     #[serde(default = "default_true")]
     pub swallow_wake_touch: bool,
@@ -218,6 +232,10 @@ fn default_sleep_level() -> f64 {
 
 fn default_wake_on() -> Vec<WakeOn> {
     vec![WakeOn::Touch, WakeOn::Fn]
+}
+
+fn default_activity_from() -> Vec<ActivityFrom> {
+    vec![ActivityFrom::Touch, ActivityFrom::Desktop]
 }
 
 fn default_true() -> bool {
@@ -292,6 +310,15 @@ impl IdleConfig {
         }
         if self.wake_on.len() == 2 && self.wake_on[0] == self.wake_on[1] {
             bail!("[idle] wake_on lists {:?} twice", self.wake_on[0]);
+        }
+        if !self.activity_from.contains(&ActivityFrom::Touch) {
+            bail!("[idle] activity_from needs \"touch\" (the bar's own touches always count), and \"desktop\" if wanted");
+        }
+        if self.activity_from.len() == 2 && self.activity_from[0] == self.activity_from[1] {
+            bail!("[idle] activity_from lists {:?} twice", self.activity_from[0]);
+        }
+        if self.activity_from.len() > 2 {
+            bail!("[idle] activity_from takes \"touch\" and \"desktop\", each once");
         }
         if !IDLE_FADE_MS.contains(&self.fade_ms) {
             bail!("[idle] fade_ms must be {IDLE_FADE_MS:?}");
@@ -4580,6 +4607,11 @@ mod tests {
         assert_eq!(i.wake_on, vec![WakeOn::Touch, WakeOn::Fn]);
         assert!(i.swallow_wake_touch && i.sleep_layer.is_none());
         assert_eq!((i.fade(), i.idle_gif_fps), (Duration::from_millis(250), 8));
+        assert_eq!(i.activity_from, vec![ActivityFrom::Touch, ActivityFrom::Desktop]);
+        // The desktop counts by default.
+        let i = with_idle("[idle]\nactivity_from = ['touch']").unwrap().idle.unwrap();
+        assert_eq!(i.activity_from, vec![ActivityFrom::Touch], "the bar alone, as before");
+        assert!(with_idle("[idle]\nactivity_from = ['desktop', 'touch']").is_ok());
         let c = with_idle(
             "[idle]\ndim_after_s = 30\ndim_level = 0.25\nsleep_after_s = 90\n\
              sleep_layer = 'idle'\nsleep_level = 0.1\noff_after_s = 300\n\
@@ -4615,6 +4647,12 @@ mod tests {
             ("[idle]\nsleep_after_s = 9\noff_after_s = 20", "without sleep_layer, sleep_after_s already turns the bar off"),
             ("[idle]\nwake_on = []", "wake_on needs"),
             ("[idle]\nwake_on = ['touch', 'touch']", "wake_on lists Touch twice"),
+            ("[idle]\nactivity_from = ['desktop']", "activity_from needs \"touch\""),
+            ("[idle]\nactivity_from = []", "activity_from needs \"touch\""),
+            ("[idle]\nactivity_from = ['touch', 'touch']", "activity_from lists Touch twice"),
+            ("[idle]\nactivity_from = ['touch', 'desktop', 'desktop']", "each once"),
+            ("[idle]\nactivity_from = ['keyboard']", "unknown variant `keyboard`"),
+            ("[idle]\nactivity = ['touch']", "unknown field `activity`"),
             ("[idle]\nwake_on = ['keyboard']", "unknown variant `keyboard`, expected `touch` or `fn`"),
             ("[idle]\nfade_ms = 2001", "fade_ms must be 0..=2000"),
             ("[idle]\nidle_gif_fps = 31", "idle_gif_fps must be 0..=30"),

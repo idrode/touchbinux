@@ -7,7 +7,7 @@
 #   - KEY_F13/F14/F15/F19, which only do something because the author's Hyprland
 #     config binds them;
 #   - `qs ipc` commands for the author's Quickshell setup;
-#   - run_as = "ander".
+#   - run_as = "alguien".
 # Start from config.example.toml instead; the full reference is in docs/GUIA.md.
 
 run_as = "ander"

@@ -1,13 +1,13 @@
-# touchbinux configuration - generic example.
-# Installed by install.sh as /etc/touchbinux/config.toml (only if that file doesn't
+# barux configuration - generic example.
+# Installed by install.sh as /etc/barux/config.toml (only if that file doesn't
 # exist yet). Full reference of every option: docs/GUIA.md.
 #
-# Reload after editing:  sudo systemctl reload touchbinux
+# Reload after editing:  sudo systemctl reload barux
 # If the new file has an error, the daemon keeps the previous configuration and says
-# why in the log (journalctl -u touchbinux -e).
+# why in the log (journalctl -u barux -e).
 #
 # It only uses what any installation has: the icons install.sh copies to
-# /etc/touchbinux/icons (from this repo's icons/), keys sent through the virtual
+# /etc/barux/icons (from this repo's icons/), keys sent through the virtual
 # keyboard, and the built-in volume, brightness, battery and clock widgets.
 
 # Who the commands of your buttons run as when the daemon runs as a service. Only
@@ -164,19 +164,19 @@ type = "spacer"
 [[layers.items]]
 type = "button"
 id = "prev"
-icon = "/etc/touchbinux/icons/fast_rewind.svg"
+icon = "/etc/barux/icons/fast_rewind.svg"
 action = { type = "key", key = "KEY_PREVIOUSSONG" }
 
 [[layers.items]]
 type = "button"
 id = "play"
-icon = "/etc/touchbinux/icons/play_pause.svg"
+icon = "/etc/barux/icons/play_pause.svg"
 action = { type = "key", key = "KEY_PLAYPAUSE" }
 
 [[layers.items]]
 type = "button"
 id = "next"
-icon = "/etc/touchbinux/icons/fast_forward.svg"
+icon = "/etc/barux/icons/fast_forward.svg"
 action = { type = "key", key = "KEY_NEXTSONG" }
 
 # Tap to unfold a slider; drag to change the level. Brightness is the main display's
@@ -212,7 +212,7 @@ format = "%H:%M"
 # [[layers.items]]
 # type = "button"
 # id = "play-round"
-# icon = "/etc/touchbinux/icons/play_pause.svg"
+# icon = "/etc/barux/icons/play_pause.svg"
 # shape = "circle"
 # action = { type = "key", key = "KEY_PLAYPAUSE" }
 #
@@ -230,7 +230,7 @@ format = "%H:%M"
 # [[layers.items]]
 # type = "button"
 # id = "prev-small"
-# icon = "/etc/touchbinux/icons/fast_rewind.svg"
+# icon = "/etc/barux/icons/fast_rewind.svg"
 # shape = "circle"
 # size = 40
 # pressed_background = "#1793d1"
@@ -252,7 +252,7 @@ format = "%H:%M"
 # [[layers.items]]
 # type = "button"
 # id = "next-bare"
-# icon = "/etc/touchbinux/icons/fast_forward.svg"
+# icon = "/etc/barux/icons/fast_forward.svg"
 # background = "transparent"         # or shape = "none"
 # action = { type = "key", key = "KEY_NEXTSONG" }
 #
@@ -292,7 +292,7 @@ format = "%H:%M"
 # [[layers.items]]
 # type = "expandable"
 # id = "media"
-# icon = "/etc/touchbinux/icons/play_pause.svg"   # required; also "builtin:folder"
+# icon = "/etc/barux/icons/play_pause.svg"   # required; also "builtin:folder"
 # label = "Media"                  # optional, shown only while folded
 # expand_width = 400               # default: just enough for the children
 # collapse_after_ms = 3000
@@ -302,12 +302,12 @@ format = "%H:%M"
 # pressed_background = "#1793d1"   # a child's highlight while pressed
 #
 # [[layers.items.children]]
-# icon = "/etc/touchbinux/icons/fast_rewind.svg"
+# icon = "/etc/barux/icons/fast_rewind.svg"
 # action = { type = "key", key = "KEY_PREVIOUSSONG" }
 #
 # [[layers.items.children]]
 # id = "media_play"
-# icon = "/etc/touchbinux/icons/play_pause.svg"
+# icon = "/etc/barux/icons/play_pause.svg"
 # label = "Play"
 # action = { type = "key", key = "KEY_PLAYPAUSE" }
 #
@@ -329,7 +329,7 @@ format = "%H:%M"
 # [[layers.items]]
 # type = "button"
 # id = "launcher"
-# icon = "/etc/touchbinux/icons/arch.svg"   # any icon; this one is not shipped
+# icon = "/etc/barux/icons/arch.svg"   # any icon; this one is not shipped
 # color = "#00ffb7"
 # shape = "circle"
 # size = 52
@@ -361,7 +361,7 @@ format = "%H:%M"
 
 # A GIF you choose on the bar: tap it to unfold thumbnails of the GIFs in `dir`
 # (read again on every tap, as the run_as user); tap one to show it here. The choice
-# is kept in /var/lib/touchbinux/state.toml, not in this file. Without the folder or
+# is kept in /var/lib/barux/state.toml, not in this file. Without the folder or
 # without valid GIFs it shows a grey frame and doesn't unfold (not an error).
 # [[layers.items]]
 # type = "gif_picker"
@@ -537,7 +537,7 @@ format = "%H:%M"
 #                                  # (and seek) restarts collapse_after_ms
 #
 # [[layers.items.children]]
-# icon = "/etc/touchbinux/icons/play_pause.svg"
+# icon = "/etc/barux/icons/play_pause.svg"
 # action = { type = "key", key = "KEY_PLAYPAUSE" }
 #
 # A player's child can have a `role` instead of an action: "prev", "playpause",
@@ -548,8 +548,8 @@ format = "%H:%M"
 # pressed_background, pressed_scale and text_color, as a layer's items do.
 # [[layers.items.children]]
 # role = "playpause"
-# icon_playing = "/etc/touchbinux/icons/player_pause.svg"
-# icon_paused = "/etc/touchbinux/icons/player_play.svg"
+# icon_playing = "/etc/barux/icons/player_pause.svg"
+# icon_paused = "/etc/barux/icons/player_play.svg"
 # shape = "circle"
 # size = 44
 # background = "#00ffb7"
@@ -558,7 +558,7 @@ format = "%H:%M"
 #
 # [[layers.items.children]]
 # role = "stop"
-# icon = "/etc/touchbinux/icons/player_stop.svg"
+# icon = "/etc/barux/icons/player_stop.svg"
 # shape = "circle"
 # size = 44
 # background = "#ff0000"
@@ -622,7 +622,7 @@ format = "%H:%M"
 # label = "Hello"
 # action = { type = "command", argv = ["notify-send", "Hello from the Touch Bar"] }
 #
-# Show what a script sends over the socket (/run/touchbinux.sock):
+# Show what a script sends over the socket (/run/barux.sock):
 # [[layers.items]]
 # type = "text"
 # key = "weather"

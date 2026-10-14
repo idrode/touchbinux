@@ -86,7 +86,7 @@ impl IpcServer {
                 anyhow::bail!("{} exists and is not a socket", path.display());
             }
             if UnixStream::connect(path).is_ok() {
-                anyhow::bail!("{} is in use (another touchbinux running?)", path.display());
+                anyhow::bail!("{} is in use (another barux running?)", path.display());
             }
             fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
         }
@@ -384,7 +384,7 @@ mod tests {
         use std::{io::BufRead, os::unix::fs::MetadataExt};
 
         let path =
-            std::env::temp_dir().join(format!("touchbinux-test-{}.sock", std::process::id()));
+            std::env::temp_dir().join(format!("barux-test-{}.sock", std::process::id()));
         let me = fs::metadata("/proc/self").unwrap();
         let mut server = IpcServer::bind(&path, Some((me.uid(), me.gid())), 100).unwrap();
         assert_eq!(

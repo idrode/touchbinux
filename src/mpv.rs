@@ -601,14 +601,14 @@ mod tests {
     }
 }
 
-/// Not a check: connects to the real mpv ($TOUCHBINUX_MPV, default /tmp/mpv-socket)
+/// Not a check: connects to the real mpv ($BARUX_MPV, default /tmp/mpv-socket)
 /// and prints what it reports for a second, observing time-pos too. Sends nothing
 /// that changes playback.
 #[cfg(test)]
 #[test]
 #[ignore]
 fn watch_real_mpv() {
-    let path = std::env::var("TOUCHBINUX_MPV").unwrap_or(DEFAULT_SOCKET.into());
+    let path = std::env::var("BARUX_MPV").unwrap_or(DEFAULT_SOCKET.into());
     let mut mpv = Mpv::new(Path::new(&path), nix::unistd::Uid::current().as_raw());
     mpv.observe_position(true);
     let end = Instant::now() + Duration::from_secs(1);
@@ -623,13 +623,13 @@ fn watch_real_mpv() {
     }
 }
 
-/// Not a check: seeks a real mpv at $TOUCHBINUX_MPV_SEEK (required, so it is never
+/// Not a check: seeks a real mpv at $BARUX_MPV_SEEK (required, so it is never
 /// the user's own by accident) to 60 s, and prints what mpv reports.
 #[cfg(test)]
 #[test]
 #[ignore]
 fn seek_real_mpv() {
-    let path = std::env::var("TOUCHBINUX_MPV_SEEK").expect("TOUCHBINUX_MPV_SEEK");
+    let path = std::env::var("BARUX_MPV_SEEK").expect("BARUX_MPV_SEEK");
     let mut mpv = Mpv::new(Path::new(&path), nix::unistd::Uid::current().as_raw());
     let pump = |mpv: &mut Mpv, ms: u64| {
         let end = Instant::now() + Duration::from_millis(ms);

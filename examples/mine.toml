@@ -1,8 +1,8 @@
-# PERSONAL EXAMPLE - the author's own /etc/touchbinux/config.toml, kept as a backup
+# PERSONAL EXAMPLE - the author's own /etc/barux/config.toml, kept as a backup
 # and as a sample of a fuller layout. It depends on the author's machine:
-#   - a GIF at /etc/touchbinux/gifs/bongosmash.gif: elsewhere the file is missing,
+#   - a GIF at /etc/barux/gifs/bongosmash.gif: elsewhere the file is missing,
 #     which is a config error, so this file does NOT load as is;
-#   - icons in /etc/touchbinux/icons that only exist there (arch, hype, docker...,
+#   - icons in /etc/barux/icons that only exist there (arch, hype, docker...,
 #     copied from the author's /etc/tiny-dfr); missing ones are drawn as "?";
 #   - KEY_F13/F14/F15/F19, which only do something because the author's Hyprland
 #     config binds them;
@@ -23,7 +23,7 @@ gap = 12
 [[layers.items]]
 type = "button"
 id = "launcher"
-icon = "/etc/touchbinux/icons/arch.svg"
+icon = "/etc/barux/icons/arch.svg"
 color = "#1793d1"
 width = 80
 action = { type = "key", key = "KEY_F13" }
@@ -43,21 +43,21 @@ type = "spacer"
 [[layers.items]]
 type = "gif"
 id = "bongo"
-path = "/etc/touchbinux/gifs/bongosmash.gif"
+path = "/etc/barux/gifs/bongosmash.gif"
 width = 80
 play = "always"
 
 [[layers.items]]
 type = "button"
 id = "hype"
-icon = "/etc/touchbinux/icons/hype.svg"
+icon = "/etc/barux/icons/hype.svg"
 width = 80
 action = { type = "key", key = "KEY_F15" }
 
 [[layers.items]]
 type = "button"
 id = "docker"
-icon = "/etc/touchbinux/icons/docker-svgrepo-com.svg"
+icon = "/etc/barux/icons/docker-svgrepo-com.svg"
 width = 80
 action = { type = "key", key = "KEY_F19" }
 

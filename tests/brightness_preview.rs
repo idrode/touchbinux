@@ -23,7 +23,7 @@ fn preview(dir: &Path, toml: &str, args: &[&str]) -> (std::process::Output, std:
     let config = dir.join("config.toml");
     fs::write(&config, toml).unwrap();
     let png = dir.join("out.png");
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .arg("bar")
         .arg("--config")
         .arg(&config)
@@ -43,7 +43,7 @@ fn count(png: &Path, rgb: [u8; 3]) -> usize {
 
 #[test]
 fn each_fill_at_each_level() {
-    let dir = tempfile::Builder::new().prefix("touchbinux-bright-").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("barux-bright-").tempdir().unwrap();
     for fill in ["radial", "level", "sweep"] {
         let mut last = None;
         for level in ["0", "25", "50", "75", "100"] {
@@ -65,13 +65,13 @@ fn each_fill_at_each_level() {
 
 #[test]
 fn brightness_is_checked() {
-    let dir = tempfile::Builder::new().prefix("touchbinux-bright-").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("barux-bright-").tempdir().unwrap();
     for bad in ["101", "-1", "x"] {
         let (out, _) = preview(dir.path(), &config("radial"), &["--brightness", bad]);
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("--brightness must be 0 to 100"), "{bad}");
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .args(["bar", "--brightness", "50"])
         .output()
         .unwrap();

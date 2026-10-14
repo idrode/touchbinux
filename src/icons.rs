@@ -196,7 +196,7 @@ impl IconResolver {
             if p.is_file() {
                 return Some(p.to_path_buf());
             }
-            // E.g. /etc/touchbinux/icons/play_pause.svg before install.sh copied it.
+            // E.g. /etc/barux/icons/play_pause.svg before install.sh copied it.
             let found = p.file_name().and_then(|f| {
                 FALLBACK_DIRS
                     .iter()

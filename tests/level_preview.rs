@@ -23,7 +23,7 @@ fn preview(dir: &Path, args: &[&str]) -> (std::process::Output, std::path::PathB
     let config = dir.join("config.toml");
     fs::write(&config, CONFIG).unwrap();
     let png = dir.join("out.png");
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .arg("bar")
         .arg("--config")
         .arg(&config)
@@ -51,7 +51,7 @@ const RED: [u8; 3] = [0xff, 0, 0];
 
 #[test]
 fn each_level_draws_what_it_shows() {
-    let dir = tempfile::Builder::new().prefix("touchbinux-level-").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("barux-level-").tempdir().unwrap();
     let ok = |out: &std::process::Output| assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     // 0: only the workspaces.
     let (out, png) = preview(dir.path(), &["--level", "0"]);
@@ -73,7 +73,7 @@ fn each_level_draws_what_it_shows() {
 
 #[test]
 fn level_is_checked() {
-    let dir = tempfile::Builder::new().prefix("touchbinux-level-").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("barux-level-").tempdir().unwrap();
     for (args, want) in [
         (&["--level", "3"][..], "--level must be 0, 1 or 2"),
         (&["--level", "x"][..], "--level must be 0, 1 or 2"),
@@ -84,7 +84,7 @@ fn level_is_checked() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(want), "{args:?}: {err}");
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .args(["bar", "--level", "1"])
         .output()
         .unwrap();

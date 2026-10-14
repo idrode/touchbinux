@@ -48,6 +48,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "barux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "drm",
+ "evdev",
+ "fontdue",
+ "image",
+ "libc",
+ "nix 0.31.3",
+ "resvg",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -941,27 +962,6 @@ name = "toml_writer"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
-
-[[package]]
-name = "touchbinux"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "drm",
- "evdev",
- "fontdue",
- "image",
- "libc",
- "nix 0.31.3",
- "resvg",
- "serde",
- "serde_json",
- "tempfile",
- "toml",
- "wayland-client",
- "wayland-protocols",
-]
 
 [[package]]
 name = "ttf-parser"

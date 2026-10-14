@@ -2030,11 +2030,11 @@ pub mod tests {
     }
 
     /// Not a check: borders and tint at rest, a strip opening and a birth, cut to
-    /// the item and enlarged 4x, as PNGs in $TOUCHBINUX_FRAMES (run with --ignored).
+    /// the item and enlarged 4x, as PNGs in $BARUX_FRAMES (run with --ignored).
     #[test]
     #[ignore]
     fn dump_borders() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let save = |c: &Canvas, name: &str| {
             let (x0, w) = (96, 330);
             let img = image::RgbaImage::from_fn(w * 4, 60 * 4, |x, y| {

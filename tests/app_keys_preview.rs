@@ -30,7 +30,7 @@ fn preview(dir: &Path, class: Option<&str>) -> (std::process::Output, std::path:
     let config = dir.join("config.toml");
     fs::write(&config, CONFIG).unwrap();
     let png = dir.join(format!("{}.png", class.unwrap_or("none")));
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_touchbinux"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_barux"));
     cmd.arg("bar").arg("--config").arg(&config).arg("--png").arg(&png);
     if let Some(c) = class {
         cmd.args(["--focus-class", c]);
@@ -55,7 +55,7 @@ fn buttons(png: &Path) -> usize {
 
 #[test]
 fn each_class_draws_its_set() {
-    let dir = tempfile::Builder::new().prefix("touchbinux-keys-png-").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("barux-keys-png-").tempdir().unwrap();
     // (Without --focus-class a preview follows the real Hyprland, if any.)
     for (class, want) in [(Some("zen"), 2), (Some("KITTY"), 1), (Some("firefox"), 0)] {
         let (out, png) = preview(dir.path(), class);
@@ -66,7 +66,7 @@ fn each_class_draws_its_set() {
 
 #[test]
 fn focus_class_is_for_bar_previews_only() {
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .args(["bar", "--focus-class", "zen"])
         .output()
         .unwrap();

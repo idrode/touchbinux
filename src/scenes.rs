@@ -3283,14 +3283,14 @@ mod tests {
         assert!(!s.menus[0].fold.is_active(MS(4000)));
     }
 
-    /// Not a check: a gif_picker unfolded over the GIFs of $TOUCHBINUX_GIFS (or a
-    /// few generated ones), with the first one chosen; PNGs to $TOUCHBINUX_FRAMES.
+    /// Not a check: a gif_picker unfolded over the GIFs of $BARUX_GIFS (or a
+    /// few generated ones), with the first one chosen; PNGs to $BARUX_FRAMES.
     #[test]
     #[ignore]
     fn dump_gif_picker() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let generated = crate::gifpick::tests::temp_dir("dump");
-        let gifs = std::env::var("TOUCHBINUX_GIFS").map(PathBuf::from).unwrap_or_else(|_| {
+        let gifs = std::env::var("BARUX_GIFS").map(PathBuf::from).unwrap_or_else(|_| {
             for (i, (w, h)) in [(40, 40), (90, 30), (30, 60)].iter().enumerate() {
                 crate::gifpick::tests::write_gif(&generated.join(format!("{i}.gif")), *w, *h, 3);
             }
@@ -3551,11 +3551,11 @@ mod tests {
     }
 
     /// Not a check: the player folded (no mpv, stopped, paused, playing) and unfolded
-    /// (playing, dragging the seek bar, a stream), as PNGs in $TOUCHBINUX_FRAMES.
+    /// (playing, dragging the seek bar, a stream), as PNGs in $BARUX_FRAMES.
     #[test]
     #[ignore]
     fn dump_player() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = menu_scene(
             &font,
@@ -3630,11 +3630,11 @@ mod tests {
 
     /// Not a check: frames of a layer of circles (folder opening, pressed
     /// transparent button, volume unfolding into a pill), written as PNGs to
-    /// $TOUCHBINUX_FRAMES (run with --ignored).
+    /// $BARUX_FRAMES (run with --ignored).
     #[test]
     #[ignore]
     fn dump_frame_shapes() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let cfg: Config = toml::from_str(
             r##"
@@ -3696,11 +3696,11 @@ mod tests {
 
     /// Not a check: an expandable unfolding, open with an active and a pressed
     /// child, and folding; the line and classic folders opening. PNGs written to
-    /// $TOUCHBINUX_FRAMES (run with --ignored).
+    /// $BARUX_FRAMES (run with --ignored).
     #[test]
     #[ignore]
     fn dump_expandable() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = menu_scene(
             &font,
@@ -3796,11 +3796,11 @@ mod tests {
 
     /// Not a check: a layer showing `size`, `pressed_background` and
     /// `pressed_scale`, with each item pressed in turn, written as PNGs to
-    /// $TOUCHBINUX_FRAMES (run with --ignored).
+    /// $BARUX_FRAMES (run with --ignored).
     #[test]
     #[ignore]
     fn dump_pressed() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let cfg: Config = toml::from_str(
             r##"
@@ -3917,11 +3917,11 @@ mod tests {
         eprintln!("draw: {:.2} ms per frame", per.as_secs_f64() * 1000.0);
     }
 
-    /// Not a check: writes frames of the animations to $TOUCHBINUX_FRAMES for a look.
+    /// Not a check: writes frames of the animations to $BARUX_FRAMES for a look.
     #[test]
     #[ignore]
     fn dump_frames() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = scene(&font);
         let mut live = live();
@@ -4086,12 +4086,12 @@ mod tests {
     }
 
     /// Not a check: the capture item folded, unfolded (one mode disabled) and
-    /// recording, as PNGs in $TOUCHBINUX_FRAMES.
-    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_capture -- --ignored`
+    /// recording, as PNGs in $BARUX_FRAMES.
+    /// `BARUX_FRAMES=/tmp/f cargo test dump_capture -- --ignored`
     #[test]
     #[ignore]
     fn dump_capture() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = menu_scene(&font, CAPTURE);
         let mut live = live();
@@ -4221,12 +4221,12 @@ mod tests {
     }
 
     /// Not a check: builtin:grid_wave at rest and through its wave, as PNGs in
-    /// $TOUCHBINUX_FRAMES (`g-*.png`, the bar's left 300 px, also 4x larger).
-    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_grid_wave -- --ignored`
+    /// $BARUX_FRAMES (`g-*.png`, the bar's left 300 px, also 4x larger).
+    /// `BARUX_FRAMES=/tmp/f cargo test dump_grid_wave -- --ignored`
     #[test]
     #[ignore]
     fn dump_grid_wave() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let toml = GRID_WAVE.replace("background = \"transparent\"", "");
         let mut s = menu_scene(&font, &toml);
@@ -4345,12 +4345,12 @@ mod tests {
     }
 
     /// Not a check: the styled player of `STYLED_PLAYER` unfolded, paused, pressed,
-    /// playing and mid cross-fade, as PNGs in $TOUCHBINUX_FRAMES (`k-*.png`).
-    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_player_children -- --ignored`
+    /// playing and mid cross-fade, as PNGs in $BARUX_FRAMES (`k-*.png`).
+    /// `BARUX_FRAMES=/tmp/f cargo test dump_player_children -- --ignored`
     #[test]
     #[ignore]
     fn dump_player_children() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = menu_scene(&font, STYLED_PLAYER);
         let mut live = live();
@@ -4439,13 +4439,13 @@ mod tests {
 
     /// Not a check: builtin:battery at 0, 10, 25, 50, 80 and 100 %, the same charging,
     /// full on the charger, held at 80 % and mid-animation, plus no battery, as PNGs in
-    /// $TOUCHBINUX_FRAMES (`b-*.png`, the button 4x larger).
-    /// `TOUCHBINUX_FRAMES=/tmp/f cargo test dump_battery_icon -- --ignored`
+    /// $BARUX_FRAMES (`b-*.png`, the button 4x larger).
+    /// `BARUX_FRAMES=/tmp/f cargo test dump_battery_icon -- --ignored`
     #[test]
     #[ignore]
     fn dump_battery_icon() {
         use crate::battery::ChargeState::*;
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = menu_scene(&font, BATTERY_BUTTON);
         let mut live = live();
@@ -4719,14 +4719,14 @@ mod tests {
     }
 
     /// Not a check: the launcher closed, half pulled and out, as PNGs in
-    /// $TOUCHBINUX_FRAMES (run with --ignored): as on the real bar (the Arch icon,
+    /// $BARUX_FRAMES (run with --ignored): as on the real bar (the Arch icon,
     /// transparent) and with a background (the row is a pill beside the circle).
     #[test]
     #[ignore]
     fn dump_launcher_pull() {
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
-        let arch = "icon = \"/etc/touchbinux/icons/arch.svg\"\n        color = \"#00ffb7\"";
+        let arch = "icon = \"/etc/barux/icons/arch.svg\"\n        color = \"#00ffb7\"";
         let transparent = LAUNCHER
             .replace("label = \"L\"", arch)
             .replace("background = \"#3050a0\"", "background = \"transparent\"");
@@ -5090,13 +5090,13 @@ mod tests {
     }
 
     /// Not a check: a status item recording, done, with a screenshot, and both, cut
-    /// to the item and enlarged 4x, as PNGs in $TOUCHBINUX_FRAMES (run with
+    /// to the item and enlarged 4x, as PNGs in $BARUX_FRAMES (run with
     /// --ignored).
     #[test]
     #[ignore]
     fn dump_status() {
         use crate::status::{Rec, Status};
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let mut s = status_scene(&font, STATUS_LAYER);
         let r = s.widgets[0].0;
@@ -5129,12 +5129,12 @@ mod tests {
 
     /// Not a check: workspaces at rest (four, strips closed), the active one with its
     /// strip, and six frames of a birth and of a merge, cut to the item and enlarged
-    /// 4x, as PNGs in $TOUCHBINUX_FRAMES (run with --ignored).
+    /// 4x, as PNGs in $BARUX_FRAMES (run with --ignored).
     #[test]
     #[ignore]
     fn dump_workspaces() {
         use crate::workspaces::tests::win;
-        let dir = std::env::var("TOUCHBINUX_FRAMES").unwrap();
+        let dir = std::env::var("BARUX_FRAMES").unwrap();
         let font = font().unwrap();
         let home = std::env::var("HOME").ok().map(PathBuf::from);
         let mut icons = IconResolver::new(home.as_deref(), icon_size(H));
@@ -6404,12 +6404,12 @@ mod tests {
 
     /// Every fill at 0, 12.5, 25, 50, 75, 100 % (and min_fill, a translucent
     /// ring), folded and unfolded, as PNGs to look at: in a temporary folder that
-    /// goes away, or in $TOUCHBINUX_ICON_DUMP if set (then kept).
+    /// goes away, or in $BARUX_ICON_DUMP if set (then kept).
     #[test]
     fn dump_circle_levels_to_png() {
         let Some(font) = font() else { return };
-        let tmp = tempfile::Builder::new().prefix("touchbinux-circle-").tempdir().unwrap();
-        let dir = std::env::var_os("TOUCHBINUX_ICON_DUMP").map_or(tmp.path().to_path_buf(), std::path::PathBuf::from);
+        let tmp = tempfile::Builder::new().prefix("barux-circle-").tempdir().unwrap();
+        let dir = std::env::var_os("BARUX_ICON_DUMP").map_or(tmp.path().to_path_buf(), std::path::PathBuf::from);
         std::fs::create_dir_all(&dir).unwrap();
         let mut n = 0;
         for (name, extra) in [

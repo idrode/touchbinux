@@ -109,7 +109,7 @@ const HYPRCTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Our socket. Under /run so it exists before any login session (systemd, milestone
 /// 7); chowned to the session user with mode 0600 so only that user and root connect.
-const SOCKET_PATH: &str = "/run/touchbinux.sock";
+const SOCKET_PATH: &str = "/run/barux.sock";
 /// Quickshell may set arbitrary keys; keep the store bounded.
 const MAX_KEYS: usize = 256;
 const MAX_KEY_LEN: usize = config::MAX_KEY_LEN;
@@ -138,7 +138,7 @@ const DEMO_BUTTONS: &[(&str, &str)] = &[
 /// The real size always comes from the DRM mode.
 const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
-const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
+const USAGE: &str = "usage: barux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] \
                      [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>|player] [--level 0|1|2] [--brightness 0..100] [--title <text> [--artist <text>]]]\n\
                      --status (previews only): rec | rec_done | shot | rec_shot\n\
@@ -4118,12 +4118,12 @@ mod tests {
 
 
     /// Not a check: from a pick to the GIF ready, the first time (decoded) and
-    /// again (cached), for the GIFs in $TOUCHBINUX_GIFS in an 80 px gif_picker.
-    /// TOUCHBINUX_GIFS=~/Pictures/gifs cargo test --release time_picks -- --ignored --nocapture
+    /// again (cached), for the GIFs in $BARUX_GIFS in an 80 px gif_picker.
+    /// BARUX_GIFS=~/Pictures/gifs cargo test --release time_picks -- --ignored --nocapture
     #[test]
     #[ignore]
     fn time_picks() {
-        let Some(gifs) = std::env::var_os("TOUCHBINUX_GIFS") else {
+        let Some(gifs) = std::env::var_os("BARUX_GIFS") else {
             return;
         };
         let dir = tmp("time-picks");

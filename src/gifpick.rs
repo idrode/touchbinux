@@ -570,13 +570,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Not a check: how long each GIF in $TOUCHBINUX_GIFS takes to decode and
+    /// Not a check: how long each GIF in $BARUX_GIFS takes to decode and
     /// scale to the bar (76x56, an 80 px gif_picker), as a pick does. In release:
-    /// TOUCHBINUX_GIFS=~/Pictures/gifs cargo test --release time_gif_loads -- --ignored --nocapture
+    /// BARUX_GIFS=~/Pictures/gifs cargo test --release time_gif_loads -- --ignored --nocapture
     #[test]
     #[ignore]
     fn time_gif_loads() {
-        let Some(dir) = std::env::var_os("TOUCHBINUX_GIFS") else {
+        let Some(dir) = std::env::var_os("BARUX_GIFS") else {
             return;
         };
         let mut files: Vec<_> = fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();

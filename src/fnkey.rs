@@ -456,7 +456,12 @@ mod tests {
         devs.remove(1);
         assert_eq!(choose(&devs, None), None, "only our virtual keyboard has KEY_FN");
         // Not even by name.
-        assert_eq!(choose(&devs, Some("touchbinux")), None);
+        assert_eq!(choose(&devs, Some("barux")), None);
+        // Ours by name, even if it didn't look virtual (e.g. on another bus).
+        assert_eq!(crate::keys::NAME, "barux virtual keyboard");
+        let ours = cand("barux virtual keyboard", 0x19, true, true, false);
+        assert_eq!(choose(std::slice::from_ref(&ours), None), None);
+        assert_eq!(choose(&[ours], Some("virtual keyboard")), None);
         let other_virtual = cand("ydotoold virtual device", 0x03, true, true, true);
         assert_eq!(choose(&[other_virtual], None), None);
         let tb = cand("Mac14,7 Touch Bar", 0x19, true, true, false);
@@ -493,7 +498,7 @@ mod tests {
         keys.insert(KeyCode::KEY_FN);
         let mut v = VirtualDevice::builder()
             .unwrap()
-            .name("touchbinux fn filter test")
+            .name("barux fn filter test")
             .with_keys(&keys)
             .unwrap()
             .build()

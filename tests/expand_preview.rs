@@ -25,7 +25,7 @@ fn preview(dir: &Path, args: &[&str]) -> (std::process::Output, std::path::PathB
     let config = dir.join("config.toml");
     fs::write(&config, CONFIG).unwrap();
     let png = dir.join("out.png");
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .arg("bar")
         .arg("--config")
         .arg(&config)
@@ -51,7 +51,7 @@ fn red(png: &Path) -> usize {
 
 #[test]
 fn expand_draws_the_app_buttons() {
-    let dir = tempfile::Builder::new().prefix("touchbinux-expand-").tempdir().unwrap();
+    let dir = tempfile::Builder::new().prefix("barux-expand-").tempdir().unwrap();
     let (out, png) = preview(dir.path(), &["--expand", "kitty"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
@@ -67,7 +67,7 @@ fn expand_draws_the_app_buttons() {
 
 #[test]
 fn expand_is_for_bar_previews_only() {
-    let out = Command::new(env!("CARGO_BIN_EXE_touchbinux"))
+    let out = Command::new(env!("CARGO_BIN_EXE_barux"))
         .args(["bar", "--expand", "kitty"])
         .output()
         .unwrap();

@@ -1,7 +1,7 @@
 //! What the user chose on the bar and must survive restarts and reloads (so far, the
 //! GIF of each `gif_picker`), kept apart from the config: /etc stays read-only.
 //!
-//! As a service, systemd's `StateDirectory=touchbinux` creates /var/lib/touchbinux
+//! As a service, systemd's `StateDirectory=barux` creates /var/lib/barux
 //! and passes it in `$STATE_DIRECTORY`; started by hand as root (sudo) the same
 //! directory is used. A daemon that isn't root (previews, tests) only reads it.
 
@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DEFAULT_DIR: &str = "/var/lib/touchbinux";
+const DEFAULT_DIR: &str = "/var/lib/barux";
 const FILE: &str = "state.toml";
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ impl StateFile {
         let tmp = self.path.with_extension("toml.tmp");
         let mut f =
             fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        f.write_all(b"# Written by touchbinux; choices made on the bar. Not the config.\n")?;
+        f.write_all(b"# Written by barux; choices made on the bar. Not the config.\n")?;
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         fs::rename(&tmp, &self.path)?;

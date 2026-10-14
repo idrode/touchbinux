@@ -23,10 +23,10 @@ use std::{
     time::Duration,
 };
 
-pub const DEFAULT_PATH: &str = "/etc/touchbinux/config.toml";
+pub const DEFAULT_PATH: &str = "/etc/barux/config.toml";
 const MAX_TIMEOUT_MS: u64 = 60_000;
 /// Where install.sh copies the icons; also where the battery looks for its own.
-pub const ICON_DIR: &str = "/etc/touchbinux/icons";
+pub const ICON_DIR: &str = "/etc/barux/icons";
 /// Icons drawn by code (see `widgets::Folder`): an outline folder, and the older
 /// filled one. Both open when their button is tapped.
 pub const BUILTIN_FOLDER: &str = "builtin:folder";
@@ -2946,7 +2946,7 @@ mod tests {
         [[layers.items]]
         type = "button"
         id = "launcher"
-        icon = "/etc/touchbinux/icons/arch.svg"
+        icon = "/etc/barux/icons/arch.svg"
         color = "#1793d1"
         width = 80
         action = { type = "key", key = "KEY_F13" }
@@ -2963,7 +2963,7 @@ mod tests {
 
         [[layers.items]]
         type = "gif"
-        path = "/etc/touchbinux/gifs/bongosmash.gif"
+        path = "/etc/barux/gifs/bongosmash.gif"
         play = "on_tap"
         width = 60
 
@@ -3029,7 +3029,7 @@ mod tests {
         assert_eq!(gif.play, Some(Play::OnTap));
         assert_eq!(
             gif.path.as_deref(),
-            Some("/etc/touchbinux/gifs/bongosmash.gif")
+            Some("/etc/barux/gifs/bongosmash.gif")
         );
         assert!(c.action("gif").is_none()); // taps only go to the socket
         let vol = &main.items[5];
@@ -3396,7 +3396,7 @@ mod tests {
         text_color = "#ffcc00"
         [[layers.items.children]]
         id = "shot"
-        icon = "/etc/touchbinux/icons/search.svg"
+        icon = "/etc/barux/icons/search.svg"
         label = "Región"
         action = { type = "key", key = "KEY_F13" }
         [[layers.items.children]]
@@ -3921,7 +3921,7 @@ mod tests {
             (BUILTIN_GRID_WAVE, "grid=5"),
             (BUILTIN_GRID_WAVE, "grid='3'"),
             (BUILTIN_FOLDER, "grid=3"),
-            ("/etc/touchbinux/icons/arch.svg", "grid=3"),
+            ("/etc/barux/icons/arch.svg", "grid=3"),
         ] {
             assert!(parse(&button(icon, extra)).is_err(), "accepted: {icon} {extra}");
         }
@@ -3944,7 +3944,7 @@ mod tests {
             (BUILTIN_BATTERY, "grid=3"),
             (BUILTIN_BATTERY, "anim_ms=99999"),
             (BUILTIN_GRID_WAVE, "full_color='#00ffff'"),
-            ("/etc/touchbinux/icons/arch.svg", "battery_colors=['#00ff00','#ffff00','#ff8800','#ff0000']"),
+            ("/etc/barux/icons/arch.svg", "battery_colors=['#00ff00','#ffff00','#ff8800','#ff0000']"),
         ] {
             assert!(parse(&button(icon, extra)).is_err(), "accepted: {icon} {extra}");
         }
@@ -4099,8 +4099,8 @@ mod tests {
             [[layers.items.children]]
             id = "pp"
             role = "playpause"
-            icon_playing = "/etc/touchbinux/icons/player_pause.svg"
-            icon_paused = "/etc/touchbinux/icons/player_play.svg"
+            icon_playing = "/etc/barux/icons/player_pause.svg"
+            icon_paused = "/etc/barux/icons/player_play.svg"
             shape = "circle"
             size = 44
             background = "#00ffb7"
@@ -4109,7 +4109,7 @@ mod tests {
             [[layers.items.children]]
             id = "stop"
             role = "stop"
-            icon = "/etc/touchbinux/icons/player_stop.svg"
+            icon = "/etc/barux/icons/player_stop.svg"
             background = "transparent"
             [[layers.items.children]]
             id = "next"
@@ -4211,7 +4211,7 @@ mod tests {
             text_color = "#ffcc00"
             socket = "/tmp/other-mpv"
             [[layers.items.children]]
-            icon = "/etc/touchbinux/icons/play_pause.svg"
+            icon = "/etc/barux/icons/play_pause.svg"
             action = { type = "command", argv = ["/home/u/.local/bin/mpvctl", "playpause"] }
             "##,
         )

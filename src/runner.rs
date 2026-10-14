@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn commands_get_the_session_env_and_nothing_else() {
         // SAFETY: tests that read the environment don't depend on this variable.
-        unsafe { std::env::set_var("TOUCHBINUX_LEAK", "1") };
+        unsafe { std::env::set_var("BARUX_LEAK", "1") };
         let mut r = runner();
         r.set_hypr(Some(HyprEnv {
             signature: "../not-mine".into(),
@@ -370,7 +370,7 @@ mod tests {
         assert!(f.ok, "{}", f.status);
         let keys: Vec<_> = f.stdout.lines().filter_map(|l| l.split('=').next()).collect();
         assert!(keys.contains(&"HOME") && keys.contains(&"PATH"), "{keys:?}");
-        assert!(!keys.contains(&"TOUCHBINUX_LEAK"), "inherited: {keys:?}");
+        assert!(!keys.contains(&"BARUX_LEAK"), "inherited: {keys:?}");
         // A signature or display that isn't a plain name in the user's runtime dir
         // is never passed on.
         assert!(!keys.contains(&"HYPRLAND_INSTANCE_SIGNATURE"), "{keys:?}");

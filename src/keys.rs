@@ -205,7 +205,7 @@ pub fn supported(key: KeyCode) -> bool {
 }
 
 /// Our uinput device's name (other code must not take it for a real keyboard).
-pub const NAME: &str = "touchbinux virtual keyboard";
+pub const NAME: &str = "barux virtual keyboard";
 
 pub struct VirtualKeyboard {
     dev: VirtualDevice,

@@ -37,7 +37,7 @@ REPO_ICONS=icons
 # A tiny-dfr user's own icons, if any: copied too, and they win over the repo's
 # (same precedence tiny-dfr gives /etc/tiny-dfr over /usr/share/tiny-dfr).
 TINY_DFR_ICONS=/etc/tiny-dfr
-# Seat isolation for the Touch Bar comes from tiny-dfr's package (see docs/GUIA.md).
+# Seat isolation for the Touch Bar comes from tiny-dfr's package (see docs/GUIDE.md).
 SEAT_RULE=/usr/lib/udev/rules.d/99-touchbar-seat.rules
 # The only model this has been tested on (MacBook Pro 13" M2, 2022).
 TESTED_COMPATIBLE=apple,j493
@@ -218,7 +218,7 @@ for unit in "${LEGACY_UNITS[@]}"; do
 done
 
 # The config to install, with run_as set to the user running this script (commands
-# from buttons run as that user; see docs/GUIA.md). Migrating, the old one instead,
+# from buttons run as that user; see docs/GUIDE.md). Migrating, the old one instead,
 # its icon and GIF paths pointed at /etc/barux.
 NEW_CONF=""
 CONF_FROM=$SRC_CONF
@@ -365,7 +365,7 @@ for dev in dev-barux_touch.device dev-barux_display.device; do
 done
 if ! $plugged; then
     info "Check that $UDEV_RULE matches this machine's Touch Bar (udevadm info /dev/dri/card*,"
-    info "and the digitizer's name above) and see docs/GUIA.md, \"Solución de problemas\"."
+    info "and the digitizer's name above) and see docs/GUIDE.md, \"Troubleshooting\"."
 fi
 
 # --- Switching over from touchbinux ------------------------------------------------

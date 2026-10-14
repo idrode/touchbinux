@@ -8,7 +8,7 @@
 #     config binds them;
 #   - `qs ipc` commands for the author's Quickshell setup;
 #   - run_as = "alguien".
-# Start from config.example.toml instead; the full reference is in docs/GUIA.md.
+# Start from config.example.toml instead; the full reference is in docs/GUIDE.md.
 
 run_as = "ander"
 

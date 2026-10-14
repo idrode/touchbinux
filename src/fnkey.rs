@@ -485,8 +485,8 @@ mod tests {
         }
     }
 
-    /// Needs root (creates a uinput keyboard; see docs/GUIA.md, "Probar la capa
-    /// Fn"): other keys never reach the reader, not even as a wake-up, and Fn's
+    /// Needs root (creates a uinput keyboard; see docs/GUIDE.md, "Testing the Fn
+    /// layer"): other keys never reach the reader, not even as a wake-up, and Fn's
     /// auto-repeat is dropped.
     #[test]
     #[ignore]

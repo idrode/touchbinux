@@ -1,6 +1,6 @@
 # barux configuration - generic example.
 # Installed by install.sh as /etc/barux/config.toml (only if that file doesn't
-# exist yet). Full reference of every option: docs/GUIA.md.
+# exist yet). Full reference of every option: docs/GUIDE.md.
 #
 # Reload after editing:  sudo systemctl reload barux
 # If the new file has an error, the daemon keeps the previous configuration and says
@@ -286,7 +286,7 @@ format = "%H:%M"
 # action = { type = "key", key = "KEY_ESC" }
 
 # A button that unfolds into a row of its children (see "expandable" in
-# docs/GUIA.md). Tapping a child runs its action and folds the row; so does
+# docs/GUIDE.md). Tapping a child runs its action and folds the row; so does
 # tapping outside it (without running anything) or leaving it alone for
 # collapse_after_ms. A child's id defaults to "<parent id>.<n>" (media.1, ...).
 # [[layers.items]]
@@ -325,7 +325,7 @@ format = "%H:%M"
 # pressed_scale, text_color). detach = true: the app stays open (no timeout, its
 # own session; it still ends if the service stops or restarts). Use absolute
 # paths: commands run without a shell, with a clean environment (see "Acciones"
-# in docs/GUIA.md). Replace /home/USUARIO with your home.
+# in docs/GUIDE.md). Replace /home/USUARIO with your home.
 # [[layers.items]]
 # type = "button"
 # id = "launcher"
@@ -606,7 +606,7 @@ format = "%H:%M"
 # width = 80
 # action = { type = "key", key = "KEY_F14" }
 
-# More examples, commented out (see "Recetas" in docs/GUIA.md):
+# More examples, commented out (see "Recipes" in docs/GUIDE.md):
 #
 # Open an app through Hyprland (it keeps running after the tap):
 # [[layers.items]]
@@ -631,7 +631,7 @@ format = "%H:%M"
 # Rest when unused, like a Mac's Touch Bar: dimmed, then a sleep layer (a GIF,
 # very dim), then off. A touch on the bar or the Fn key wakes it (the daemon
 # never reads the rest of the keyboard; hypridle & co. can tell it instead, see
-# docs/GUIA.md). Commented out because the GIF is yours: uncomment both blocks
+# docs/GUIDE.md). Commented out because the GIF is yours: uncomment both blocks
 # and set `path`.
 # [idle]
 # dim_after_s = 30                 # 0 leaves a stage out; times count from the

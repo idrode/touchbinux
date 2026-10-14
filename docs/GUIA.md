@@ -1,3 +1,5 @@
+[English](GUIDE.md) | Español
+
 # Guía de barux
 
 Guía para instalar, usar, personalizar y modificar barux. Si algo de lo que

@@ -23,7 +23,7 @@ cargo build
 ./target/debug/barux bar --config config.example.toml --png bar.png
 ```
 
-**All the documentation is in [docs/GUIA.md](docs/GUIA.md)**: requirements,
+**All the documentation is in [docs/GUIDE.md](docs/GUIDE.md)**: requirements,
 step-by-step installation, how to go back to tiny-dfr and recover the bar, the full
 configuration reference, recipes, security, troubleshooting and development.
 
@@ -52,7 +52,7 @@ tools/migrate-from-touchbinux.sh rollback   # roll back: stops barux, starts tou
 ./uninstall.sh --legacy                     # once all is well: removes touchbinux
 ```
 
-Details in [docs/GUIA.md](docs/GUIA.md#migrar-desde-touchbinux).
+Details in [docs/GUIDE.md](docs/GUIDE.md#migrating-from-touchbinux).
 
 ## Status and limitations
 

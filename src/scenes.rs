@@ -21,6 +21,7 @@ use crate::{
     gif::{Gif, GifPlayer, Play},
     gifpick::{CrossFace, PickerFace, PickerShow},
     player::{PlayerFace, SeekBar},
+    title::TitleView,
     hypr::HyprState,
     icons::{AppIcon, IconResolver},
     layout,
@@ -1311,6 +1312,17 @@ impl Scene {
         self.capture = Capture::Blocked;
     }
 
+    /// Unfolds the player at once, without animating (previews). Returns whether
+    /// there was one.
+    pub fn unfold_player(&mut self) -> bool {
+        let mut found = false;
+        for m in self.menus.iter_mut().filter(|m| m.seek.is_some()) {
+            m.fold.pull_to(1.0);
+            found = true;
+        }
+        found
+    }
+
     /// Whether the player is unfolded (or unfolding): its seek bar wants mpv's
     /// position only then.
     pub fn player_open(&self) -> bool {
@@ -2143,6 +2155,10 @@ pub fn bar_with(
                     item.show_time.unwrap_or(true),
                     frame.text,
                 ));
+                spec.title = item.show_title.unwrap_or(true).then(|| {
+                    let color = item.title_color.map(|c| c.0).or(frame.text);
+                    TitleView::new(color, item.title_scroll.unwrap_or(false))
+                });
                 scene
                     .menus
                     .push(Expandable::new(id, rect, spec, children, font));
@@ -2388,6 +2404,7 @@ fn menu_spec(
         // A player stays open to be used again; the rest fold, as they always did.
         close_on_tap: item.close_on_tap.unwrap_or(item.kind != ItemKind::Player),
         seek: None,
+        title: None,
         rec: None,
         pulled: false,
     }
@@ -2573,6 +2590,7 @@ mod tests {
             player: Default::default(),
             recording: None,
             status: Default::default(),
+            dimmed: false,
         }
     }
 
@@ -3341,6 +3359,7 @@ mod tests {
             title: "song".into(),
             duration,
             position: Some(position),
+            ..Default::default()
         }
     }
 
@@ -5412,6 +5431,8 @@ mod tests {
         action = { type = "socket" }
         [[layers.items]]
         type = "player"
+        # Pinned before the track name existed.
+        show_title = false
         [[layers.items.children]]
         label = "<"
         role = "prev"

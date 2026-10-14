@@ -38,6 +38,9 @@ pub struct Live {
     pub recording: Option<crate::capture::Recording>,
     /// Recordings and screenshots, for status items.
     pub status: crate::status::Status,
+    /// The bar is dimmed or deeper in its idle stages: nothing moves that needn't
+    /// (the player's scrolling title stops).
+    pub dimmed: bool,
 }
 
 pub struct DrawCx<'a> {
@@ -1322,6 +1325,7 @@ mod tests {
             player: Default::default(),
             recording: None,
             status: Default::default(),
+            dimmed: false,
         };
         // Follows the battery: a change asks for a redraw, the same state doesn't.
         assert!(!b.advance(ms(0), &live(None)), "starts as missing");

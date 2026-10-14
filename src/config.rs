@@ -731,6 +731,16 @@ pub struct ItemConfig {
     /// player: current and total time at the seek bar's ends (default true).
     #[serde(default)]
     pub show_time: Option<bool>,
+    /// player: the track's name between the buttons and the seek bar (default true).
+    #[serde(default)]
+    pub show_title: Option<bool>,
+    /// player: a name too long to fit scrolls while the panel is open, instead of
+    /// being cut with "…" (default false).
+    #[serde(default)]
+    pub title_scroll: Option<bool>,
+    /// player: the track name's colour (default `text_color`, else white).
+    #[serde(default)]
+    pub title_color: Option<Color>,
     /// button with `icon = "builtin:grid_wave"`: squares per side (default 3).
     #[serde(default)]
     pub grid: Option<u8>,
@@ -1237,6 +1247,9 @@ impl ItemConfig {
             seek_color: None,
             seek_height: None,
             show_time: None,
+            show_title: None,
+            title_scroll: None,
+            title_color: None,
             grid: None,
             battery_colors: None,
             full_color: None,
@@ -1557,6 +1570,9 @@ impl ItemConfig {
                 "seek_color",
                 "seek_height",
                 "show_time",
+                "show_title",
+                "title_scroll",
+                "title_color",
                 "close_on_tap",
             ],
             ItemKind::Capture => &[
@@ -1695,6 +1711,9 @@ impl ItemConfig {
             ("seek_color", self.seek_color.is_some()),
             ("seek_height", self.seek_height.is_some()),
             ("show_time", self.show_time.is_some()),
+            ("show_title", self.show_title.is_some()),
+            ("title_scroll", self.title_scroll.is_some()),
+            ("title_color", self.title_color.is_some()),
             ("grid", self.grid.is_some()),
             ("battery_colors", self.battery_colors.is_some()),
             ("full_color", self.full_color.is_some()),
@@ -4186,6 +4205,9 @@ mod tests {
             seek_color = "#ff0000"
             seek_height = 6
             show_time = false
+            show_title = true
+            title_scroll = true
+            title_color = "#ffffff80"
             text_color = "#ffcc00"
             socket = "/tmp/other-mpv"
             [[layers.items.children]]
@@ -4198,6 +4220,8 @@ mod tests {
         assert_eq!(p.id(), Some("player"));
         assert_eq!(p.socket.as_deref(), Some("/tmp/other-mpv"));
         assert_eq!((p.seek_height, p.show_time), (Some(6.0), Some(false)));
+        assert_eq!((p.show_title, p.title_scroll), (Some(true), Some(true)));
+        assert_eq!(p.title_color.map(|c| c.0), Some(Rgba(0xff, 0xff, 0xff, 0x80)));
         assert!(matches!(c.action("player.1"), Some(Action::Command { .. })));
         // No children: just the icon and the seek bar.
         let bare = parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='player'").unwrap();
@@ -4210,6 +4234,10 @@ mod tests {
             "seek_height=41",
             "seek_color='red'",
             "show_time='yes'",
+            "show_title=1",
+            "title_scroll='no'",
+            "title_color='white'",
+            "title_colour='#ffffff'",
             "icon='x'",
             "label='x'",
             "dir='/g'",
@@ -4220,6 +4248,8 @@ mod tests {
             assert!(parse(&item(body)).is_err(), "accepted: {body}");
         }
         assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nseek_color='#ffffff'").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='clock'\nshow_title=true").is_err());
+        assert!(parse("[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\ntitle_scroll=true").is_err());
         // One mpv, one player.
         let two = format!("{}\n[[layers.items]]\ntype='player'\nid='p2'", item(""));
         let err = format!("{:#}", parse(&two).unwrap_err());

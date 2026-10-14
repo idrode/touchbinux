@@ -36,6 +36,7 @@ mod status;
 mod statussrc;
 #[cfg(test)]
 mod testdir;
+mod title;
 mod touch;
 mod user;
 mod widgets;
@@ -139,14 +140,16 @@ const PREVIEW_SIZE: (u32, u32) = (2008, 60);
 
 const USAGE: &str = "usage: touchbinux [pattern|demo|anim|touch|windows|buttons|bar] \
                      [--config <file>] [--gif <file>] \
-                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>] [--level 0|1|2] [--brightness 0..100]]\n\
+                     [--png <file> [--status <state>] [--layer <id>] [--focus-class <class>] [--expand <class>|player] [--level 0|1|2] [--brightness 0..100] [--title <text> [--artist <text>]]]\n\
                      --status (previews only): rec | rec_done | shot | rec_shot\n\
                      --layer (previews only): the bar scene's layer to draw, e.g. fn\n\
                      --focus-class (previews only): app_keys show this window class's set\n\
-                     --expand (previews only): workspaces with this class's app buttons out\n\
+                     --expand (previews only): workspaces with this class's app buttons out; \
+                     `player`: the player unfolded\n\
                      --level (previews only): workspaces at that level on a made-up Hyprland: 0 at rest, \
                      1 the active strip out (strip = \"tap\"), 2 also --expand's app buttons\n\
-                     --brightness (previews only): the brightness level shown, instead of the backlight's";
+                     --brightness (previews only): the brightness level shown, instead of the backlight's\n\
+                     --title, --artist (previews only): a made-up mpv playing this track, instead of the real one";
 
 /// epoll tokens. IPC clients use IPC_CLIENT_BASE + slot.
 const TOKEN_SIGNAL: u64 = 0;
@@ -194,6 +197,9 @@ struct Args {
     level: Option<u8>,
     /// `--png` only: the brightness shown (0..=100), instead of the backlight's.
     brightness: Option<u8>,
+    /// `--png` only: mpv made up, playing a track with this title (and artist).
+    title: Option<String>,
+    artist: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -208,6 +214,8 @@ fn parse_args() -> Result<Args> {
         expand: None,
         level: None,
         brightness: None,
+        title: None,
+        artist: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -235,6 +243,8 @@ fn parse_args() -> Result<Args> {
                     _ => return Err(anyhow!("--brightness must be 0 to 100, not {n:?}\n{USAGE}")),
                 }
             }
+            "--title" => args.title = Some(it.next().ok_or(anyhow!(USAGE))?),
+            "--artist" => args.artist = Some(it.next().ok_or(anyhow!(USAGE))?),
             "--level" => {
                 let n = it.next().ok_or(anyhow!(USAGE))?;
                 match n.parse::<u8>() {
@@ -263,10 +273,32 @@ fn parse_args() -> Result<Args> {
     if args.brightness.is_some() && args.png.is_none() {
         return Err(anyhow!("--brightness only goes with --png\n{USAGE}"));
     }
+    if (args.title.is_some() || args.artist.is_some()) && args.png.is_none() {
+        return Err(anyhow!("--title and --artist only go with --png\n{USAGE}"));
+    }
+    if args.artist.is_some() && args.title.is_none() {
+        return Err(anyhow!("--artist needs --title\n{USAGE}"));
+    }
     if args.level == Some(2) && args.expand.is_none() {
         return Err(anyhow!("--level 2 needs --expand <class>: whose app buttons to draw\n{USAGE}"));
     }
     Ok(args)
+}
+
+/// What `--title`/`--artist` preview: mpv playing that track, a minute into it.
+/// Cleaned as mpv's own would be; the file name is left out, so the title shows.
+fn preview_track(title: &str, artist: &str) -> mpv::MpvState {
+    mpv::MpvState {
+        connected: true,
+        idle: false,
+        paused: false,
+        title: title::clean(title),
+        meta_title: title::clean(title),
+        artist: title::clean(artist),
+        duration: Some(212.0),
+        position: Some(61.0),
+        ..Default::default()
+    }
 }
 
 /// What `--status <state>` previews (drawn at scene time 1 s).
@@ -465,6 +497,7 @@ impl App {
             player: self.mpv.as_ref().map(|m| m.state.clone()).unwrap_or_default(),
             recording: self.recorder.recording(),
             status: self.status,
+            dimmed: self.idle.stage() >= Stage::Dim,
         }
     }
 
@@ -2085,6 +2118,11 @@ fn main() -> Result<()> {
         let mut app = new_app(parts, (w, h), hypr, home.as_deref())?;
         match (app.args.level, app.args.expand.clone()) {
             (Some(level), class) => app.level_preview(level, class.as_deref())?,
+            (None, Some(p)) if p == "player" => {
+                if !app.scene.unfold_player() {
+                    eprintln!("--expand player: no player item on this layer");
+                }
+            }
             (None, Some(class)) => app.expand_preview(&class)?,
             (None, None) => {}
         }
@@ -2109,7 +2147,10 @@ fn main() -> Result<()> {
         let mut canvas = Canvas::new(w, h)?;
         // Advanced at 0 and drawn a second later: state changes (the player's icon
         // following mpv) have finished their morph by then.
-        let live = app.live();
+        let mut live = app.live();
+        if let Some(title) = &app.args.title {
+            live.player = preview_track(title, app.args.artist.as_deref().unwrap_or(""));
+        }
         app.scene.advance(Duration::ZERO, &live);
         app.scene
             .draw(&mut canvas, Duration::from_secs(1), &app.font, &live)?;
@@ -3053,6 +3094,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3169,6 +3212,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3423,6 +3468,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3519,6 +3566,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -3899,6 +3948,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -4083,7 +4134,7 @@ mod tests {
         );
         fs::write(&path, toml).unwrap();
         let parts = AppParts {
-            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None, level: None, brightness: None },
+            args: Args { scene: "bar".into(), gif: None, png: None, config: Some(path.clone()), status: None, layer: None, focus_class: None, expand: None, level: None, brightness: None, title: None, artist: None },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
             font: Font::find(FONT_CANDIDATES),
@@ -4145,6 +4196,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),
@@ -4267,6 +4320,8 @@ mod tests {
                 expand: None,
                 level: None,
                 brightness: None,
+                title: None,
+                artist: None,
             },
             config_path: Some(path.clone()),
             config: Config::load(&path).unwrap(),

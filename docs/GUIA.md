@@ -1290,7 +1290,8 @@ El reproductor: muestra el estado de **mpv** y, al tocarlo, se despliega (como u
   fuera de eso, **en pausa, parado o sin mpv no gasta ningún fotograma (0 fps)**.
 
 Solo **lee el estado** de mpv por su socket IPC (`--input-ipc-server`, por defecto
-`/tmp/mpv-socket`): `pause`, `idle-active`, `media-title` y `duration` con
+`/tmp/mpv-socket`): `pause`, `idle-active`, `media-title`, `duration`,
+`metadata/by-key/title`, `metadata/by-key/artist` y `filename` con
 `observe_property` (mpv avisa de cada cambio, sin sondeo), y `time-pos` **solo
 mientras el panel está desplegado y hay algo cargado** (es lo que más mensajes
 genera; en pausa no cambia, así que tampoco cuesta). **No lanza mpv**. Lo controla
@@ -1314,12 +1315,48 @@ arrastre.
 | `seek_color` | `"#00ffb7"` | parte recorrida de la barra de posición |
 | `seek_height` | `8` | grosor de la barra, px (1-40) |
 | `show_time` | `true` | tiempos a los lados de la barra |
+| `show_title` | `true` | nombre de la pista entre los hijos y la barra de posición (ver abajo) |
+| `title_scroll` | `false` | con `true`, un nombre que no cabe se desplaza (marquee) en vez de recortarse con "…" |
+| `title_color` | `text_color`, o blanco | color del nombre de la pista |
 | `text_color` | blanco | los tiempos (y las etiquetas de los hijos) |
 | `children` | ninguno | como en `expandable` (0-12); `[[layers.items.children]]` |
-| `expand_width` | hijos + 480 px | ancho desplegado: los hijos a su ancho natural, la barra ocupa el resto |
+| `expand_width` | hijos + 480 px (+ 484 con `show_title`) | ancho desplegado: los hijos a su ancho natural, el nombre de la pista y la barra ocupan el resto |
 | `collapse_after_ms`, `anim_ms`, `active_color`, `action` | como en `expandable` | |
 | `close_on_tap` | `false` | tocar un hijo (anterior, play/pausa...) **no** lo pliega: se puede pulsar varias veces seguidas. Cada toque y cada arrastre de la barra reinicia el plazo de `collapse_after_ms`; se pliega al vencer, al tocar fuera o al tocar su icono. Con `true`, se pliega al tocar un hijo, como un `expandable` |
 | `shape`, `radius`, `background`, `size`, `pressed_background` | | como en `expandable` |
+
+**Nombre de la pista.** Con `show_title` (por defecto), entre los hijos y la barra
+de posición, en una sola línea: **"Artista – Título"** si mpv da las etiquetas
+`artist` y `title`; si no, el `media-title` de mpv (p. ej. el título de un stream);
+si solo hay nombre de fichero, ese nombre **sin la extensión**. Si el título ya
+empieza por el artista, no se repite. Sin nada cargado o sin mpv: **"—"** en gris,
+sin errores en el log.
+
+- **Dónde y cuánto.** Sin `expand_width`, el panel crece 484 px para el nombre y la
+  barra conserva sus 480 px: los hijos y la barra quedan como antes. Con
+  `expand_width`, el nombre toma hasta la mitad (máx. 480 px) de lo que dejan los
+  hijos, y la barra el resto. Tocar el nombre no hace nada.
+- **Sin coste.** Se redibuja solo cuando mpv avisa de un cambio (`observe_property`):
+  ni sondeo ni temporizadores.
+- **Texto largo.** Por defecto se recorta con **"…"**. Con `title_scroll = true` se
+  desplaza (marquee): 1,5 s quieto al principio de cada vuelta, luego ~40 px/s a
+  **20 fps como máximo**, y vuelta a empezar. Solo se mueve **mientras no cabe, el
+  panel está desplegado del todo y la barra despierta**: se detiene al atenuarse
+  (`Dim`), en `Sleep`/`Off` y al plegarse el panel (vuelve al recorte con "…"). Un
+  nombre que cabe nunca pide fotogramas.
+- **Caracteres sin glifo.** La fuente de la barra (Noto Sans Bold) no tiene CJK,
+  emojis ni algunos símbolos (♫, ✓). En vez de los cuadrados vacíos, **cada tramo de
+  caracteres sin glifo se dibuja como un solo "?"** (y los de anchura cero, como
+  uniones de emoji o selectores de variante, se omiten): "日本語の歌" → "?",
+  "🎤‍🔥" → "?".
+- **Seguridad.** El nombre es un dato externo (nombres de fichero y etiquetas): al
+  llegar se quitan caracteres de control, saltos de línea y tabuladores (pasan a
+  un espacio), los controles bidi (U+202E y compañía, que darían la vuelta al
+  texto) y los invisibles, y se limita a **200 caracteres**. Nunca se pasa a un
+  shell; en el log sale entre comillas y escapado (`mpv: "…"`).
+
+Para verlo sin mpv: `--expand player --title ... [--artist ...]` (ver
+[sección 10](#vista-previa-sin-tocar-la-barra---png)).
 
 Solo puede haber **un** `player` (una conexión con mpv).
 
@@ -2548,6 +2585,25 @@ tira del activo abierta; `2`: además, los botones de la clase de `--expand`
 ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l1.png --level 1
 ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l2.png --level 2 --expand kitty
 ```
+
+Con `--expand player` (solo `bar --png`) el `player` se dibuja desplegado. Con
+`--title <texto>` (y opcionalmente `--artist <texto>`), en vez del mpv real se
+inventa uno reproduciendo esa pista (en 1:01 de 3:32), para ver el nombre de la
+pista: corto, largo o con caracteres raros. Sin `--title`, muestra lo que tenga tu
+mpv.
+
+```sh
+cd ~/touchbinux
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --expand player \
+  --png /tmp/corto.png --title "Bittersweet Symphony" --artist "The Verve"
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --expand player \
+  --png /tmp/largo.png --title "Fool The Detector (Extended Bootleg Remix, Live 1997)" --artist "Venetian Snares"
+./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --expand player \
+  --png /tmp/raro.png --title $'Cañón 日本語 🎤\u200d🔥 ♫ \u202eevil\ttab'
+```
+
+Con `title_scroll = true` la imagen sale en la pausa inicial: el nombre entero,
+desvaneciéndose al borde derecho.
 
 Con `--brightness <0..100>` (solo con `--png`), `brightness` se dibuja a ese nivel
 en vez del de la retroiluminación (también sin ella). Para comparar los rellenos de

@@ -433,6 +433,7 @@ mod tests {
             player: p,
             recording: None,
             status: Default::default(),
+            dimmed: false,
         }
     }
 
@@ -444,6 +445,7 @@ mod tests {
             title: "x".into(),
             duration: Some(200.0),
             position: Some(50.0),
+            ..MpvState::default()
         }
     }
 

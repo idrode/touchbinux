@@ -524,6 +524,15 @@ format = "%H:%M"
 # seek_color = "#00ffb7"
 # seek_height = 8
 # show_time = true                 # current and total time at the bar's ends
+# show_title = true                # the track's name between the children and the
+#                                  # seek bar: "Artist – Title" from mpv's tags, else
+#                                  # media-title, else the file name without extension;
+#                                  # "—" with nothing loaded. Characters the font lacks
+#                                  # (CJK, emoji) show as "?"
+# title_scroll = false             # true: a name too long scrolls (20 fps at most,
+#                                  # only while the panel is open and the bar awake);
+#                                  # false: cut with "…", no frames
+# title_color = "#ffffff"          # default text_color, else white
 # close_on_tap = false             # default: children don't fold it; every tap
 #                                  # (and seek) restarts collapse_after_ms
 #

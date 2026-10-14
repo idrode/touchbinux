@@ -15,6 +15,7 @@ use crate::{
     frame::{DEFAULT_PRESSED, Frame, Shape},
     player::SeekBar,
     scenes::{PADDING, ellipsize, icon_side},
+    title::TitleView,
     widgets::{DIM, Live, TEXT},
 };
 use std::{rc::Rc, time::Duration};
@@ -25,6 +26,11 @@ pub const DEFAULT_ACTIVE: Rgba = Rgba(0x00, 0xff, 0xb7, 0x50);
 const MIN_CHILD_W: f32 = 64.0;
 /// The seek bar's share of an unfolded player when `expand_width` is not set.
 const SEEK_W: f32 = 480.0;
+/// The track's name before the seek bar, when `expand_width` is not set (added to
+/// the row, so the seek bar keeps `SEEK_W`)...
+const TITLE_W: f32 = 480.0;
+/// ...and at most this share of what the children leave when it is.
+const TITLE_SHARE: f32 = 0.5;
 /// Between children.
 const CHILD_GAP: f32 = 4.0;
 /// Between the folded icon and its label.
@@ -250,6 +256,8 @@ pub struct Expandable {
     pub close_on_tap: bool,
     /// The player's seek bar, after the children, to the end of the row.
     pub seek: Option<SeekBar>,
+    /// The player's track name, between the children and the seek bar.
+    title: Option<TitleView>,
     /// With a seek bar, children are this wide (the widest one's natural width)
     /// and the bar takes the rest; otherwise they share the row equally.
     child_w: Option<f32>,
@@ -275,6 +283,8 @@ pub struct Spec {
     pub picks: bool,
     pub close_on_tap: bool,
     pub seek: Option<SeekBar>,
+    /// The player's `show_title`.
+    pub title: Option<TitleView>,
     /// A capture item: shows `Live::recording` this way.
     pub rec: Option<RecLook>,
     /// A button's `drag_children`: `rect` is the button's (see
@@ -302,6 +312,7 @@ impl Expandable {
             picks: spec.picks,
             close_on_tap: spec.close_on_tap,
             seek: spec.seek,
+            title: spec.title,
             child_w: None,
             rec_look: spec.rec,
             recording: None,
@@ -318,6 +329,7 @@ impl Expandable {
         let n = self.children.len() as f32;
         let children = n * (widest + CHILD_GAP);
         let seek = if self.seek.is_some() { SEEK_W } else { 0.0 };
+        let seek = seek + if self.title.is_some() { TITLE_W + CHILD_GAP } else { 0.0 };
         let natural = match self.pulled_from {
             // Clear of both round ends.
             Some(b) => {
@@ -355,8 +367,8 @@ impl Expandable {
         Rect::new(x.round(), r.y + CHILD_INSET, w.round(), child_icon_max(r.h))
     }
 
-    /// The seek bar, after the children, in the row `r`.
-    fn seek_rect(&self, r: Rect) -> Rect {
+    /// What the children leave in the row `r`: the track name and the seek bar.
+    fn media_rect(&self, r: Rect) -> Rect {
         let (x0, end) = self.content(r);
         let n = self.children.len() as f32;
         let x = x0 + n * (self.child_w.unwrap_or(0.0) + CHILD_GAP);
@@ -366,6 +378,32 @@ impl Expandable {
             (end - x).max(1.0),
             child_icon_max(r.h),
         )
+    }
+
+    /// The track name's width in `media` (0 without one).
+    fn title_w(&self, media: Rect) -> f32 {
+        match self.title {
+            Some(_) => TITLE_W.min(media.w * TITLE_SHARE).round(),
+            None => 0.0,
+        }
+    }
+
+    /// The track name, after the children, in the row `r`.
+    fn title_rect(&self, r: Rect) -> Rect {
+        let m = self.media_rect(r);
+        Rect { w: self.title_w(m), ..m }
+    }
+
+    /// The seek bar, after the children (and the track name), in the row `r`.
+    fn seek_rect(&self, r: Rect) -> Rect {
+        let m = self.media_rect(r);
+        let tw = self.title_w(m);
+        let skip = if tw > 0.0 { tw + CHILD_GAP } else { 0.0 };
+        Rect {
+            x: m.x + skip,
+            w: (m.w - skip).max(1.0),
+            ..m
+        }
     }
 
     /// Where children (and the seek bar) go in the row `r`: after the header, clear
@@ -428,6 +466,9 @@ impl Expandable {
         if let (Some(s), Some(o)) = (&mut self.seek, &old.seek) {
             s.inherit(o);
         }
+        if let (Some(n), Some(o)) = (&mut self.title, &old.title) {
+            n.inherit(o);
+        }
         for c in &mut self.children {
             let o = old.children.iter().find(|o| o.id == c.id);
             c.active = o.is_some_and(|o| o.active);
@@ -472,6 +513,13 @@ impl Expandable {
         if let Some(s) = &mut self.seek {
             s.advance(t, &live.player);
         }
+        // The fold first: the name scrolls only once the row is all the way out.
+        let fold = self.fold.advance(t);
+        let open = self.fold.is_open() && self.fold.progress(t) >= 1.0;
+        let title = self
+            .title
+            .as_mut()
+            .is_some_and(|n| n.advance(t, &live.player, open, live.dimmed));
         let mut rec = false;
         if self.rec_look.is_some() && self.recording != live.recording {
             // A recording that starts (e.g. found when the item was tapped) folds
@@ -490,18 +538,19 @@ impl Expandable {
             states |= s.follow(playing, t, on_screen);
         }
         let face = self.face.advance(t, live);
-        self.fold.advance(t) | face | rec | states
+        fold | face | rec | states | title
     }
 
     pub fn next_change(&self, t: Duration) -> Option<Duration> {
         let seek = self.seek.as_ref().and_then(|s| s.next_change(t));
+        let title = self.title.as_ref().and_then(|n| n.next_change(t));
         let rec = self.recording.map(|r| r.next_change(t));
         let fading = self
             .children
             .iter()
             .filter_map(|c| c.states.as_ref())
             .any(|s| s.fading(t));
-        [self.fold.next_change(t), self.face.next_change(t), seek, rec, fading.then_some(t)]
+        [self.fold.next_change(t), self.face.next_change(t), seek, title, rec, fading.then_some(t)]
             .into_iter()
             .flatten()
             .min()
@@ -706,6 +755,9 @@ impl Expandable {
                 canvas.scale_region(b, f.pressed_scale, self.row_colour());
             }
         }
+        if let Some(n) = &self.title {
+            n.draw(canvas, self.title_rect(r), font, unfolded, t);
+        }
         if let Some(s) = &self.seek {
             s.draw(canvas, self.seek_rect(r), font, &live.player, unfolded);
         }
@@ -830,6 +882,7 @@ mod tests {
             picks: false,
             close_on_tap: true,
             seek: seek.then(|| SeekBar::new(None, None, true, None)),
+            title: None,
             rec: None,
             pulled: false,
         };
@@ -919,5 +972,39 @@ mod tests {
         // Without children: all of it.
         let m = menu(Frame::default(), 0, true);
         assert!(m.seek_rect(m.open_rect).w > 400.0);
+    }
+
+    #[test]
+    fn a_title_goes_between_the_children_and_the_seek_bar() {
+        let font = Font::find(&[]);
+        let with = |title: bool, width: Option<f32>| {
+            let mut m = menu(Frame::default(), 2, true);
+            m.title = title.then(|| TitleView::new(None, false));
+            m.width = width;
+            m.place(&font);
+            m
+        };
+        // Without expand_width the row grows by the title: children and seek bar
+        // keep their widths.
+        let (plain, titled) = (with(false, None), with(true, None));
+        let (p, t) = (plain.open_rect, titled.open_rect);
+        assert_eq!(t.w - p.w, TITLE_W + CHILD_GAP);
+        assert_eq!(plain.child_rect(p, 1).w, titled.child_rect(t, 1).w);
+        let (n, s) = (titled.title_rect(t), titled.seek_rect(t));
+        assert_eq!(n.w, TITLE_W);
+        assert!((plain.seek_rect(p).w - s.w).abs() <= 1.0);
+        let b = titled.child_rect(t, 1);
+        assert!(b.x + b.w <= n.x && n.x + n.w < s.x && s.x + s.w <= t.x + t.w);
+        // Touching the title is neither a child nor the seek bar.
+        assert_eq!(titled.part_at(n.x + n.w / 2.0, 30.0), Part::Gap);
+        assert_eq!(titled.part_at(s.x + 20.0, 30.0), Part::Seek);
+        // With expand_width: the same row, the title takes part of the seek bar's room.
+        let fixed = with(true, Some(500.0));
+        let r = fixed.open_rect;
+        assert_eq!(r.w, 500.0);
+        let m = fixed.media_rect(r);
+        let (n, s) = (fixed.title_rect(r), fixed.seek_rect(r));
+        assert_eq!(n.w, (m.w * TITLE_SHARE).round());
+        assert_eq!(s.x + s.w, m.x + m.w);
     }
 }

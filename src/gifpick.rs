@@ -816,6 +816,7 @@ pub(crate) mod tests {
             player: Default::default(),
             recording: None,
             status: Default::default(),
+            dimmed: false,
         };
         f.advance(ms(250), &live);
         assert!(f.old.is_none(), "the old face is dropped once done");

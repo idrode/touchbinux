@@ -51,6 +51,9 @@ const OBS_IDLE: u64 = 2;
 const OBS_TITLE: u64 = 3;
 const OBS_DURATION: u64 = 4;
 const OBS_TIME_POS: u64 = 5;
+const OBS_META_TITLE: u64 = 6;
+const OBS_ARTIST: u64 = 7;
+const OBS_FILENAME: u64 = 8;
 
 /// Distinguishes clients, and connections of one client, for epoll registration.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -62,7 +65,13 @@ pub struct MpvState {
     /// Nothing loaded (`idle-active`).
     pub idle: bool,
     pub paused: bool,
+    /// `media-title`: the title tag, else the file name (or a stream's title).
     pub title: String,
+    /// The title and artist tags (`metadata/by-key/...`), empty without them.
+    pub meta_title: String,
+    pub artist: String,
+    /// The file's name, without its directory (`filename`).
+    pub filename: String,
     /// Seconds; `None` for streams and while nothing is loaded.
     pub duration: Option<f64>,
     /// Seconds; only kept up to date while observed (see `observe_position`).
@@ -202,6 +211,9 @@ impl Mpv {
                     (OBS_IDLE, "idle-active"),
                     (OBS_TITLE, "media-title"),
                     (OBS_DURATION, "duration"),
+                    (OBS_META_TITLE, "metadata/by-key/title"),
+                    (OBS_ARTIST, "metadata/by-key/artist"),
+                    (OBS_FILENAME, "filename"),
                 ] {
                     self.send(&json!({"command": ["observe_property", id, name]}));
                 }
@@ -318,13 +330,17 @@ impl Mpv {
             return false;
         }
         let data = msg.get("data");
+        // Names are outside data (file names, tags): cleaned before anyone sees them.
+        // A missing property (no such tag) comes without `data`: empty.
+        let text = || crate::title::clean(data.and_then(Value::as_str).unwrap_or(""));
         let before = self.state.clone();
         let s = &mut self.state;
         match msg.get("id").and_then(Value::as_u64) {
             Some(OBS_PAUSE) => s.paused = data.and_then(Value::as_bool).unwrap_or(false),
             Some(OBS_IDLE) => s.idle = data.and_then(Value::as_bool).unwrap_or(true),
             Some(OBS_TITLE) => {
-                s.title = data.and_then(Value::as_str).unwrap_or("").to_string();
+                s.title = text();
+                // Debug-quoted: escaped, whatever is in it.
                 if !s.title.is_empty() && s.title != before.title {
                     eprintln!("mpv: {:?}", s.title);
                 }
@@ -333,6 +349,9 @@ impl Mpv {
                 s.duration = data.and_then(Value::as_f64).filter(|d| *d > 0.0);
             }
             Some(OBS_TIME_POS) => s.position = data.and_then(Value::as_f64),
+            Some(OBS_META_TITLE) => s.meta_title = text(),
+            Some(OBS_ARTIST) => s.artist = text(),
+            Some(OBS_FILENAME) => s.filename = text(),
             _ => {}
         }
         self.state != before
@@ -440,9 +459,17 @@ mod tests {
         let mut lines = BufReader::new(server.try_clone().unwrap()).lines();
         let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
         assert_eq!(first, json!({"command": ["observe_property", 1, "pause"]}));
-        for _ in 0..3 {
-            lines.next().unwrap().unwrap();
-        }
+        let rest: Vec<Value> = (0..6)
+            .map(|_| serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap())
+            .collect();
+        assert_eq!(
+            rest[3..],
+            [
+                json!({"command": ["observe_property", 6, "metadata/by-key/title"]}),
+                json!({"command": ["observe_property", 7, "metadata/by-key/artist"]}),
+                json!({"command": ["observe_property", 8, "filename"]}),
+            ]
+        );
 
         // mpv pushes the current values (an answer to a command is ignored).
         let mut tx = &server;
@@ -455,6 +482,9 @@ mod tests {
         push(&mut tx, OBS_PAUSE, json!(false));
         push(&mut tx, OBS_TITLE, json!("Bittersweet Symphony"));
         push(&mut tx, OBS_DURATION, json!(212.5));
+        push(&mut tx, OBS_META_TITLE, json!("Bitter\nsweet\u{202e}"));
+        push(&mut tx, OBS_ARTIST, json!("The Verve"));
+        push(&mut tx, OBS_FILENAME, json!("01 - bittersweet.flac"));
         let read = |mpv: &mut Mpv| {
             let (_, fd) = mpv.stream_fd().unwrap();
             wait(fd);
@@ -466,6 +496,15 @@ mod tests {
         assert_eq!(mpv.state.title, "Bittersweet Symphony");
         assert_eq!(mpv.state.duration, Some(212.5));
         assert_eq!(mpv.state.position, None);
+        // Tags and file name, cleaned on arrival.
+        assert_eq!(mpv.state.meta_title, "Bitter sweet");
+        assert_eq!(mpv.state.artist, "The Verve");
+        assert_eq!(mpv.state.filename, "01 - bittersweet.flac");
+        assert_eq!(crate::title::track_name(&mpv.state), "The Verve – Bitter sweet");
+        // A tag the next file doesn't have comes without data: gone.
+        writeln!(tx, "{}", json!({"event": "property-change", "id": OBS_ARTIST, "name": "x"})).unwrap();
+        assert!(read(&mut mpv));
+        assert_eq!(mpv.state.artist, "");
 
         // time-pos only while asked for; seek is absolute, rounded to 0.01 s.
         mpv.observe_position(true);

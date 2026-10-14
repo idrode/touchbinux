@@ -553,6 +553,12 @@ impl Font {
         w
     }
 
+    /// Whether the font draws `c` (rather than its "missing" box). Without a font,
+    /// true: nothing is drawn anyway.
+    pub fn has_glyph(&self, c: char) -> bool {
+        self.inner.as_ref().is_none_or(|f| f.lookup_glyph_index(c) != 0)
+    }
+
     /// Baseline that vertically centres a line of text on `center_y`.
     pub fn centered_baseline(&self, center_y: f32, px: f32) -> f32 {
         match self.inner.as_ref().and_then(|f| f.horizontal_line_metrics(px)) {

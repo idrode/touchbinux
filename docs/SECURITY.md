@@ -1,6 +1,6 @@
-# Seguridad de touchbinux
+# Seguridad de barux
 
-Auditoría de privilegios del servicio (`dist/touchbinux.service`): qué corre como
+Auditoría de privilegios del servicio (`dist/barux.service`): qué corre como
 root, qué como el usuario de la sesión, qué entradas de fuera acepta el daemon y
 cómo las comprueba, qué endurecimiento de systemd lleva y por qué no lleva más. Al
 final se evalúa, sin implementarla, la alternativa de un servicio de usuario.
@@ -27,7 +27,7 @@ Estado del 2026-10-10 (systemd 262, kernel Asahi sin `CONFIG_COMPAT`, MacBook Pr
 
 | Qué | Como | Dónde |
 |---|---|---|
-| El daemon: render, DRM, táctil, uinput, socket, Hyprland, mpv, brillo, batería, estado | root | `/usr/local/bin/touchbinux`, servicio `touchbinux` |
+| El daemon: render, DRM, táctil, uinput, socket, Hyprland, mpv, brillo, batería, estado | root | `/usr/local/bin/barux`, servicio `barux` |
 | Lectura de los GIF de un `gif_picker` | root, con `setfsuid`/`setfsgid` al usuario en el hilo que los lee | `src/gifpick.rs` (`as_reader`) |
 | Comandos de botones (`command`), scripts de `capture`, `wpctl` y `pactl` | `run_as` (o `SUDO_UID` a mano): `setgroups`, `setgid` y `setuid` antes del `exec`, entorno limpio | `src/runner.rs`, `src/user.rs` |
 | Apps con `detach = true` (terminales) | `run_as`, en su propia sesión (`setsid`), pero en el cgroup del servicio | `src/runner.rs` |
@@ -48,7 +48,7 @@ Consecuencias de ser hijos del servicio, que ya ocurren hoy:
   (`RestrictSUIDSGID`).
 - El servicio tiene su propio espacio de montajes: un `sudo mount` en esa terminal
   no se ve fuera de ella (lo de fuera sí se ve dentro).
-- `systemctl restart touchbinux` (o `install.sh` seguido de un reinicio) **cierra
+- `systemctl restart barux` (o `install.sh` seguido de un reinicio) **cierra
   esas terminales**: comparten el cgroup del servicio y `KillMode=mixed` acaba con
   todo lo que queda.
 
@@ -76,10 +76,10 @@ sin ella. **No está probado**, ver abajo.
 
 **Archivos y sockets**
 
-- `/etc/touchbinux/` (configuración, iconos, GIF): lectura.
-- `/var/lib/touchbinux/state.toml`: lectura y escritura (`StateDirectory=`). Con
+- `/etc/barux/` (configuración, iconos, GIF): lectura.
+- `/var/lib/barux/state.toml`: lectura y escritura (`StateDirectory=`). Con
   `[idle]` guarda también el brillo normal de la barra.
-- `/run/touchbinux.sock`: lo crea con modo `0600` y se lo da al usuario (`chown`).
+- `/run/barux.sock`: lo crea con modo `0600` y se lo da al usuario (`chown`).
 - `/run/user/<uid>/hypr/<firma>/.socket.sock` y `.socket2.sock`: `connect`. El
   directorio es `0700` y los sockets `0755` del usuario: root necesita
   `CAP_DAC_OVERRIDE`.
@@ -117,8 +117,8 @@ se sacan los comandos del servicio.
 
 | Entrada | Quién la controla | Validación |
 |---|---|---|
-| `/etc/touchbinux/config.toml` | root | parseo estricto (`deny_unknown_fields`, rangos, un error = no carga; al recargar, se queda la anterior). `run_as` solo si el archivo es de root y no escribible por grupo u otros, nunca root. Los comandos son `argv` (sin shell) |
-| Socket `/run/touchbinux.sock` | el usuario de la sesión | modo `0600` del usuario desde el `bind` (umask `0177`, sin ventana), y además `SO_PEERCRED`: solo root o ese uid. Clientes limitados (`MAX_CLIENTS`), líneas de 64 KiB como mucho (las largas se descartan), JSON con tres tipos de mensaje: `set` (clave de 1 a 64 bytes, número de claves limitado), `status` (ids y estados fijos) e `idle` (solo `"activity"`). No puede lanzar comandos ni acciones: solo cambia textos, el volumen mostrado, el `status` y despierta la barra |
+| `/etc/barux/config.toml` | root | parseo estricto (`deny_unknown_fields`, rangos, un error = no carga; al recargar, se queda la anterior). `run_as` solo si el archivo es de root y no escribible por grupo u otros, nunca root. Los comandos son `argv` (sin shell) |
+| Socket `/run/barux.sock` | el usuario de la sesión | modo `0600` del usuario desde el `bind` (umask `0177`, sin ventana), y además `SO_PEERCRED`: solo root o ese uid. Clientes limitados (`MAX_CLIENTS`), líneas de 64 KiB como mucho (las largas se descartan), JSON con tres tipos de mensaje: `set` (clave de 1 a 64 bytes, número de claves limitado), `status` (ids y estados fijos) e `idle` (solo `"activity"`). No puede lanzar comandos ni acciones: solo cambia textos, el volumen mostrado, el `status` y despierta la barra |
 | Eventos de Hyprland (`.socket2.sock`) | el compositor del usuario | se parsean como texto. Lo que vuelve a Hyprland (dispatch) se comprueba: id de workspace solo cifras, dirección de ventana `0x` y hexadecimal |
 | Socket de mpv | el usuario | debe ser un socket del usuario de la sesión y el proceso al otro lado (`SO_PEERCRED`) también. JSON de mpv; solo se leen propiedades observadas |
 | `/proc` (buscar `wf-recorder`) | cualquier proceso | solo procesos del usuario de la sesión con `comm` exacto; se sigue por pid y hora de inicio (un pid reutilizado no engaña). Antes del `SIGINT` se vuelve a comprobar |
@@ -161,7 +161,7 @@ de él se reduce al mínimo (`src/fnkey.rs`):
 teclado:
 
 ```
-journalctl -u touchbinux | grep 'fn:'
+journalctl -u barux | grep 'fn:'
 fn: kernel event filter on (EVIOCSMASK): only KEY_FN is read      # filtro del kernel
 fn: no kernel event filter (...); other keys are read and dropped here unseen   # respaldo
 ```
@@ -268,7 +268,7 @@ el unit instalado.
     al usuario, uinput, brillo, comandos como el usuario, Hyprland y mpv conectados
     (estos dos, si están), y ningún «permission denied», «operation not permitted»
     ni «read-only file system».
-- A mano: `systemd-analyze security touchbinux.service`.
+- A mano: `systemd-analyze security barux.service`.
 
 ## Recomendaciones (no implementadas)
 
@@ -301,7 +301,7 @@ dispositivos de la barra dados por reglas udev. Sin root en ningún momento.
 **Qué haría falta**
 
 - Reglas udev para el nodo DRM de la barra, su `event` y `/dev/uinput`: un grupo
-  propio (`GROUP="touchbinux", MODE="0660"`) o ACL (`TAG+="uaccess"`). `uaccess`
+  propio (`GROUP="barux", MODE="0660"`) o ACL (`TAG+="uaccess"`). `uaccess`
   no sirve tal cual: la barra está en `seat-touchbar` y la sesión en `seat0`.
   Ahora mismo el usuario ya está en `video` e `input`, que dan acceso a esos
   nodos, pero esos grupos dan mucho más (ver contras).
@@ -313,7 +313,7 @@ dispositivos de la barra dados por reglas udev. Sin root en ningún momento.
   sesión. Habría que parar tiny-dfr al entrar (con una regla de polkit que deje al
   usuario hacer `systemctl stop/start tiny-dfr`) y devolvérsela al salir.
 - Quitar del código lo que sobra: `run_as`, `setuid`, `setfsuid` y la búsqueda de
-  sesión en `/run/user`. La configuración pasaría a `~/.config/touchbinux/`.
+  sesión en `/run/user`. La configuración pasaría a `~/.config/barux/`.
 
 **Pros**
 

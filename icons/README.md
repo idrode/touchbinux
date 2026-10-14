@@ -12,5 +12,5 @@ The SVG files in this directory are copied unchanged from
   its LICENSE; "Copyright The Asahi Linux Contributors" in its README): see
   [`LICENSE.tiny-dfr`](LICENSE.tiny-dfr).
 
-`install.sh` copies them to `/etc/touchbinux/icons/`, without overwriting files that
+`install.sh` copies them to `/etc/barux/icons/`, without overwriting files that
 are already there. The battery widget looks for its `battery_*.svg` there.

@@ -1,4 +1,4 @@
-# touchbinux
+# barux
 
 Daemon en Rust para la Touch Bar de los MacBook Pro con Apple Silicon en
 [Asahi Linux](https://asahilinux.org/). **Sustituye a
@@ -18,7 +18,7 @@ verlo sin tocar la barra:
 
 ```sh
 cargo build
-./target/debug/touchbinux bar --config config.example.toml --png barra.png
+./target/debug/barux bar --config config.example.toml --png barra.png
 ```
 
 **Toda la documentación está en [docs/GUIA.md](docs/GUIA.md)**: requisitos,
@@ -31,6 +31,26 @@ Instalación rápida (lee antes la guía):
 ./install.sh --check   # comprueba requisitos, no cambia nada
 ./install.sh           # compila, enseña el plan y pide confirmación
 ```
+
+## Migrar desde touchbinux
+
+El proyecto se llamaba **touchbinux**. Si lo tenías instalado con ese nombre,
+`./install.sh` lo detecta y migra: **copia** (no mueve) `config.toml`, `icons/` y
+`gifs/` de `/etc/touchbinux` a `/etc/barux` (si no existe; en la copia, las rutas
+`/etc/touchbinux/icons` y `/gifs` pasan a `/etc/barux`, con el diff a la vista antes
+de confirmar) y `state.toml` de `/var/lib/touchbinux` a `/var/lib/barux`; y, si
+touchbinux estaba en marcha, lo para y arranca barux una vez que sus dispositivos
+están `plugged`. La instalación vieja queda intacta. El binario nuevo nunca lee las
+rutas viejas.
+
+```sh
+tools/migrate-from-touchbinux.sh plan       # qué haría en esta máquina (no cambia nada)
+./install.sh                                # migra (enseña el plan y pregunta)
+tools/migrate-from-touchbinux.sh rollback   # vuelta atrás: para barux, arranca touchbinux
+./uninstall.sh --legacy                     # cuando todo vaya bien: quita touchbinux
+```
+
+Detalles en [docs/GUIA.md](docs/GUIA.md#migrar-desde-touchbinux).
 
 ## Estado y limitaciones
 

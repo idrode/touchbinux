@@ -1,6 +1,6 @@
-# Guía de touchbinux
+# Guía de barux
 
-Guía para instalar, usar, personalizar y modificar touchbinux. Si algo de lo que
+Guía para instalar, usar, personalizar y modificar barux. Si algo de lo que
 dice no coincide con lo que ves, el código manda: abre un issue o corrige la guía.
 
 > **Lo que se ha comprobado y lo que no.** Todo lo de esta guía se ha probado en
@@ -14,7 +14,7 @@ dice no coincide con lo que ves, el código manda: abre un issue o corrige la gu
 
 1. [Qué es y qué no es](#1-qué-es-y-qué-no-es)
 2. [Requisitos](#2-requisitos)
-3. [Instalación paso a paso](#3-instalación-paso-a-paso)
+3. [Instalación paso a paso](#3-instalación-paso-a-paso) (y [migración desde touchbinux](#migrar-desde-touchbinux))
 4. [Primer arranque y comprobaciones](#4-primer-arranque-y-comprobaciones)
 5. [Volver a tiny-dfr y recuperar la barra](#5-volver-a-tiny-dfr-y-recuperar-la-barra)
 6. [Personalización: referencia de la configuración](#6-personalización-referencia-de-la-configuración)
@@ -46,11 +46,11 @@ dispatch`, una tecla virtual, o solo avisar por el socket. En reposo no gasta CP
 **Qué NO es.**
 
 - **No es una mejora "encima" de tiny-dfr: lo sustituye.** Solo un proceso puede
-  controlar la pantalla de la barra. Con touchbinux activo, tiny-dfr queda
+  controlar la pantalla de la barra. Con barux activo, tiny-dfr queda
   enmascarado (*masked*) y sus F1-F12 y su configuración dejan de usarse. Se puede
   volver atrás en cualquier momento ([sección 5](#5-volver-a-tiny-dfr-y-recuperar-la-barra)).
 - No es un paquete de la distribución ni tiene soporte oficial de Asahi.
-- No es una salida de Wayland: Hyprland no ve la barra; touchbinux le habla por su
+- No es una salida de Wayland: Hyprland no ve la barra; barux le habla por su
   socket.
 - No tiene (todavía) capas que cambien solas, ni una fila de F1-F12 por defecto.
 
@@ -73,7 +73,7 @@ usa las escenas `pattern` y `touch` ([sección 10](#10-desarrollo)) antes de nad
 | Requisito | Para qué | Si falta |
 |---|---|---|
 | MacBook con Touch Bar y Asahi Linux | la pantalla DRM (`adp` o `appletbdrm`) y el táctil | la instalación se para |
-| **tiny-dfr instalado** (paquete `tiny-dfr`, en `asahi-meta`) | su regla `/usr/lib/udev/rules.d/99-touchbar-seat.rules` aparta la barra del *seat* de tu escritorio; sus iconos en `/usr/share/tiny-dfr` sirven de reserva | la instalación se para. **No lo desinstales** mientras uses touchbinux. |
+| **tiny-dfr instalado** (paquete `tiny-dfr`, en `asahi-meta`) | su regla `/usr/lib/udev/rules.d/99-touchbar-seat.rules` aparta la barra del *seat* de tu escritorio; sus iconos en `/usr/share/tiny-dfr` sirven de reserva | la instalación se para. **No lo desinstales** mientras uses barux. |
 | systemd | el servicio | la instalación se para |
 | Rust estable (`cargo`, `rustc` ≥ 1.88) | compilar | la instalación se para. Con rustup: `rustup default stable`. El mínimo 1.88 es una estimación (edición 2024, *let chains*, `as_chunks`); solo se ha compilado con 1.98. |
 | Una fuente TTF/OTF (recomendado `noto-fonts`) | texto | arranca igual: usa cualquier otra fuente del sistema, y si no hay ninguna, **no dibuja texto** (lo dice en el log) |
@@ -94,8 +94,8 @@ confirmar. No actives nada hasta el paso 5.
 **Paso 1. Clonar.**
 
 ```sh
-git clone <url-del-repo> touchbinux
-cd touchbinux
+git clone <url-del-repo> barux
+cd barux
 ```
 
 **Paso 2. Comprobar requisitos.**
@@ -130,7 +130,7 @@ Las líneas `[FAIL]` paran la instalación (sale con código 1 sin tocar nada); 
 
 ```sh
 cargo build
-./target/debug/touchbinux bar --config config.example.toml --png /tmp/barra.png
+./target/debug/barux bar --config config.example.toml --png /tmp/barra.png
 ```
 
 Escribe `wrote /tmp/barra.png`: ábrelo con cualquier visor. No necesita root ni para
@@ -146,32 +146,42 @@ nada el servicio. Ver [`--png`](#vista-previa-sin-tocar-la-barra---png).
 Compila en release, enseña el plan y pregunta `Proceed? [y/N]`:
 
 ```
-  /usr/local/bin/touchbinux                      <- target/release/touchbinux
-  /etc/systemd/system/touchbinux.service         <- dist/touchbinux.service
-  /etc/systemd/system/touchbinux-resume.service  <- dist/touchbinux-resume.service
-  /etc/udev/rules.d/99-touchbinux.rules          <- dist/99-touchbinux.rules
-  /etc/modules-load.d/touchbinux.conf            <- dist/modules-load.conf (loads uinput at boot)
-  /etc/touchbinux/config.toml                    <- config.example.toml, with run_as = "tu-usuario"
-                                                    (owner root, mode 0644: required for run_as)
-  /etc/touchbinux/icons/                         <- 28 new .svg (0 from /etc/tiny-dfr, the rest from icons/)
+  /usr/local/bin/barux                           <- target/release/barux
+  /etc/systemd/system/barux.service              <- dist/barux.service
+  /etc/systemd/system/barux-resume.service       <- dist/barux-resume.service
+  /etc/udev/rules.d/99-zz-barux.rules            <- dist/99-zz-barux.rules
+  /etc/modules-load.d/barux.conf                 <- dist/modules-load.conf (loads uinput at boot)
+  /etc/barux/config.toml                         <- config.example.toml
+                                                    with run_as = "tu-usuario" (owner root, mode 0644: required for run_as)
+  /etc/barux/icons/                              <- 28 new .svg (0 from /etc/tiny-dfr, the rest from icons/)
 ```
 
 - `config.toml` solo se instala si no existe; uno existente **nunca** se toca.
 - `run_as` se rellena con tu usuario (los comandos de los botones corren como él).
 - Iconos: se copian los de `/etc/tiny-dfr` (si los personalizaste para tiny-dfr) y
   los de `icons/` del repo, **solo los que falten**.
-- No se activa ni arranca nada. Al terminar imprime los comandos del paso 5.
+- No se activa ni arranca nada (salvo al [migrar desde touchbinux](#migrar-desde-touchbinux)).
+  Tras copiar, recarga systemd y udev (`daemon-reload`, `udevadm control
+  --reload-rules`, `udevadm trigger` sobre `seat-touchbar`) y **comprueba que
+  `dev-barux_touch.device` y `dev-barux_display.device` estén `plugged`**; si no,
+  lo avisa (ver [sección 9](#9-solución-de-problemas)). Al terminar imprime los
+  comandos del paso 5.
+- La regla se llama `99-zz-barux.rules` a propósito: udev lee las reglas ordenadas
+  por nombre, byte a byte, y la nuestra tiene que ir **después** de
+  `99-touchbar-*.rules` de tiny-dfr, que asigna `SYSTEMD_ALIAS` con `=` (la nuestra
+  añade con `+=`). Un nombre como `100-barux.rules` iría *antes* ("1" < "9") y la
+  unidad `dev-barux_display.device` no aparecería.
 
 > El plan y la respuesta "N" se han probado; la copia real con `sudo` desde una
 > máquina limpia **no** (en el equipo de pruebas ya estaba instalado).
 
-**Paso 5. Cambiar de tiny-dfr a touchbinux.**
+**Paso 5. Cambiar de tiny-dfr a barux.**
+
+`install.sh` ya ha recargado systemd y udev y comprobado los dispositivos. Para
+mirarlo otra vez:
 
 ```sh
-sudo systemctl daemon-reload
-sudo udevadm control --reload-rules
-sudo udevadm trigger --action=change --property-match=ID_SEAT=seat-touchbar
-systemctl status dev-touchbinux_touch.device dev-touchbinux_display.device
+systemctl status dev-barux_touch.device dev-barux_display.device
 ```
 
 Las dos unidades deben salir `Active: active (plugged)`. Si alguna dice `inactive
@@ -180,18 +190,73 @@ Las dos unidades deben salir `Active: active (plugged)`. Si alguna dice `inactiv
 
 ```sh
 sudo systemctl mask --now tiny-dfr
-sudo systemctl enable --now touchbinux
-sudo systemctl enable touchbinux-resume
+sudo systemctl enable --now barux
+sudo systemctl enable barux-resume
 ```
 
 - `mask --now tiny-dfr` para tiny-dfr y le impide volver. **`disable` no basta**:
   tiny-dfr no se arranca por `enable` sino por su regla udev
   (`SYSTEMD_WANTS=tiny-dfr.service`), y solo `mask` lo impide.
-- `enable --now touchbinux` lo arranca ya y en cada arranque (cuando aparece el
-  táctil). Debe imprimir `Created symlink ... dev-touchbinux_touch.device.wants/touchbinux.service`.
-- `touchbinux-resume` redibuja la barra al volver de suspensión.
+- `enable --now barux` lo arranca ya y en cada arranque (cuando aparece el
+  táctil). Debe imprimir `Created symlink ... dev-barux_touch.device.wants/barux.service`.
+- `barux-resume` redibuja la barra al volver de suspensión.
 
-Además, `touchbinux.service` tiene `Conflicts=tiny-dfr.service`: nunca corren los dos.
+Además, `barux.service` tiene `Conflicts=tiny-dfr.service` y
+`Conflicts=touchbinux.service`: nunca corre a la vez que tiny-dfr ni que su versión
+con el nombre viejo.
+
+### Migrar desde touchbinux
+
+barux se llamaba **touchbinux**. Una instalación con el nombre viejo
+(`touchbinux.service`, `/etc/touchbinux`, `/var/lib/touchbinux`...) no se renombra
+ni se borra: se **copia** lo necesario y la vieja queda intacta hasta que la quites.
+El binario nuevo **nunca** lee las rutas viejas: si no hay `/etc/barux/config.toml`,
+arranca sin botones configurados.
+
+Para ver qué haría, sin cambiar nada:
+
+```sh
+tools/migrate-from-touchbinux.sh status   # qué está instalado, habilitado y en marcha
+tools/migrate-from-touchbinux.sh plan     # los pasos exactos en esta máquina
+```
+
+La migración la hace `./install.sh` (o `tools/migrate-from-touchbinux.sh migrate`,
+que lo llama). Además de lo del paso 4, cuando encuentra la instalación vieja:
+
+1. **Copia** (nunca mueve), y solo si `/etc/barux` todavía no existe:
+   `/etc/touchbinux/config.toml`, `icons/` y `gifs/`. Nada más de ese directorio
+   (p. ej. `config.toml.bak` u otros archivos sueltos: los enumera como "not
+   copied"). Y `/var/lib/touchbinux/state.toml` a `/var/lib/barux/`, si allí no hay
+   uno.
+2. En la **copia** de `config.toml`, los valores entre comillas que empiezan por
+   `/etc/touchbinux/icons` o `/etc/touchbinux/gifs` pasan a `/etc/barux/...`. Los
+   comentarios y cualquier otra ruta quedan igual. **Enseña el diff antes de
+   preguntar**; el original no se toca.
+3. Tras instalar, recarga systemd y udev y comprueba que
+   `dev-barux_touch.device` y `dev-barux_display.device` estén `plugged`.
+4. Si touchbinux estaba habilitado o en marcha, y **solo si los dos dispositivos
+   están `plugged`**: `disable --now touchbinux touchbinux-resume`, `mask --now
+   tiny-dfr` (como antes), `enable --now barux` y `enable barux-resume`. Si no
+   están, touchbinux sigue funcionando y lo avisa.
+5. Al final enumera lo que queda de touchbinux y cómo quitarlo.
+
+**Volver a touchbinux** (mientras no lo hayas desinstalado), sin perder ninguna de
+las dos configuraciones:
+
+```sh
+tools/migrate-from-touchbinux.sh rollback   # para barux, arranca touchbinux
+tools/migrate-from-touchbinux.sh migrate    # y otra vez a barux
+```
+
+**Quitar la instalación vieja** cuando barux funcione:
+
+```sh
+./uninstall.sh --legacy           # binario, unidades, regla udev y modules-load de touchbinux
+./uninstall.sh --legacy --purge   # además /etc/touchbinux y /var/lib/touchbinux
+```
+
+Fuera del repo nada usaba los nombres viejos en el equipo probado, pero si tienes
+scripts que hablan con `/run/touchbinux.sock`, cámbialos a `/run/barux.sock`.
 
 ## 4. Primer arranque y comprobaciones
 
@@ -203,18 +268,18 @@ cambiar el nivel; se pliega solo a los 3 s.
 **Qué debe decir el log.**
 
 ```sh
-journalctl -u touchbinux -b       # este arranque
-journalctl -u touchbinux -f       # en vivo
+journalctl -u barux -b       # este arranque
+journalctl -u barux -f       # en vivo
 ```
 
 Un arranque correcto (equipo probado, arrancado antes del login):
 
 ```
-Started touchbinux Touch Bar daemon.
+Started barux Touch Bar daemon.
 using /dev/dri/card2
 canvas: 2008x60
 touch: /dev/input/event3 "Mac14,7 Touch Bar" x (0, 23044) y (0, 639) (grabbed)
-ipc: listening on /run/touchbinux.sock (mode 0600, owner uid 1000)
+ipc: listening on /run/barux.sock (mode 0600, owner uid 1000)
 keys: virtual keyboard created
 backlight: /sys/class/backlight/apple-panel-bl (max 509)
 hyprland: no Hyprland instance under /run/user/*/hypr/; waiting for it to start
@@ -243,14 +308,14 @@ Avisos que **no** son un problema:
 - `icons: ... not found, using /usr/share/tiny-dfr/...`: un icono del config no estaba
   y se usó el de tiny-dfr con el mismo nombre.
 
-Estado general: `systemctl status touchbinux`.
+Estado general: `systemctl status barux`.
 
 ## 5. Volver a tiny-dfr y recuperar la barra
 
 **Volver a tiny-dfr** (deja los archivos instalados):
 
 ```sh
-sudo systemctl disable --now touchbinux touchbinux-resume
+sudo systemctl disable --now barux barux-resume
 sudo systemctl unmask tiny-dfr
 sudo systemctl start tiny-dfr
 ```
@@ -262,42 +327,42 @@ Hyprland y el teclado siguen funcionando. Ojo: **las F1-F12 están en la propia
 Touch Bar**, así que `Ctrl+Alt+F3` para ir a una TTY **no sirve**. Opciones:
 
 1. **Desde una terminal de Hyprland** (o por **SSH** desde otra máquina):
-   - ver qué pasa: `systemctl status touchbinux` y `journalctl -u touchbinux -b`;
-   - reintentar: `sudo systemctl reset-failed touchbinux; sudo systemctl restart touchbinux`
+   - ver qué pasa: `systemctl status barux` y `journalctl -u barux -b`;
+   - reintentar: `sudo systemctl reset-failed barux; sudo systemctl restart barux`
      (`reset-failed` hace falta si se agotó el límite de 5 reinicios en 60 s);
    - o volver a tiny-dfr con los tres comandos de arriba.
 2. **Ir a una TTY sin F-keys:** `sudo chvt 3` desde una terminal (y `sudo chvt 1` o
    el número de tu sesión para volver; `loginctl` y `who` lo indican).
 3. **Si ni siquiera llegas a la sesión:** en el gestor de arranque, edita la línea
-   del kernel (en GRUB, tecla `e`) y añade `systemd.mask=touchbinux.service`.
-   Arranca sin touchbinux (y sin tiny-dfr, que sigue enmascarado); entra y vuelve a
+   del kernel (en GRUB, tecla `e`) y añade `systemd.mask=barux.service`.
+   Arranca sin barux (y sin tiny-dfr, que sigue enmascarado); entra y vuelve a
    tiny-dfr como arriba. *No probado en el equipo de pruebas.*
 
-Al parar (`systemctl stop`, Ctrl+C o SIGTERM), touchbinux deja la barra en negro y
+Al parar (`systemctl stop`, Ctrl+C o SIGTERM), barux deja la barra en negro y
 suelta la pantalla y el táctil, para que tiny-dfr u otro proceso los puedan tomar.
 
 ## 6. Personalización: referencia de la configuración
 
-El archivo es `/etc/touchbinux/config.toml` (TOML). Ejemplos: `config.example.toml`
+El archivo es `/etc/barux/config.toml` (TOML). Ejemplos: `config.example.toml`
 (genérico) y `examples/mine.toml` (la disposición personal del autor; **no** carga
 tal cual en otra máquina).
 
 ### Recargar y errores
 
 ```sh
-sudoedit /etc/touchbinux/config.toml
-sudo systemctl reload touchbinux       # manda SIGHUP
-journalctl -u touchbinux -e            # ver el resultado
+sudoedit /etc/barux/config.toml
+sudo systemctl reload barux       # manda SIGHUP
+journalctl -u barux -e            # ver el resultado
 ```
 
-- Correcto: `config: reloaded /etc/touchbinux/config.toml (...)` y la barra se
+- Correcto: `config: reloaded /etc/barux/config.toml (...)` y la barra se
   redibuja.
 - **Con un error** (TOML mal escrito, un campo desconocido o que no corresponde al
   tipo, un valor fuera de rango, un GIF que no existe...): el daemon **sigue con la
   configuración anterior** y escribe el motivo, por ejemplo:
 
   ```
-  config: validating /etc/touchbinux/config.toml: layer "main": clock "clock": `icon` is not valid for a clock
+  config: validating /etc/barux/config.toml: layer "main": clock "clock": `icon` is not valid for a clock
   config: keeping the previous configuration
   ```
 
@@ -305,7 +370,7 @@ journalctl -u touchbinux -e            # ver el resultado
   tiene uno anterior) y systemd lo reintenta 5 veces. El log lo dice así:
 
   ```
-  Error: validating /etc/touchbinux/config.toml
+  Error: validating /etc/barux/config.toml
 
   Caused by:
       0: layer "main"
@@ -313,7 +378,7 @@ journalctl -u touchbinux -e            # ver el resultado
   ```
  Comprueba antes con `--png`
   (ver [sección 10](#vista-previa-sin-tocar-la-barra---png)): carga y valida igual.
-- Cambiar `run_as` necesita `sudo systemctl restart touchbinux` (el dueño del socket
+- Cambiar `run_as` necesita `sudo systemctl restart barux` (el dueño del socket
   se fija al arrancar).
 - Los campos son estrictos: un nombre mal escrito (`colour` en vez de `color`) es un
   error, no se ignora.
@@ -384,7 +449,7 @@ transition_ms = 120      # fundido entre capas (0 = al instante)
 | `mode` | `"hold"` | `hold`, `toggle` | `hold`: se ve mientras Fn está pulsada. `toggle`: cada pulsación de Fn la muestra o la oculta |
 | `delay_ms` | `80` | 0-1000 | solo `hold` (con `toggle` es un error): cuánto tiene que estar Fn pulsada antes de que salga, para que un toque rápido no la haga parpadear. `0`: al instante |
 | `transition_ms` | `120` | 0-1000 | fundido entre una capa y otra. `0`: cambio seco |
-| `fn_device` | — | 1-128 bytes | parte del nombre del teclado, si no quieres que lo busque solo (ver `journalctl -u touchbinux \| grep fn:`) |
+| `fn_device` | — | 1-128 bytes | parte del nombre del teclado, si no quieres que lo busque solo (ver `journalctl -u barux \| grep fn:`) |
 
 La capa Fn solo admite `button`, `text`, `clock`, `battery`, `gif` y `spacer`: nada
 que se despliegue ni siga estado en vivo, porque desaparece al soltar Fn.
@@ -496,7 +561,7 @@ Con `activity_from = ["touch"]`, escribir no la mantiene despierta; si aun así 
 quieres, que te avise tu sesión por el socket:
 
 ```sh
-echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
+echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/barux.sock
 ```
 
 Con `wake_on = ["fn"]` el daemon abre el lector de Fn aunque no haya `[fn]` (el
@@ -515,10 +580,10 @@ Cómo se comporta:
   brillo normal en 150 ms como mucho.
 - **Grabando** (un `status` en grabación, o una grabación del `capture`): la barra
   no pasa de atenuada. Si empieza una con la barra apagada, vuelve a atenuada.
-- **Suspensión**: al reanudar, `touchbinux-resume` recarga el config, y una recarga
+- **Suspensión**: al reanudar, `barux-resume` recarga el config, y una recarga
   cuenta como actividad. Una recarga aplica los tiempos nuevos desde ese momento.
 - **El brillo normal** es el que tiene la barra la primera vez que arranca con
-  `[idle]`; se guarda en `/var/lib/touchbinux/state.toml` (`touchbar_brightness`)
+  `[idle]`; se guarda en `/var/lib/barux/state.toml` (`touchbar_brightness`)
   y se restaura **siempre** al salir: Ctrl+C, `systemctl stop`/`restart`, un
   error, un panic. Si el daemon muere con `SIGKILL`, el siguiente arranque lo
   restaura desde ese archivo. Para cambiarlo, edita ese valor con el daemon parado.
@@ -620,14 +685,14 @@ item_radius = "full"            # todo en píldora...
 [[layers.items]]
 type = "button"
 id = "play"
-icon = "/etc/touchbinux/icons/play_pause.svg"
+icon = "/etc/barux/icons/play_pause.svg"
 shape = "circle"                # ...salvo este círculo
 action = { type = "key", key = "KEY_PLAYPAUSE" }
 
 [[layers.items]]
 type = "button"
 id = "next"
-icon = "/etc/touchbinux/icons/fast_forward.svg"
+icon = "/etc/barux/icons/fast_forward.svg"
 background = "transparent"      # solo el icono
 action = { type = "key", key = "KEY_NEXTSONG" }
 
@@ -638,7 +703,7 @@ shape = "none"                  # la hora como texto suelto
 [[layers.items]]
 type = "button"
 id = "prev"
-icon = "/etc/touchbinux/icons/fast_rewind.svg"
+icon = "/etc/barux/icons/fast_rewind.svg"
 shape = "circle"
 size = 40                       # círculo de 40 px, centrado
 pressed_background = "#1793d1"  # azul al pulsar, con el icono encima
@@ -752,14 +817,14 @@ action = { type = "key", key = "KEY_ESC" }
 [[layers.items]]
 type = "button"
 id = "play"
-icon = "/etc/touchbinux/icons/play_pause.svg"
+icon = "/etc/barux/icons/play_pause.svg"
 color = "#00ffb7"
 action = { type = "key", key = "KEY_PLAYPAUSE" }
 ```
 
 **Iconos.** Cómo se busca `icon`:
 
-1. **Ruta absoluta** (`/etc/touchbinux/icons/play_pause.svg`): ese archivo. Si no
+1. **Ruta absoluta** (`/etc/barux/icons/play_pause.svg`): ese archivo. Si no
    existe, el mismo nombre en `/usr/share/tiny-dfr/` (y lo dice el log).
 2. **Nombre** (`utilities-terminal`, `firefox`): en el tema de iconos del usuario de
    `run_as` (GTK, `~/.config/gtk-3.0/settings.ini`; prefiere su variante `-Dark`),
@@ -847,7 +912,7 @@ action = { type = "key", key = "KEY_PLAYPAUSE" }
 Si no se encuentra, se dibuja un **`?`** y el log dice `icons: icon "..." not found`.
 La barra es negra: usa iconos claros o `color`.
 
-`install.sh` deja en `/etc/touchbinux/icons/` los iconos de `icons/`: `play_pause`,
+`install.sh` deja en `/etc/barux/icons/` los iconos de `icons/`: `play_pause`,
 `fast_rewind`, `fast_forward`, `volume_up`, `volume_down`, `volume_off`, `mic_off`,
 `brightness_high`, `brightness_low`, `backlight_high`, `backlight_low`, `search`,
 `bolt` y los `battery_*` (licencia en `icons/README.md`).
@@ -910,7 +975,7 @@ no viene en `icons/`):
 [[layers.items]]
 type = "button"
 id = "launcher"
-icon = "/etc/touchbinux/icons/arch.svg"
+icon = "/etc/barux/icons/arch.svg"
 color = "#00ffb7"
 shape = "circle"
 size = 52
@@ -972,7 +1037,7 @@ width = 200
 | Campo | Por defecto | Qué hace |
 |---|---|---|
 | `id` | `"battery"` | |
-| `icon_dir` | `"/etc/touchbinux/icons"` | carpeta con `battery_0_bar.svg` ... `battery_charging_full.svg` (nombres de tiny-dfr) |
+| `icon_dir` | `"/etc/barux/icons"` | carpeta con `battery_0_bar.svg` ... `battery_charging_full.svg` (nombres de tiny-dfr) |
 | `action` | — | |
 
 Si faltan iconos en `icon_dir`, prueba `/usr/share/tiny-dfr`; si tampoco, dibuja una
@@ -1090,12 +1155,12 @@ mismo archivo comparten la decodificación.
 ```toml
 [[layers.items]]
 type = "gif"
-path = "/etc/touchbinux/gifs/gato.gif"
+path = "/etc/barux/gifs/gato.gif"
 width = 60
 play = "on_tap"
 ```
 
-Ponlo en una carpeta legible por root, p. ej. `/etc/touchbinux/gifs/`.
+Ponlo en una carpeta legible por root, p. ej. `/etc/barux/gifs/`.
 
 #### `text`
 
@@ -1175,16 +1240,16 @@ conserva al recargar la configuración.
 [[layers.items]]
 type = "expandable"
 id = "media"
-icon = "/etc/touchbinux/icons/play_pause.svg"
+icon = "/etc/barux/icons/play_pause.svg"
 collapse_after_ms = 4000
 
 [[layers.items.children]]
 id = "media_prev"
-icon = "/etc/touchbinux/icons/fast_rewind.svg"
+icon = "/etc/barux/icons/fast_rewind.svg"
 action = { type = "key", key = "KEY_PREVIOUSSONG" }
 
 [[layers.items.children]]
-icon = "/etc/touchbinux/icons/play_pause.svg"     # id "media.2"
+icon = "/etc/barux/icons/play_pause.svg"     # id "media.2"
 action = { type = "key", key = "KEY_PLAYPAUSE" }
 
 [[layers.items.children]]
@@ -1256,7 +1321,7 @@ width = 80
 - **Si el elegido no se puede leer o está corrupto**, se queda lo que había, el log
   lo dice una vez (`gif_picker "gif_picker": decoding ...`) y no se reintenta
   hasta que lo vuelvas a elegir.
-- **La elección se guarda** en `/var/lib/touchbinux/state.toml` (lo crea systemd con
+- **La elección se guarda** en `/var/lib/barux/state.toml` (lo crea systemd con
   `StateDirectory=`), así que sobrevive a reinicios y recargas. **El config de
   `/etc` no se modifica.** Si el archivo elegido ya no está en `dir` (o cambias
   `dir`), se ignora. Arrancado a mano sin root (p. ej. `--png`), se lee pero no se
@@ -1265,7 +1330,7 @@ width = 80
   se avisa como `{"type":"pick","id":"gif_picker","value":"gato.gif"}`.
 
 **Fondo blanco.** Un GIF con fondo blanco se ve como un cuadrado blanco en la barra
-negra: touchbinux no lo cambia. Para hacerlo transparente, con ImageMagick:
+negra: barux no lo cambia. Para hacerlo transparente, con ImageMagick:
 
 ```sh
 magick gato.gif -coalesce -fuzz 10% -transparent white -set dispose background gato-t.gif
@@ -1367,19 +1432,19 @@ seek_color = "#00ffb7"
 collapse_after_ms = 5000          # más tiempo para usar la barra
 
 [[layers.items.children]]
-icon = "/etc/touchbinux/icons/fast_rewind.svg"
+icon = "/etc/barux/icons/fast_rewind.svg"
 action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "prev"] }
 
 [[layers.items.children]]
-icon = "/etc/touchbinux/icons/play_pause.svg"
+icon = "/etc/barux/icons/play_pause.svg"
 action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "playpause"] }
 
 [[layers.items.children]]
-icon = "/etc/touchbinux/icons/fast_forward.svg"
+icon = "/etc/barux/icons/fast_forward.svg"
 action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
 ```
 
-Por el socket de touchbinux, cada salto se avisa como
+Por el socket de barux, cada salto se avisa como
 `{"type":"seek","id":"player","value":61.24}`.
 
 **Hijos del `player`: `role`, iconos por estado y estilo propio.** Además de los
@@ -1410,12 +1475,12 @@ campos de un hijo de `expandable`, los del `player` admiten:
 ```toml
 [[layers.items.children]]
 role = "prev"
-icon = "/etc/touchbinux/icons/fast_rewind.svg"
+icon = "/etc/barux/icons/fast_rewind.svg"
 
 [[layers.items.children]]
 role = "playpause"
-icon_playing = "/etc/touchbinux/icons/player_pause.svg"
-icon_paused  = "/etc/touchbinux/icons/player_play.svg"
+icon_playing = "/etc/barux/icons/player_pause.svg"
+icon_paused  = "/etc/barux/icons/player_play.svg"
 shape = "circle"
 size = 44
 background = "#00ffb7"
@@ -1424,7 +1489,7 @@ pressed_scale = 0.92
 
 [[layers.items.children]]
 role = "stop"
-icon = "/etc/touchbinux/icons/player_stop.svg"
+icon = "/etc/barux/icons/player_stop.svg"
 shape = "circle"
 size = 44
 background = "#ff0000"
@@ -1456,7 +1521,7 @@ sesión, con el entorno de la sesión Wayland** (`WAYLAND_DISPLAY`, `XDG_RUNTIME
 que dibujes la región con `slurp` (hasta 60 s; los demás, 15 s). Como la barra no es
 una ventana de Wayland, tocarla no quita el foco: "ventana" es la que tenías activa.
 
-Los scripts se usan **tal cual**; touchbinux solo les pasa el argumento. Están
+Los scripts se usan **tal cual**; barux solo les pasa el argumento. Están
 pensados para estos:
 
 - **`screenshot`** `[region|window|full]`: `grim` (+ `slurp` para la región,
@@ -1467,7 +1532,7 @@ pensados para estos:
 
 **Grabando.** El elemento se pone **rojo** (`record_color`) con un **punto que
 parpadea** y un **cronómetro** (`m:ss`); **tocarlo para la grabación** (no se
-despliega). Para saber si se graba, touchbinux busca un proceso `wf-recorder`
+despliega). Para saber si se graba, barux busca un proceso `wf-recorder`
 **del usuario de sesión** (en `/proc`, nunca los de otros usuarios) cuando hay
 motivo: al arrancar, al terminar el script de grabar (y unas veces más en los 2,5 s
 siguientes, lo que tarda en aparecer) y al tocar el elemento. Encontrado, sigue a
@@ -1650,7 +1715,7 @@ los argumentos (el id solo cifras; la dirección, `0x` y hexadecimal):
   pensada para `strip = "pressed"`: se pulsa la cápsula, se abre su tira, y
   soltando sobre uno de sus iconos se enfoca esa ventana.
 
-Por el socket de touchbinux se avisa con `{"type":"workspace","id":"workspaces","value":"4"}`
+Por el socket de barux se avisa con `{"type":"workspace","id":"workspaces","value":"4"}`
 y `{"type":"focuswindow","id":"workspaces","value":"0x..."}`.
 
 **Arrastre (`overview_action`).** Con él, un arrastre horizontal (a cualquier lado)
@@ -1735,7 +1800,7 @@ Para verlo sin Hyprland: `bar --png ... --level 0|1|2` (el 2 con `--expand
 **Probarlo en la barra:** tras `./install.sh` y reiniciar el servicio, toca la
 píldora activa (se abre la tira), espera 5 s (se cierra), ábrela y toca kitty (o
 la app con botones: nivel 2), toca el asa (vuelve a la tira), cambia de workspace
-con el teclado (se cierra todo). El journal (`journalctl -u touchbinux -f`) dice
+con el teclado (se cierra todo). El journal (`journalctl -u barux -f`) dice
 `workspaces: "kitty" buttons out` al desplegar los botones.
 
 ##### Botones por app: `app_actions`
@@ -1899,7 +1964,7 @@ rec_done_ms = 4000
 shot_ms = 2000
 ```
 
-Para verlo sin grabar ni capturar nada: `touchbinux bar --config <archivo> --png
+Para verlo sin grabar ni capturar nada: `barux bar --config <archivo> --png
 <salida.png> --status rec` (o `rec_done`, `shot`, `rec_shot`). Con el daemon en
 marcha, los mensajes del socket de arriba lo muestran en la barra de verdad.
 
@@ -1929,7 +1994,7 @@ entero, así que **para abrir aplicaciones usa `detach = true`** (o `hyprctl` co
 terminal). Sin timeout (ponerle `timeout_ms` es un error), en una **sesión propia**
 (`setsid`), no ocupa los 8 huecos de los comandos (hasta 16 abiertas a la vez), se
 recoge al cerrarse y el daemon **no la mata al salir**. **Límite**: como servicio
-sigue en el cgroup de `touchbinux.service`, así que `systemctl stop`/`restart`
+sigue en el cgroup de `barux.service`, así que `systemctl stop`/`restart`
 (también el `restart` tras reinstalar) **la cierran**. Si quieres que sobreviva a eso, que la
 lance Hyprland (`hyprctl` con `exec`), que la saca del servicio.
 
@@ -1966,7 +2031,7 @@ action = { type = "hyprctl", exec = ["kitty", "-e", "htop"] } # Hyprland lanza l
 action = { type = "hyprctl", raw = 'hl.dsp.focus({ workspace = "e+1" })' }
 ```
 
-touchbinux detecta el proveedor de configuración de Hyprland (`hyprland: config
+barux detecta el proveedor de configuración de Hyprland (`hyprland: config
 provider Lua` en el log) y escribe `workspace`, `focus_window` y `exec` en su
 sintaxis. **`raw` se pasa tal cual**: escríbelo para tu proveedor (Lua:
 `hl.dsp...`; clásico: `workspace e+1`). Los argumentos de `exec` se entrecomillan:
@@ -2188,7 +2253,7 @@ cambiar de ventana: `--focus-class <clase>` (ver
 ## 7. Recetas
 
 Cada receta es un elemento para añadir a `[[layers.items]]`; después,
-`sudo systemctl reload touchbinux`.
+`sudo systemctl reload barux`.
 
 ### Botón que abre una app
 
@@ -2228,7 +2293,7 @@ action = { type = "command", argv = ["sh", "-c", "grim ~/captura-$(date +%s).png
 [[layers.items]]
 type = "button"
 id = "mute-mic"
-icon = "/etc/touchbinux/icons/mic_off.svg"
+icon = "/etc/barux/icons/mic_off.svg"
 action = { type = "key", key = "KEY_MICMUTE" }
 ```
 
@@ -2241,14 +2306,14 @@ tecla que no exista en el teclado (F13-F24) y asignarla en Hyprland.
 [[layers.items]]
 type = "button"
 id = "lanzador"
-icon = "/etc/touchbinux/icons/search.svg"
+icon = "/etc/barux/icons/search.svg"
 action = { type = "key", key = "KEY_F13" }
 ```
 
 **Ojo con los nombres:** con el mapa de teclado por defecto (xkb `evdev`), algunas
 F altas llegan a Hyprland con otro nombre. Comprobado en el equipo de pruebas:
 
-| touchbinux | Hyprland ve |
+| barux | Hyprland ve |
 |---|---|
 | `KEY_F13` | `XF86Tools` |
 | `KEY_F14` | `XF86Launch5` |
@@ -2274,15 +2339,15 @@ por su carpeta. Con avisos, la grabación aparece y desaparece al instante, sin
 búsqueda de procesos. Una línea al final de cada caso del script:
 
 ```sh
-echo '{"type":"status","id":"rec","state":"start"}' | socat - UNIX-CONNECT:/run/touchbinux.sock 2>/dev/null || true
+echo '{"type":"status","id":"rec","state":"start"}' | socat - UNIX-CONNECT:/run/barux.sock 2>/dev/null || true
 ```
 
 (`"stop"` al parar, `{"type":"status","id":"shot"}` tras una captura.) El `|| true`
-deja el script funcionando aunque touchbinux no esté en marcha.
+deja el script funcionando aunque barux no esté en marcha.
 
 ### Mostrar datos de un script por el socket
 
-El daemon escucha en `/run/touchbinux.sock`: **JSON por líneas** (un objeto por
+El daemon escucha en `/run/barux.sock`: **JSON por líneas** (un objeto por
 línea, terminado en `\n`). Solo pueden conectarse root y el usuario de `run_as`.
 
 **Entrada** (cliente → daemon), tres tipos:
@@ -2330,7 +2395,7 @@ correcto no responde nada. Uno incorrecto responde, por ejemplo:
 2. Envía un valor (como tu usuario, sin sudo):
 
    ```sh
-   echo '{"type":"set","key":"weather","value":"18 °C"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
+   echo '{"type":"set","key":"weather","value":"18 °C"}' | socat - UNIX-CONNECT:/run/barux.sock
    ```
 
 3. Un script que lo actualice cada 10 minutos:
@@ -2341,7 +2406,7 @@ correcto no responde nada. Uno incorrecto responde, por ejemplo:
        t=$(curl -s 'https://wttr.in/?format=%t' | tr -d '+')
        printf '{"type":"set","key":"weather","value":"%s"}\n' "$t"
        sleep 600
-   done | socat - UNIX-CONNECT:/run/touchbinux.sock
+   done | socat - UNIX-CONNECT:/run/barux.sock
    ```
 
    (Si el valor puede llevar comillas o barras, genera el JSON con `jq -cn --arg v "$t" '{type:"set",key:"weather",value:$v}'`.)
@@ -2349,7 +2414,7 @@ correcto no responde nada. Uno incorrecto responde, por ejemplo:
 4. Escuchar los toques y reaccionar:
 
    ```sh
-   socat - UNIX-CONNECT:/run/touchbinux.sock | while read -r line; do
+   socat - UNIX-CONNECT:/run/barux.sock | while read -r line; do
        case $line in
            *'"id":"tiempo"'*) notify-send "Tiempo" "$(curl -s wttr.in/?format=3)" ;;
        esac
@@ -2363,7 +2428,7 @@ y los errores) contra el daemon en marcha; el elemento `text` con tests y `--png
 
 ## 8. Seguridad
 
-**Qué corre como root.** El daemon (`/usr/local/bin/touchbinux`), porque necesita:
+**Qué corre como root.** El daemon (`/usr/local/bin/barux`), porque necesita:
 ser *DRM master* de la pantalla de la barra, la captura exclusiva del táctil (evdev),
 crear el teclado virtual (`/dev/uinput`) y escribir el brillo en `/sys/class/backlight`.
 También lee los iconos, GIF y fuentes, y crea el socket.
@@ -2388,7 +2453,7 @@ ejecuta nada como root**: si no hay usuario válido, los comandos se rechazan
 pulsar teclas en tu sesión. Mantenlo `root:root` y `0644` (así lo instala
 `install.sh`); edítalo con `sudoedit`. Con otros permisos, `run_as` se ignora.
 
-**El socket** `/run/touchbinux.sock` es `0600` y pertenece al usuario de sesión;
+**El socket** `/run/barux.sock` es `0600` y pertenece al usuario de sesión;
 además se comprueban las credenciales de cada cliente (solo root y ese usuario). Un
 cliente puede fijar valores para mostrar y recibir los toques; **no puede lanzar
 acciones**. Límites: 32 clientes, líneas de 64 KiB, 1 MiB de salida pendiente.
@@ -2405,7 +2470,7 @@ daemon que, solo para sí mismo, cambia su identidad de acceso a archivos (`setf
 y `setfsgid`, que en Linux son por hilo) a la del usuario de sesión: solo abre lo
 que ese usuario puede abrir (sin sus grupos suplementarios), y el resto del daemon
 sigue como estaba. Sin usuario de sesión no se lee nada. Lo que el usuario elige en
-la barra se guarda en `/var/lib/touchbinux/state.toml` (de root, `0644`), nunca en
+la barra se guarda en `/var/lib/barux/state.toml` (de root, `0644`), nunca en
 `/etc`.
 
 **El socket de mpv** (`player`) suele estar en `/tmp`, donde cualquiera puede crear
@@ -2425,9 +2490,9 @@ captura corren como cualquier acción `command`.
 **El servicio** aplica `ProtectSystem=full`, `ProtectKernelTunables`,
 `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
 `RestrictSUIDSGID`, `SystemCallArchitectures=native` y `RestrictRealtime`, y
-`StateDirectory=touchbinux` para el estado (`/var` sigue escribible con
+`StateDirectory=barux` para el estado (`/var` sigue escribible con
 `ProtectSystem=full`). Otras protecciones (p. ej. `ProtectHome`, `NoNewPrivileges`)
-están listadas y comentadas en `dist/touchbinux.service` con el motivo: los comandos
+están listadas y comentadas en `dist/barux.service` con el motivo: los comandos
 de los botones heredan el sandbox y dejarían de funcionar. Ojo: por eso mismo, en
 una terminal abierta desde la barra `/usr` y `/etc` son de solo lectura (`sudo
 pacman` falla ahí). El modelo de amenazas, lo que necesita el daemon y las
@@ -2440,7 +2505,7 @@ Fallos que se han visto en el desarrollo y su causa.
 
 **Las acciones `hyprctl` fallan: `hyprctl: [...] failed (...)`.** Con el proveedor
 Lua de Hyprland (≥ 0.55), `hyprctl dispatch` espera una expresión Lua
-(`hl.dsp.focus({ workspace = "2" })`), no el texto clásico (`workspace 2`). touchbinux
+(`hl.dsp.focus({ workspace = "2" })`), no el texto clásico (`workspace 2`). barux
 lo detecta (`hyprland: config provider Lua`) y traduce `workspace`, `focus_window` y
 `exec`, pero **no `raw`**, ni un `args` antiguo que no sea de esos tres. Si ves
 `assuming Lua config provider`, no pudo detectarlo: si usas la configuración clásica,
@@ -2457,34 +2522,34 @@ Hyprland al aparecer `/run/user/<uid>/hypr` y el volumen al aparecer
 no hay salida de audio por defecto. Se corrige solo con el siguiente cambio.
 
 **Las unidades de dispositivo tardan en aparecer.** Tras instalar, si
-`systemctl status dev-touchbinux_touch.device` dice `inactive (dead)`, udev aún no ha
+`systemctl status dev-barux_touch.device` dice `inactive (dead)`, udev aún no ha
 aplicado la regla nueva. Repite `sudo udevadm control --reload-rules` y
 `sudo udevadm trigger --action=change --property-match=ID_SEAT=seat-touchbar`, espera
 unos segundos y vuelve a mirar. Si sigue igual: `udevadm info /dev/input/eventN` (el
-del log) debe mostrar `SYSTEMD_ALIAS=... /dev/touchbinux_touch`. Si el nombre de tu
-táctil no está en `dist/99-touchbinux.rules` (lo avisa `install.sh --check`), el
+del log) debe mostrar `SYSTEMD_ALIAS=... /dev/barux_touch`. Si el nombre de tu
+táctil no está en `dist/99-zz-barux.rules` (lo avisa `install.sh --check`), el
 servicio no arrancará solo.
 
 **`user: ignoring run_as: ... must be owned by root and not group/world-writable`.**
 El config tiene otro dueño o permisos (p. ej. lo copiaste con `cp` como tu usuario).
-Arreglo: `sudo chown root:root /etc/touchbinux/config.toml && sudo chmod 644 /etc/touchbinux/config.toml`
-y `sudo systemctl restart touchbinux`.
+Arreglo: `sudo chown root:root /etc/barux/config.toml && sudo chmod 644 /etc/barux/config.toml`
+y `sudo systemctl restart barux`.
 
 **`could not become DRM master (is tiny-dfr still running?)`** o
 **`grabbing ... (is tiny-dfr still running?)`**: otro proceso tiene la barra.
-`systemctl status tiny-dfr touchbinux`; si probabas a mano, para el servicio antes
-(`sudo systemctl stop touchbinux`).
+`systemctl status tiny-dfr barux`; si probabas a mano, para el servicio antes
+(`sudo systemctl stop barux`).
 
-**`... is in use (another touchbinux running?)`**: ya hay un touchbinux con el socket.
+**`... is in use (another barux running?)`**: ya hay un barux con el socket.
 
 **`no Touch Bar digitizer found, saw: [...]`**: el táctil no aparece; la lista dice
 qué dispositivos se vieron.
 
 **`Start request repeated too quickly`**: 5 fallos en 60 s. Lee el motivo en el log
-y, tras arreglarlo, `sudo systemctl reset-failed touchbinux && sudo systemctl start touchbinux`.
+y, tras arreglarlo, `sudo systemctl reset-failed barux && sudo systemctl start barux`.
 
 **El servicio no arranca tras editar el config.** Al arrancar, un config inválido es
-fatal (en una recarga no). Valida antes: `touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/x.png`.
+fatal (en una recarga no). Valida antes: `barux bar --config /etc/barux/config.toml --png /tmp/x.png`.
 
 **Iconos con `?`**: el log dice qué icono no se encontró. Usa una ruta absoluta o un
 nombre que exista en tu tema (`find /usr/share/icons -name 'nombre.*'`).
@@ -2496,7 +2561,7 @@ y reinicia el servicio.
 escritorio no tiene nada asignado a esa tecla (ver
 [Reutilizar un atajo](#reutilizar-un-atajo-de-hyprland)).
 
-**Suspensión**: `touchbinux-resume.service` redibuja al volver. **No se ha probado** con
+**Suspensión**: `barux-resume.service` redibuja al volver. **No se ha probado** con
 una suspensión real.
 
 ## 10. Desarrollo
@@ -2520,7 +2585,7 @@ una suspensión real.
 | `status.rs` | `status`: estado compartido (grabación, captura), lo que muestra cada elemento en cada instante y su dibujo |
 | `statussrc.rs` | `status`: vigilancia de la carpeta de capturas (inotify) y de los procesos que graban (`/proc` y pidfd) |
 | `workspaces.rs`, `wsbirth.rs` | `workspaces`: lo que se ve del estado de Hyprland, círculos y píldora o cápsulas, tiras de iconos (y la de `strip = "tap"` con su plazo); nacimiento y cierre de un workspace (port de `WorkspaceBirthCanvas.qml`) |
-| `state.rs` | estado elegido en la barra (`/var/lib/touchbinux/state.toml`) |
+| `state.rs` | estado elegido en la barra (`/var/lib/barux/state.toml`) |
 | `anim.rs` | trait `Animated`, curvas, animaciones de prueba |
 | `gif.rs` | decodificar, escalar y reproducir GIF |
 | `canvas.rs` | lienzo apaisado: rectángulos, texto (`fontdue`), SVG (`resvg`) |
@@ -2559,7 +2624,7 @@ que miden tiempos: `cargo test --release -- --ignored --nocapture`.
 ### Vista previa sin tocar la barra: `--png`
 
 ```sh
-./target/debug/touchbinux bar --config config.example.toml --png /tmp/barra.png
+./target/debug/barux bar --config config.example.toml --png /tmp/barra.png
 ```
 
 Carga y **valida** el config igual que el daemon, dibuja un fotograma de 2008x60 a un
@@ -2571,7 +2636,7 @@ para esa clase se dibuja con sus botones desplegados, sobre un Hyprland inventad
 (un workspace con una ventana de esa clase, enfocada): no hace falta Hyprland.
 
 ```sh
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/zen.png --expand zen
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/zen.png --expand zen
 ```
 
 Con `--level 0|1|2` (solo `bar --png`), los `workspaces` se dibujan en ese nivel de
@@ -2582,8 +2647,8 @@ tira del activo abierta; `2`: además, los botones de la clase de `--expand`
 (obligatorio con `2`). Sin `strip = "tap"`, el `1` se ve como el `0` (y lo avisa).
 
 ```sh
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l1.png --level 1
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/l2.png --level 2 --expand kitty
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/l1.png --level 1
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/l2.png --level 2 --expand kitty
 ```
 
 Con `--expand player` (solo `bar --png`) el `player` se dibuja desplegado. Con
@@ -2593,12 +2658,12 @@ pista: corto, largo o con caracteres raros. Sin `--title`, muestra lo que tenga 
 mpv.
 
 ```sh
-cd ~/touchbinux
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --expand player \
+cd ~/barux
+./target/debug/barux bar --config /etc/barux/config.toml --expand player \
   --png /tmp/corto.png --title "Bittersweet Symphony" --artist "The Verve"
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --expand player \
+./target/debug/barux bar --config /etc/barux/config.toml --expand player \
   --png /tmp/largo.png --title "Fool The Detector (Extended Bootleg Remix, Live 1997)" --artist "Venetian Snares"
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --expand player \
+./target/debug/barux bar --config /etc/barux/config.toml --expand player \
   --png /tmp/raro.png --title $'Cañón 日本語 🎤\u200d🔥 ♫ \u202eevil\ttab'
 ```
 
@@ -2611,26 +2676,26 @@ en vez del de la retroiluminación (también sin ella). Para comparar los rellen
 
 ```sh
 for b in 0 25 50 75 100; do
-  ./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/brillo-$b.png --brightness $b
+  ./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/brillo-$b.png --brightness $b
 done
 ```
 
 `cargo test dump_circle_levels_to_png` dibuja los cuatro rellenos (y `min_fill`, y un
 anillo translúcido) a 0-100 %, plegados y desplegados; con
-`TOUCHBINUX_ICON_DUMP=/tmp/iconos` deja los PNG ahí para mirarlos.
+`BARUX_ICON_DUMP=/tmp/iconos` deja los PNG ahí para mirarlos.
 
 Con `--focus-class <clase>` (solo `bar --png`), los `app_keys` se dibujan como si
 esa clase tuviera el foco, sin mirar Hyprland:
 
 ```sh
-./target/debug/touchbinux bar --config /etc/touchbinux/config.toml --png /tmp/zen.png --focus-class zen
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/zen.png --focus-class zen
 ```
 
 Con `--layer <id>` (solo `bar --png`) dibuja esa capa en lugar de la de inicio; por
 ejemplo, la capa Fn:
 
 ```sh
-./target/debug/touchbinux bar --config config.example.toml --png /tmp/fn.png --layer fn
+./target/debug/barux bar --config config.example.toml --png /tmp/fn.png --layer fn
 ```
 
 Para ver animaciones (desplegar, pulsar, abrir carpetas) fotograma a fotograma hay
@@ -2638,11 +2703,11 @@ tests `#[ignore]` que escriben PNG en la carpeta que indiques:
 
 ```sh
 mkdir -p /tmp/frames
-TOUCHBINUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
+BARUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
 ```
 
 `dump_expandable` (elementos `expandable` y carpetas), `dump_gif_picker` (con
-`TOUCHBINUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_player`
+`BARUX_GIFS=<carpeta>` usa tus GIF; si no, unos generados), `dump_player`
 (estados del reproductor y su panel), `dump_player_children` (hijos con estilo
 propio y el fundido de iconos), `dump_capture` (plegado, desplegado con un
 modo atenuado y grabando), `dump_grid_wave` (reposo, cinco fotogramas de la ola y el
@@ -2663,15 +2728,15 @@ coordenadas en el log, para calibrar), `demo`, `anim` (con `--gif <archivo>`),
    controlarla):
 
    ```sh
-   sudo systemctl stop touchbinux
-   sudo ./target/debug/touchbinux bar --config config.example.toml
+   sudo systemctl stop barux
+   sudo ./target/debug/barux bar --config config.example.toml
    # Ctrl+C para salir: deja la barra en negro
-   sudo systemctl start touchbinux
+   sudo systemctl start barux
    ```
 
    Con `sudo`, los comandos corren como tu usuario (`SUDO_UID`) y el socket es tuyo.
-   Recargar: `sudo kill -HUP $(pidof touchbinux)`.
-4. Para instalar el binario nuevo: `./install.sh` y `sudo systemctl restart touchbinux`.
+   Recargar: `sudo kill -HUP $(pidof barux)`.
+4. Para instalar el binario nuevo: `./install.sh` y `sudo systemctl restart barux`.
 
 ### Probar la capa Fn
 
@@ -2696,23 +2761,23 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test the_kernel_filter_
 En la barra:
 
 1. Añade `[fn]` y la capa al config, y compruébalo con `--png --layer fn`.
-2. `sudo systemctl stop touchbinux` y
-   `sudo ./target/debug/touchbinux bar --config <tu config>`. En el log debe salir
+2. `sudo systemctl stop barux` y
+   `sudo ./target/debug/barux bar --config <tu config>`. En el log debe salir
    `fn: kernel event filter on (EVIOCSMASK): only KEY_FN is read` y
    `fn: following the Fn key of /dev/input/event1 "Apple MTP keyboard"`.
 3. Mantén Fn: tras `delay_ms` sale la capa con fundido; suéltala y vuelve la normal.
    Un toque rápido de Fn no debe mostrar nada.
 4. Con Fn mantenida, toca F5 en la barra: en el log `action: key KEY_F5 down` al
    apoyar y `up` al levantar. Para ver qué llega a la sesión: `wev` o
-   `sudo evtest` sobre «touchbinux virtual keyboard».
-5. Con la barra quieta, `top -p $(pidof touchbinux)` debe marcar 0 % de CPU, con y
+   `sudo evtest` sobre «barux virtual keyboard».
+5. Con la barra quieta, `top -p $(pidof barux)` debe marcar 0 % de CPU, con y
    sin Fn pulsada (salvo durante el fundido).
-6. Ctrl+C y `sudo systemctl start touchbinux`.
+6. Ctrl+C y `sudo systemctl start barux`.
 
 ### Probar el reposo
 
 Con tiempos cortos, en una copia de tu config (no hace falta tocar
-`/etc/touchbinux`):
+`/etc/barux`):
 
 ```toml
 [idle]
@@ -2725,9 +2790,9 @@ off_after_s = 40
 ```sh
 cargo test idle                 # etapas, brillo, despertar, escritorio, socket (reloj simulado)
 cargo test idle_desktop_live -- --ignored --nocapture   # contra tu Hyprland, sin root: no toques nada 5 s
-./target/debug/touchbinux bar --config <copia> --png /tmp/idle.png --layer idle
-sudo systemctl stop touchbinux
-sudo ./target/debug/touchbinux bar --config <copia>
+./target/debug/barux bar --config <copia> --png /tmp/idle.png --layer idle
+sudo systemctl stop barux
+sudo ./target/debug/barux bar --config <copia>
 ```
 
 En el log: `idle: backlight /sys/class/backlight/228600000.dsi.0 (normal N of 255)`
@@ -2759,12 +2824,12 @@ watch -n 0.2 cat /sys/class/backlight/228600000.dsi.0/brightness
 Actividad sin teclado: un toque, Fn, o el socket (desde tu usuario):
 
 ```sh
-echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/touchbinux.sock
+echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/barux.sock
 ```
 
 Y comprobar que el brillo vuelve: Ctrl+C con la barra apagada, y
-`cat .../brightness` debe dar el normal. CPU: `top -p $(pidof touchbinux)`, 0 %
-apagada y despierta quieta. `sudo systemctl start touchbinux` al terminar.
+`cat .../brightness` debe dar el normal. CPU: `top -p $(pidof barux)`, 0 %
+apagada y despierta quieta. `sudo systemctl start barux` al terminar.
 
 ### Añadir un tipo de elemento
 
@@ -2790,7 +2855,7 @@ completo. Pasos:
 1. Volver a tiny-dfr ([sección 5](#5-volver-a-tiny-dfr-y-recuperar-la-barra)):
 
    ```sh
-   sudo systemctl disable --now touchbinux touchbinux-resume
+   sudo systemctl disable --now barux barux-resume
    sudo systemctl unmask tiny-dfr
    sudo systemctl start tiny-dfr
    ```
@@ -2798,11 +2863,14 @@ completo. Pasos:
 2. Quitar los archivos:
 
    ```sh
-   ./uninstall.sh            # conserva /etc/touchbinux
-   ./uninstall.sh --purge    # también borra /etc/touchbinux (config, iconos, GIF)
+   ./uninstall.sh            # conserva /etc/barux y /var/lib/barux
+   ./uninstall.sh --purge    # también los borra (config, iconos, GIF, estado)
+   ./uninstall.sh --legacy   # solo lo que quede de touchbinux (tras migrar)
    ```
 
-   Se niega mientras touchbinux siga activo o habilitado. Enseña lo que va a borrar y
+   Sin `--legacy` quita **las dos** instalaciones, barux y, si sigue ahí, la de
+   touchbinux (con `--purge`, también `/etc/touchbinux` y `/var/lib/touchbinux`).
+   Se niega mientras alguna de sus unidades siga activa o habilitada. Enseña lo que va a borrar y
    pregunta. Después:
 
    ```sh
@@ -2812,4 +2880,4 @@ completo. Pasos:
 
 `uinput` queda cargado hasta reiniciar (tiny-dfr también lo usa; es inofensivo).
 `uninstall.sh` **no se ha probado** de principio a fin (el equipo de pruebas sigue
-usando touchbinux).
+usando barux).

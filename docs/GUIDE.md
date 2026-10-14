@@ -2572,3 +2572,320 @@ has nothing bound to that key (see [Reusing a shortcut](#reusing-a-hyprland-shor
 
 **Suspend**: `barux-resume.service` redraws on resume. **It has not been tested** with
 a real suspend.
+
+## 10. Development
+
+### `src/` layout
+
+| File | What it does |
+|---|---|
+| `main.rs` | arguments, test scenes, `App` (state) and the `epoll` loop |
+| `config.rs` | the TOML: types, default values and strict validation |
+| `scenes.rs` | scenes (what is on the bar), buttons, hit-testing and touches; `bar()` builds a layer |
+| `layout.rs` | width distribution (`width`/`stretch`) |
+| `widgets.rs` | clock, battery, volume/brightness icons and the folders |
+| `expander.rs` | unfolding volume and brightness sliders; the folding (`Fold`) |
+| `levelicon.rs` | level icons drawn by code: the sun, or the `icon_style = "circle"` circle (ring and its three fills), reusable by volume |
+| `expandable.rs` | `expandable`, `gif_picker`, `player` and `capture` items: an unfolding row of children |
+| `gifpick.rs` | `gif_picker`: thread that reads folders and GIFs as the session user |
+| `mpv.rs` | client for mpv's IPC socket: state through `observe_property`, seek |
+| `player.rs` | `player`: icon (simulated bars, `Levels` trait), seek bar |
+| `capture.rs` | `capture`: modes and icons, following `wf-recorder`, recording indicator |
+| `status.rs` | `status`: shared state (recording, screenshot), what each item shows at each moment and its drawing |
+| `statussrc.rs` | `status`: watching the screenshot folder (inotify) and the recording processes (`/proc` and pidfd) |
+| `workspaces.rs`, `wsbirth.rs` | `workspaces`: what is shown of Hyprland's state, circles and pill or capsules, icon strips (and the `strip = "tap"` one with its timer); birth and closing of a workspace (port of `WorkspaceBirthCanvas.qml`) |
+| `state.rs` | state chosen on the bar (`/var/lib/barux/state.toml`) |
+| `anim.rs` | `Animated` trait, curves, test animations |
+| `gif.rs` | decoding, scaling and playing GIFs |
+| `canvas.rs` | landscape canvas: rectangles, text (`fontdue`), SVG (`resvg`) |
+| `display.rs` | DRM output (adapted from tiny-dfr): mode, framebuffer, rotation |
+| `touch.rs` | multitouch evdev digitizer |
+| `icons.rs` | icon lookup by path or theme |
+| `levels.rs` | volume (`wpctl`/`pactl`) and brightness (sysfs) |
+| `battery.rs` | battery and `power_supply` events |
+| `hypr.rs`, `hyprwatch.rs`, `hyprctl.rs` | Hyprland: sockets, waiting without polling, dispatch per provider (through `hyprctl` or the control socket) |
+| `ipc.rs` | the line-delimited JSON socket |
+| `runner.rs`, `user.rs` | running commands as the session user |
+| `keys.rs` | virtual keyboard (uinput) and chords (`keys`) |
+| `appactions.rs` | `workspaces` per-app buttons (`app_actions`): unfolding, folding (and why it folded, for the `strip = "tap"` strip) and focus |
+| `appkeys.rs` | `app_keys` (alternative): a set of buttons per window class, with a cross-fade |
+| `fnkey.rs` | the internal keyboard's Fn key: read-only, kernel filter |
+| `fnlayer.rs` | when the Fn layer comes out (state machine) and the cross-fade |
+| `idle.rs` | idle: awake, dimmed, asleep and off stages (state machine) |
+| `barlight.rs` | Touch Bar brightness (`[idle]`): ramps and restoring on exit |
+| `stats.rs` | fps/CPU statistics in the log |
+
+Loop: wait for an event (touch, socket, Hyprland, timer, signal) → update the state →
+if something changed, redraw the whole buffer → flush it to DRM.
+
+### Building and tests
+
+```sh
+cargo build            # debug (dependencies are optimized anyway)
+cargo build --release
+cargo test             # they do not touch the hardware
+cargo clippy --all-targets
+```
+
+Some scene tests are skipped if there are no Noto/DejaVu fonts. There are two
+`#[ignore]` tests that measure times: `cargo test --release -- --ignored --nocapture`.
+
+### Preview without touching the bar: `--png`
+
+```sh
+./target/debug/barux bar --config config.example.toml --png /tmp/barra.png
+```
+
+It loads and **validates** the config the same way as the daemon, draws one 2008x60
+frame to a PNG and exits. It does not open DRM or the digitizer: no root needed and
+no need to stop the service. It reads the real brightness, battery and Hyprland; the
+volume always shows as 50.
+
+With `--expand <clase>` (only `bar --png`), each `workspaces` with `app_actions` for
+that class is drawn with its buttons unfolded, on a made-up Hyprland (one workspace
+with one window of that class, focused): no Hyprland needed.
+
+```sh
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/zen.png --expand zen
+```
+
+With `--level 0|1|2` (only `bar --png`), the `workspaces` are drawn at that level of
+[`strip = "tap"`](#the-strip-on-tap-strip--tap) on another made-up Hyprland:
+workspaces 1 (active), 2 and 3; on 1, a window of the `--expand` class (kitty if not
+given) and a firefox one; on 2, a Code one. `0`: at rest; `1`: with the active one's
+strip open; `2`: also, the buttons of the `--expand` class (required with `2`).
+Without `strip = "tap"`, `1` looks like `0` (and it warns about it).
+
+```sh
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/l1.png --level 1
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/l2.png --level 2 --expand kitty
+```
+
+With `--expand player` (only `bar --png`) the `player` is drawn unfolded. With
+`--title <texto>` (and optionally `--artist <texto>`), instead of the real mpv it
+makes up one playing that track (at 1:01 of 3:32), to see the track name: short, long
+or with odd characters. Without `--title`, it shows whatever your mpv has.
+
+```sh
+cd ~/barux
+./target/debug/barux bar --config /etc/barux/config.toml --expand player \
+  --png /tmp/corto.png --title "Bittersweet Symphony" --artist "The Verve"
+./target/debug/barux bar --config /etc/barux/config.toml --expand player \
+  --png /tmp/largo.png --title "Fool The Detector (Extended Bootleg Remix, Live 1997)" --artist "Venetian Snares"
+./target/debug/barux bar --config /etc/barux/config.toml --expand player \
+  --png /tmp/raro.png --title $'Cañón 日本語 🎤\u200d🔥 ♫ \u202eevil\ttab'
+```
+
+With `title_scroll = true` the image shows the initial pause: the whole name, fading
+out at the right edge.
+
+With `--brightness <0..100>` (only with `--png`), `brightness` is drawn at that level
+instead of the backlight's (also without one). To compare the fills of
+`icon_style = "circle"`:
+
+```sh
+for b in 0 25 50 75 100; do
+  ./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/brillo-$b.png --brightness $b
+done
+```
+
+`cargo test dump_circle_levels_to_png` draws the four fills (and `min_fill`, and a
+translucent ring) at 0-100 %, folded and unfolded; with
+`BARUX_ICON_DUMP=/tmp/iconos` it leaves the PNGs there to look at.
+
+With `--focus-class <clase>` (only `bar --png`), the `app_keys` are drawn as if that
+class had the focus, without looking at Hyprland:
+
+```sh
+./target/debug/barux bar --config /etc/barux/config.toml --png /tmp/zen.png --focus-class zen
+```
+
+With `--layer <id>` (only `bar --png`) it draws that layer instead of the starting
+one; for example, the Fn layer:
+
+```sh
+./target/debug/barux bar --config config.example.toml --png /tmp/fn.png --layer fn
+```
+
+To see animations (unfolding, pressing, opening folders) frame by frame, there are
+`#[ignore]` tests that write PNGs to the folder you give them:
+
+```sh
+mkdir -p /tmp/frames
+BARUX_FRAMES=/tmp/frames cargo test dump_ -- --ignored
+```
+
+`dump_expandable` (`expandable` items and folders), `dump_gif_picker` (with
+`BARUX_GIFS=<carpeta>` it uses your GIFs; otherwise, some generated ones),
+`dump_player` (the player's states and its panel), `dump_player_children` (children
+with their own style and the icon cross-fade), `dump_capture` (folded, unfolded with
+a dimmed mode, and recording), `dump_grid_wave` (rest, five frames of the wave and the
+end; also enlarged 4x), `dump_battery_icon` (0, 10, 25, 50, 80 and 100 %, the same
+while charging, full and plugged in, 80 % limit, halfway through the animation and no battery, at 4x), `dump_frame_shapes`,
+`dump_pressed` and `dump_frames` (sliders).
+
+Scenes (first argument): `bar` (the service's), `pattern` (orientation test pattern,
+the default), `touch` (a grid that marks the finger and writes the coordinates to the
+log, for calibration), `demo`, `anim` (with `--gif <archivo>`), `windows` (Hyprland
+desktops and windows) and `buttons` (old format).
+
+### Edit / build / test workflow
+
+1. Edit and `cargo test`.
+2. Look at the result with `--png` (the service keeps running).
+3. To test on the real bar you have to stop the service (only one process can drive
+   it):
+
+   ```sh
+   sudo systemctl stop barux
+   sudo ./target/debug/barux bar --config config.example.toml
+   # Ctrl+C to exit: it leaves the bar black
+   sudo systemctl start barux
+   ```
+
+   With `sudo`, commands run as your user (`SUDO_UID`) and the socket is yours.
+   Reload: `sudo kill -HUP $(pidof barux)`.
+4. To install the new binary: `./install.sh` and `sudo systemctl restart barux`.
+
+### Testing the Fn layer
+
+What can be tested without the bar:
+
+```sh
+cargo test fn                                     # state machine, App, PNG
+cargo test this_machines_keyboard -- --ignored --nocapture   # which keyboard it finds (input group)
+```
+
+The second opens the `/dev/input` nodes read-only, says which keyboard it chose and
+whether Fn is held, and reads no events. On this machine: `/dev/input/event1 "Apple
+MTP keyboard"`.
+
+That the kernel leaves the other keys out is checked by a test that needs root (it
+creates a virtual keyboard with `/dev/uinput`):
+
+```sh
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=sudo cargo test the_kernel_filter_passes_fn_only -- --ignored
+```
+
+On the bar:
+
+1. Add `[fn]` and the layer to the config, and check it with `--png --layer fn`.
+2. `sudo systemctl stop barux` and
+   `sudo ./target/debug/barux bar --config <tu config>`. The log must show
+   `fn: kernel event filter on (EVIOCSMASK): only KEY_FN is read` and
+   `fn: following the Fn key of /dev/input/event1 "Apple MTP keyboard"`.
+3. Hold Fn: after `delay_ms` the layer comes out with a cross-fade; release it and the
+   normal one comes back. A quick tap on Fn must show nothing.
+4. With Fn held, tap F5 on the bar: the log shows `action: key KEY_F5 down` when the
+   finger rests and `up` when it lifts. To see what reaches the session: `wev` or
+   `sudo evtest` on "barux virtual keyboard".
+5. With the bar still, `top -p $(pidof barux)` must show 0 % CPU, with and without Fn
+   held (except during the cross-fade).
+6. Ctrl+C and `sudo systemctl start barux`.
+
+### Testing idle
+
+With short times, in a copy of your config (no need to touch `/etc/barux`):
+
+```toml
+[idle]
+dim_after_s = 10
+sleep_after_s = 20
+sleep_layer = "idle"
+off_after_s = 40
+```
+
+```sh
+cargo test idle                 # stages, brightness, waking, desktop, socket (simulated clock)
+cargo test idle_desktop_live -- --ignored --nocapture   # against your Hyprland, no root: do not touch anything for 5 s
+./target/debug/barux bar --config <copia> --png /tmp/idle.png --layer idle
+sudo systemctl stop barux
+sudo ./target/debug/barux bar --config <copia>
+```
+
+In the log: `idle: backlight /sys/class/backlight/228600000.dsi.0 (normal N of 255)`
+and `idle: following the desktop's activity on /run/user/<uid>/wayland-1 (...)`.
+Then:
+
+1. **Everything still** (no bar, no keyboard, no mouse): `idle: desktop idle for
+   Dim's time` and `idle: Awake -> Dim` after 10 s, `Dim -> Sleep` after 20 s and
+   `Sleep -> Off` after 40 s.
+2. **Typing without touching the bar** (in another window, without stopping): it does
+   not go beyond awake, even after more than 40 s. When you stop typing, it dims 10 s
+   later.
+3. **Moving the mouse** with the bar dimmed, asleep or off: it wakes at once
+   (`idle: Off -> Awake`), with the normal brightness and the previous layer, and the
+   first touch on the bar already works.
+4. **Touching the bar without touching the keyboard**: with everything still until it
+   dims (10 s), a touch wakes it; Hyprland is still "idle", so it dims again 10 s after
+   **that touch** (not before). Touch a gap or a button that does not send keys: the
+   ones that emit virtual keys reach Hyprland like typing and also count as desktop
+   activity.
+5. **Inhibitor**: a video in mpv in view (or an `idleinhibit always` rule): it does not
+   go beyond awake; if it starts with the bar idle, it wakes it.
+6. **Only the bar**: with `activity_from = ["touch"]` in the copy, the log says
+   nothing about the desktop and, even if you type, it dims 10 s after you stop touching it. The brightness can be watched in another terminal:
+
+```sh
+watch -n 0.2 cat /sys/class/backlight/228600000.dsi.0/brightness
+```
+
+Activity without the keyboard: a touch, Fn, or the socket (as your user):
+
+```sh
+echo '{"type":"idle","state":"activity"}' | socat - UNIX-CONNECT:/run/barux.sock
+```
+
+And check that the brightness comes back: Ctrl+C with the bar off, and
+`cat .../brightness` must give the normal one. CPU: `top -p $(pidof barux)`, 0 % off
+and awake when still. `sudo systemctl start barux` when you are done.
+
+### Adding an item type
+
+The commit that added `text` (`git log --grep "text items"`) is a complete example.
+Steps:
+
+1. **`config.rs`**: a variant in `ItemKind` and its name in `name()`; new fields in
+   `ItemConfig` (`#[serde(default)]`) and in the `present` list of `validate`; the
+   allowed fields in `allowed`; its own checks; the default width in `size()`; add
+   `field: None` to the `[[buttons]]` constructor in `default_layer()`.
+2. **`scenes.rs`**, function `bar()`: what is added to the scene. If it shows a live
+   value, implement `widgets::Widget` (`draw`, and `next_change`/`wall_period` if it
+   changes over time) and use `scene.add_widget`; if it can be touched, register it in
+   `scene.buttons` or use `add_button`.
+3. If it depends on new data, add it to `widgets::Live` (filled in `App::live()`,
+   `main.rs`) and mark `dirty` in the loop when it changes.
+4. Tests: a configuration one (accept and reject) and a scene one (drawing/touch).
+5. Document the type in this guide.
+
+## 11. Uninstalling
+
+1. Go back to tiny-dfr ([section 5](#5-going-back-to-tiny-dfr-and-recovering-the-bar)):
+
+   ```sh
+   sudo systemctl disable --now barux barux-resume
+   sudo systemctl unmask tiny-dfr
+   sudo systemctl start tiny-dfr
+   ```
+
+2. Remove the files:
+
+   ```sh
+   ./uninstall.sh            # keeps /etc/barux and /var/lib/barux
+   ./uninstall.sh --purge    # also removes them (config, icons, GIFs, state)
+   ./uninstall.sh --legacy   # only what is left of touchbinux (after migrating)
+   ```
+
+   Without `--legacy` it removes **both** installations, barux and, if it is still
+   there, touchbinux's (with `--purge`, also `/etc/touchbinux` and
+   `/var/lib/touchbinux`). It refuses while any of their units is still active or
+   enabled. It shows what it will delete and asks. Afterwards:
+
+   ```sh
+   sudo systemctl daemon-reload
+   sudo udevadm control --reload-rules
+   ```
+
+`uinput` stays loaded until reboot (tiny-dfr also uses it; it is harmless).
+`uninstall.sh` **has not been tested** end to end (the test machine still uses
+barux).

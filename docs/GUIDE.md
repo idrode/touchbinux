@@ -1185,3 +1185,408 @@ width = 200
 ```
 
 The key `volume` is reserved for the volume (it is not shown in a `text`).
+
+#### `expandable`
+
+A button that **unfolds** over the bar (with the same animation as the sliders) into
+a row of **children**: small buttons, each with its own action. Unfolded, its icon
+stays on the left as a header and the children go to the right, in equal parts. It
+folds:
+
+- when **a child is chosen** (its action runs and the touch is reported over the
+  socket with the child's `id`), except with `close_on_tap = false`;
+- when **tapping outside** (that touch does nothing else) or **its icon** on the
+  left;
+- after **`collapse_after_ms`** without being touched. The time counts from the
+  **last touch** on the panel (a child, the `player`'s seek bar, a gap), not from
+  when it unfolded; while a finger rests on it, it never folds. Restarting the timer
+  draws nothing; folded, no touch arms it.
+
+If you press a child and slide the finger off it, nothing runs. While it is unfolded,
+what is underneath is darkened and does not respond. Only one item is unfolded at a
+time (slider or `expandable`).
+
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `id` | **required** | | |
+| `icon` | **required** | | as in `button` (path, theme or `builtin:*`); with a built-in folder, it opens when touched |
+| `label` | — | | text next to the icon, only when folded (not on circles) |
+| `color` | — | | paints the icon in one color |
+| `children` | **required** | 1-12 | the children, see below |
+| `expand_width` | just enough for the children | (0, 4000] px | unfolded width. By default: the header, and each child as wide as the widest one needs for its whole icon and text |
+| `collapse_after_ms` | `3000` | 500-60000 | folds after this long without being touched |
+| `anim_ms` | `200` | 0-2000 | duration of unfolding/folding |
+| `active_color` | `"#00ffb750"` | | background of the children the daemon marks as active |
+| `pressed_background` | white veil | | background of the child while pressed |
+| `text_color` | white | | its text and the children's |
+| `action` | — | | also runs when it is tapped folded |
+| `close_on_tap` | `true` | | tapping a child folds it; with `false` it stays open (and the `collapse_after_ms` timer starts over) |
+
+Each child (`[[layers.items.children]]`, in order from left to right):
+
+| Field | Default | What it does |
+|---|---|---|
+| `action` | **required** | like any [action](#actions) |
+| `icon` | — | as in `button` |
+| `label` | — | text next to the icon. If it does not fit it is truncated with `…`, and next to an icon it is left out if hardly anything is left |
+| `color` | — | paints the icon in one color |
+| `id` | `"<parent id>.<n>"` | `n` from 1: `capture.1`, `capture.2`... Unique in the whole file, like any `id` |
+
+It needs `icon`, `label` or both. Any other field on a child is an error.
+
+**Active state.** The daemon can mark children as active (for example "recording" or
+"playing"); they are drawn on `active_color`. The capture and player items will use
+it; for now it cannot be set from the socket. The state is kept when the
+configuration is reloaded.
+
+```toml
+[[layers.items]]
+type = "expandable"
+id = "media"
+icon = "/etc/barux/icons/play_pause.svg"
+collapse_after_ms = 4000
+
+[[layers.items.children]]
+id = "media_prev"
+icon = "/etc/barux/icons/fast_rewind.svg"
+action = { type = "key", key = "KEY_PREVIOUSSONG" }
+
+[[layers.items.children]]
+icon = "/etc/barux/icons/play_pause.svg"     # id "media.2"
+action = { type = "key", key = "KEY_PLAYPAUSE" }
+
+[[layers.items.children]]
+label = "Siguiente"                               # id "media.3"
+action = { type = "key", key = "KEY_NEXTSONG" }
+```
+
+Children can also be written on one line, as inline tables:
+`children = [{ icon = "...", action = { type = "socket" } }, ...]` (in TOML an inline
+table cannot be split across several lines).
+
+#### `gif_picker`
+
+A decorative GIF **you can choose from the bar itself**. When touched, it unfolds
+(like an `expandable`) into a row of **thumbnails** of the GIFs in a folder; when you
+touch one, that GIF is shown in the item's slot and the row folds. Unfolded, the
+current GIF stays on the left (touching it folds) and its thumbnail appears on
+`active_color`.
+
+| Field | Default | What it does |
+|---|---|---|
+| `dir` | **required** | **absolute** path of the folder, e.g. `"/home/ana/Pictures/gifs"` |
+| `id` | `"gif_picker"` | |
+| `play` | `"on_tap"` | as in `gif`: `"on_tap"` (once per tap) or `"always"` (always animated, uses CPU continuously) |
+| `loading` | `"keep"` | what shows while the newly chosen GIF loads: `"keep"`, what was there (the previous GIF) until the new one is ready, and then a 150 ms cross-fade; `"icon"`, the photo frame; `"none"`, the empty slot |
+| `thumb_size` | whatever the row allows | thumbnail height in px (8-200; never more than the unfolded row, 44 px on the M2 with `margin = 4`) |
+| `width` / `stretch` | `80` | the chosen GIF fits its slot (2 px margin), keeping the aspect ratio |
+| `expand_width` | just enough | unfolded width. Better not to set it: if it is small, the thumbnails overlap |
+| `collapse_after_ms`, `anim_ms`, `active_color` | as in `expandable` | |
+| `shape`, `radius`, `background`, `size`, `pressed_background` | | as in `expandable` |
+| `action` | — | also runs when it is tapped folded |
+
+```toml
+[[layers.items]]
+type = "gif_picker"
+dir = "/home/ana/Pictures/gifs"
+play = "always"
+width = 80
+```
+
+- **The folder is read again every time it is touched** (when the panel opens): new
+  GIFs appear without reloading anything. The first 16 by name are shown (the `.gif`
+  files, without looking into subfolders).
+- **It is read as the `run_as` user**, never as root (see [Security](#8-security)),
+  in a separate thread: the bar's loop does not wait for the disk or for decoding.
+  Without a session user nothing is read.
+- **Limits**: files up to 16 MiB and 2048 px per side; for longer ones, the first
+  1000 frames are used. Each frame is scaled while decoding, so only the already
+  reduced GIF stays in memory.
+- **Invalid files** (not GIFs even if named `.gif`, too large...): skipped with a
+  warning in the log, once per file:
+  `gif_picker: skipping /home/ana/Pictures/gifs/x.gif: malformed GIF header`.
+- **No folder or no valid GIFs**: the item looks like a gray frame and does not
+  unfold; it is not a configuration error. The log says so once
+  (`gif_picker "gif_picker": reading ...: No such file or directory; disabled`).
+  Touching it looks at the folder again.
+- **While none has been chosen** it shows a white photo frame.
+- **When you choose one**, it is decoded and reduced to the bar's size in the
+  separate thread (touching and redrawing go on right away) and swapped in with a
+  short cross-fade. If you choose another before it finishes, the first one is never
+  shown (and if it had not started yet, it is not even decoded). On this machine, in
+  release, the slowest GIF to decode (1080×1080, 40 frames) takes ~290 ms; most take
+  less than 50 ms.
+- **Cache**: GIFs already reduced are kept in memory (32 MiB at most; the least
+  recently used one goes first), so **choosing one again is instant**. If the file
+  changes (date or size, which the thread checks as the user), it is decoded again.
+  There is no disk cache: after restarting the daemon, the first choice of each GIF
+  is decoded again.
+- **If the chosen one cannot be read or is corrupt**, what was there stays, the log
+  says so once (`gif_picker "gif_picker": decoding ...`) and it is not retried until
+  you choose it again.
+- **The choice is saved** in `/var/lib/barux/state.toml` (systemd creates it with
+  `StateDirectory=`), so it survives restarts and reloads. **The config in `/etc` is
+  not modified.** If the chosen file is no longer in `dir` (or you change `dir`), it
+  is ignored. Started by hand without root (e.g. `--png`), it is read but not
+  written.
+- **Socket**: besides the `{"type":"tap","id":"gif_picker"}` when it is touched, each
+  choice is reported as `{"type":"pick","id":"gif_picker","value":"gato.gif"}`.
+
+**White background.** A GIF with a white background looks like a white square on the
+black bar: barux does not change it. To make it transparent, with ImageMagick:
+
+```sh
+magick gato.gif -coalesce -fuzz 10% -transparent white -set dispose background gato-t.gif
+```
+
+`-coalesce` turns each frame into a full image; `-fuzz 10%` includes the near-whites;
+`-set dispose background` keeps the previous frames from showing underneath once they
+are transparent (a "ghost" effect). Careful: **all** white becomes transparent, also
+inside the drawing (eyes, teeth). The file can grow quite a bit (one went from 1.3 MB
+to 3.7 MB; the limit is 16 MiB).
+
+#### `player`
+
+The player: it shows **mpv**'s state and, when touched, unfolds (like an
+`expandable`) into its children (previous, play/pause...) and a **seek bar**.
+
+- **Playing**: animated sound bars (simulated: smoothed pseudo-random heights, not
+  the real sound) at ~30 fps.
+- **Paused**: two vertical bars (‖). **Stopped** (mpv with nothing loaded): a play
+  triangle. **No mpv**: the triangle in gray.
+- Between states there is a short transition (~250 ms) and a small bounce when
+  touched; other than that, **paused, stopped or without mpv it uses no frames
+  (0 fps)**.
+
+It only **reads the state** of mpv through its IPC socket (`--input-ipc-server`,
+`/tmp/mpv-socket` by default): `pause`, `idle-active`, `media-title`, `duration`,
+`metadata/by-key/title`, `metadata/by-key/artist` and `filename` with
+`observe_property` (mpv reports every change, no polling), and `time-pos` **only
+while the panel is unfolded and something is loaded** (it is what generates the most
+messages; while paused it does not change, so it costs nothing either). **It does not
+start mpv**. It controls it only through the children: with `role` (see below) it
+sends the command directly, and with `action` it runs yours (e.g. a script with
+`mpvctl`). If mpv is not there, it waits for its socket to appear (inotify, no
+polling); if it closes, it notices at once and waits again. It coexists with other
+clients of the socket (Quickshell).
+
+**Seek bar.** After the children, to the end of the panel: current time on the left,
+total on the right (`m:ss`, or `h:mm:ss`). Dragging shows the provisional position and
+**the seek is sent on release** (`seek <seconds> absolute`), not on every movement; if
+the touch is canceled, it does not seek. It follows the finger even if it leaves the
+bar. Without a duration (a stream, or nothing loaded) it is **disabled**: gray,
+`–:––`, no dragging.
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | `"player"` | |
+| `socket` | `"/tmp/mpv-socket"` | **absolute** path of mpv's IPC socket |
+| `color` | `"#e8e8e8"` | color of the icon and the bars |
+| `seek_color` | `"#00ffb7"` | played part of the seek bar |
+| `seek_height` | `8` | bar thickness, px (1-40) |
+| `show_time` | `true` | times on either side of the bar |
+| `show_title` | `true` | track name between the children and the seek bar (see below) |
+| `title_scroll` | `false` | with `true`, a name that does not fit scrolls (marquee) instead of being truncated with "…" |
+| `title_color` | `text_color`, or white | color of the track name |
+| `text_color` | white | the times (and the children's labels) |
+| `children` | none | as in `expandable` (0-12); `[[layers.items.children]]` |
+| `expand_width` | children + 480 px (+ 484 with `show_title`) | unfolded width: the children at their natural width, the track name and the bar take the rest |
+| `collapse_after_ms`, `anim_ms`, `active_color`, `action` | as in `expandable` | |
+| `close_on_tap` | `false` | tapping a child (previous, play/pause...) does **not** fold it: you can press it several times in a row. Each tap and each drag of the bar restarts the `collapse_after_ms` timer; it folds when it runs out, when tapping outside or when tapping its icon. With `true`, it folds when a child is tapped, like an `expandable` |
+| `shape`, `radius`, `background`, `size`, `pressed_background` | | as in `expandable` |
+
+**Track name.** With `show_title` (the default), between the children and the seek
+bar, on a single line: **"Artist – Title"** if mpv gives the `artist` and `title`
+tags; otherwise, mpv's `media-title` (e.g. a stream's title); if there is only a file
+name, that name **without the extension**. If the title already starts with the
+artist, it is not repeated. With nothing loaded or without mpv: **"—"** in gray, with
+no errors in the log.
+
+- **Where and how much.** Without `expand_width`, the panel grows 484 px for the name
+  and the bar keeps its 480 px: the children and the bar stay as before. With
+  `expand_width`, the name takes up to half (max. 480 px) of what the children leave,
+  and the bar the rest. Touching the name does nothing.
+- **No cost.** It is redrawn only when mpv reports a change (`observe_property`): no
+  polling and no timers.
+- **Long text.** By default it is truncated with **"…"**. With `title_scroll = true`
+  it scrolls (marquee): 1.5 s still at the start of each round, then ~40 px/s at
+  **20 fps at most**, and it starts over. It only moves **while it does not fit, the
+  panel is fully unfolded and the bar is awake**: it stops when dimmed (`Dim`), in
+  `Sleep`/`Off` and when the panel folds (it goes back to truncation with "…"). A name
+  that fits never asks for frames.
+- **Characters without a glyph.** The bar's font (Noto Sans Bold) has no CJK, emoji
+  or some symbols (♫, ✓). Instead of empty boxes, **each run of characters without a
+  glyph is drawn as a single "?"** (and zero-width ones, such as emoji joiners or
+  variation selectors, are left out): "日本語の歌" → "?", "🎤‍🔥" → "?".
+- **Security.** The name is outside data (file names and tags): on arrival, control
+  characters, line breaks and tabs are removed (they become a space), as are bidi
+  controls (U+202E and the like, which would turn the text around) and invisible
+  characters, and it is limited to **200 characters**. It is never passed to a
+  shell; in the log it appears quoted and escaped (`mpv: "…"`).
+
+To see it without mpv: `--expand player --title ... [--artist ...]` (see
+[section 10](#preview-without-touching-the-bar---png)).
+
+There can be only **one** `player` (one connection to mpv).
+
+```toml
+[[layers.items]]
+type = "player"
+seek_color = "#00ffb7"
+collapse_after_ms = 5000          # more time to use the bar
+
+[[layers.items.children]]
+icon = "/etc/barux/icons/fast_rewind.svg"
+action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "prev"] }
+
+[[layers.items.children]]
+icon = "/etc/barux/icons/play_pause.svg"
+action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "playpause"] }
+
+[[layers.items.children]]
+icon = "/etc/barux/icons/fast_forward.svg"
+action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
+```
+
+Over barux's socket, each seek is reported as
+`{"type":"seek","id":"player","value":61.24}`.
+
+**The `player`'s children: `role`, per-state icons and their own style.** Besides the
+fields of an `expandable`'s child, the `player`'s accept:
+
+| Field | What it does |
+|---|---|
+| `role` | `"prev"`, `"playpause"`, `"next"` or `"stop"`: the child sends mpv, through its socket and without starting any process, `playlist-prev`, `cycle pause`, `playlist-next` or `stop`. With `role` the `action` is optional; **if there is an `action`, it wins**. Any other value is a configuration error |
+| `icon_playing` | only with `role = "playpause"`: the icon **while playing** (usually the pause one) |
+| `icon_paused` | only with `role = "playpause"`: the icon **when paused, stopped or without mpv** (usually the play one) |
+| `shape`, `radius`, `background`, `pressed_background`, `pressed_scale`, `text_color` | the child's box, as for a layer's items |
+| `size` | only with `shape = "circle"`: diameter in px. By default, the child's height (the row's minus 8 px); at most, the row's height (52 px with `margin` 4). Larger is an error on load |
+
+- **Per-state icons.** If one of the two is missing, `icon` is used in that state.
+  The child needs `icon`, `label` or both, or else both state icons. The state is the
+  one the `player` already reads from mpv. When it changes with the panel unfolded,
+  the icon goes from one to the other with a **150 ms cross-fade** (only those
+  frames). Folded, it changes without animation and without using frames.
+- **Style.** A child **without** style fields is drawn as always: no background, with
+  the `player`'s highlight and corners. With any of them, it has its own box:
+  `shape` (default `"rounded"`, radius 8), `background` (default none),
+  `pressed_background` and `text_color` (default the `player`'s) and `pressed_scale`
+  (default 1). A circle is centered in its slot. The touch area is still the whole
+  slot, not just the circle.
+- These fields are only accepted on the `player`'s children; on an `expandable` they
+  are an error.
+
+```toml
+[[layers.items.children]]
+role = "prev"
+icon = "/etc/barux/icons/fast_rewind.svg"
+
+[[layers.items.children]]
+role = "playpause"
+icon_playing = "/etc/barux/icons/player_pause.svg"
+icon_paused  = "/etc/barux/icons/player_play.svg"
+shape = "circle"
+size = 44
+background = "#00ffb7"
+pressed_background = "#00c98f"
+pressed_scale = 0.92
+
+[[layers.items.children]]
+role = "stop"
+icon = "/etc/barux/icons/player_stop.svg"
+shape = "circle"
+size = 44
+background = "#ff0000"
+pressed_background = "#b30000"
+pressed_scale = 0.92
+```
+
+`dump_player_children` (in the tests) saves previews of these children: paused,
+pressed, in the middle of the cross-fade and playing.
+
+#### `capture`
+
+Screenshots and recording, with **your own scripts**. Folded, it shows a viewfinder
+(corners and a lens, drawn by code); when touched, it unfolds, like an `expandable`,
+into up to five modes, from left to right:
+
+| Child (`id`) | Icon | Runs |
+|---|---|---|
+| `<id>.shot_region` | corners with a cross | `<screenshot> region` |
+| `<id>.shot_window` | window | `<screenshot> window` |
+| `<id>.shot_full` | screen | `<screenshot> full` |
+| `<id>.record_region` | corners with a red dot | `<record> region` |
+| `<id>.record_full` | screen with a red dot | `<record> full` |
+
+Only the modes of the configured script appear (without `record`, only the three
+screenshots). Choosing one folds the panel and runs the script **as the session user,
+with the Wayland session's environment** (`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`,
+`HYPRLAND_INSTANCE_SIGNATURE`; see below), without a shell. The region modes wait for
+you to draw the region with `slurp` (up to 60 s; the others, 15 s). Since the bar is
+not a Wayland window, touching it does not take the focus away: "window" is the one
+you had active.
+
+The scripts are used **as they are**; barux only passes them the argument. They are
+meant to be these:
+
+- **`screenshot`** `[region|window|full]`: `grim` (+ `slurp` for the region,
+  `hyprctl` + `jq` for the window), saves to `~/Pictures/Screenshots` and copies to the
+  clipboard with `wl-copy`.
+- **`record`** `[region|full]`: if there is already a `wf-recorder`, it stops it; if
+  not, it starts `wf-recorder` **detached** (`setsid -f`) and exits.
+
+**Recording.** The item turns **red** (`record_color`) with a **blinking dot** and a
+**stopwatch** (`m:ss`); **tapping it stops the recording** (it does not unfold). To
+know whether it is recording, barux looks for a `wf-recorder` process **of the session
+user** (in `/proc`, never other users' processes) when there is a reason: at
+start-up, when the recording script ends (and a few more times in the following
+2.5 s, which is how long it takes to appear) and when the item is touched. Once
+found, it follows **that** process (pid and start time, so it is not confused with
+another one that reuses the pid) once per second until it ends. The stopwatch counts
+from when `wf-recorder` started, even if something else started it. Stopping means
+sending it `SIGINT` (the same as the script does: `wf-recorder` closes the file and
+exits); while it finishes, `…` is shown.
+
+- A recording **started outside the bar** (e.g. a Hyprland shortcut with the same
+  script) is not seen until you touch the item: then it finds it, folds and turns
+  red; another tap stops it. `/proc` is not watched while idle.
+- **Cost:** folded and not recording, none (0 fps, no scheduled wait). While
+  recording, two frames per second and one check per second.
+
+**If something is missing** (the script, or `grim`, `slurp`, `wl-copy`, `jq`,
+`hyprctl`, `wf-recorder` in the user's `PATH`: `~/.local/bin`, `/usr/local/bin`,
+`/usr/bin`, `/bin`), the modes that need it are shown **dimmed**, do nothing when
+touched and the log says why, once (`capture: capture.record_full disabled: missing
+wf-recorder in PATH`); the rest works. It is checked at start-up and on every reload.
+Without Hyprland connected (no Wayland session) the scripts are not launched
+(`capture: Hyprland not connected`).
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | `"capture"` | |
+| `screenshot` | — | **absolute** path of the screenshot script |
+| `record` | — | **absolute** path of the recording script (at least one of the two) |
+| `icon` | built-in viewfinder | another icon (path, theme or `builtin:*`) |
+| `color` | `"#e8e8e8"` | color of the viewfinder and the modes' icons |
+| `record_color` | `"#d92b2b"` | background while recording (and the dot of the recording icons) |
+| `text_color` | white | dot and stopwatch while recording |
+| `label` | — | text next to the icon, folded |
+| `expand_width`, `collapse_after_ms`, `anim_ms` | as in `expandable` | |
+| `shape`, `radius`, `background`, `size`, `pressed_background` | | as in `expandable` |
+
+It has no `children` or `action`: the children are the modes. Default width 80 px;
+with 100-120 the stopwatch is easier to read (if it does not fit, it is drawn
+smaller).
+
+```toml
+[[layers.items]]
+type = "capture"
+width = 110
+screenshot = "/home/ana/.config/hypr/scripts/screenshot.sh"
+record = "/home/ana/.config/hypr/scripts/toggle-record.sh"
+color = "#00ffb7"
+```
+
+Over the socket, each chosen mode is reported with its `id`
+(`{"type":"tap","id":"capture.shot_region"}`), and touching the item with
+`{"type":"tap","id":"capture"}`.

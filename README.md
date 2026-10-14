@@ -20,7 +20,7 @@ without touching the bar:
 
 ```sh
 cargo build
-./target/debug/barux bar --config config.example.toml --png barra.png
+./target/debug/barux bar --config config.example.toml --png bar.png
 ```
 
 **All the documentation is in [docs/GUIA.md](docs/GUIA.md)**: requirements,
@@ -30,8 +30,8 @@ configuration reference, recipes, security, troubleshooting and development.
 Quick install (read the guide first):
 
 ```sh
-./install.sh --check   # comprueba requisitos, no cambia nada
-./install.sh           # compila, enseña el plan y pide confirmación
+./install.sh --check   # checks the requirements, changes nothing
+./install.sh           # builds, shows the plan and asks for confirmation
 ```
 
 ## Migrating from touchbinux
@@ -46,10 +46,10 @@ starts barux once its devices are `plugged`. The old installation is left intact
 new binary never reads the old paths.
 
 ```sh
-tools/migrate-from-touchbinux.sh plan       # qué haría en esta máquina (no cambia nada)
-./install.sh                                # migra (enseña el plan y pregunta)
-tools/migrate-from-touchbinux.sh rollback   # vuelta atrás: para barux, arranca touchbinux
-./uninstall.sh --legacy                     # cuando todo vaya bien: quita touchbinux
+tools/migrate-from-touchbinux.sh plan       # what it would do on this machine (changes nothing)
+./install.sh                                # migrates (shows the plan and asks)
+tools/migrate-from-touchbinux.sh rollback   # roll back: stops barux, starts touchbinux
+./uninstall.sh --legacy                     # once all is well: removes touchbinux
 ```
 
 Details in [docs/GUIA.md](docs/GUIA.md#migrar-desde-touchbinux).
@@ -61,7 +61,9 @@ Details in [docs/GUIA.md](docs/GUIA.md#migrar-desde-touchbinux).
   **untested**. An installation on a clean machine has not been tested.
 - It needs the tiny-dfr package installed (it uses its *seat* udev rule), but not
   running.
-- Only one layer is shown; there is no layer switching and no F1-F12 row by default.
+- There are three layers: the main one (`default_layer`), the Fn layer while the Fn
+  key is held (`[fn]`; the example config has F1-F12) and the idle layer
+  (`sleep_layer` in `[idle]`). There is no action to switch layers with a tap.
 - `hyprctl` actions are verified only with Hyprland's Lua provider; the classic syntax
   is generated but has not been tested.
 - Recovery after suspend is implemented but not tested.

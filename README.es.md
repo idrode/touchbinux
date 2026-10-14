@@ -20,7 +20,7 @@ verlo sin tocar la barra:
 
 ```sh
 cargo build
-./target/debug/barux bar --config config.example.toml --png barra.png
+./target/debug/barux bar --config config.example.toml --png bar.png
 ```
 
 **Toda la documentación está en [docs/GUIA.md](docs/GUIA.md)**: requisitos,
@@ -61,7 +61,9 @@ Detalles en [docs/GUIA.md](docs/GUIA.md#migrar-desde-touchbinux).
   No se ha probado una instalación en una máquina limpia.
 - Necesita el paquete tiny-dfr instalado (usa su regla udev de *seat*), aunque no
   ejecutándose.
-- Solo se muestra una capa; no hay cambio de capas ni fila de F1-F12 por defecto.
+- Hay tres capas: la principal (`default_layer`), la de Fn mientras se mantiene la
+  tecla Fn (`[fn]`; el config de ejemplo trae F1-F12) y la de reposo (`sleep_layer`
+  en `[idle]`). No hay acción para cambiar de capa con un toque.
 - Acciones `hyprctl` verificadas solo con el proveedor Lua de Hyprland; la sintaxis
   clásica se genera pero no se ha probado.
 - La recuperación tras suspensión está implementada pero no probada.

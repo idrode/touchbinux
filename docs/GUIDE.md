@@ -786,3 +786,402 @@ Touches are identified by `id`. It is required on `button`; the other types take
 their type as the default `id` (`"clock"`, `"battery"`, `"text"`...). `id`s must be
 **unique** in the whole file (two clocks need different `id`s). They cannot start
 with `workspace:` or `window:` (reserved). `spacer` does not accept an `id`.
+
+### Item types
+
+Each type accepts only its own fields (plus `type`, `width`, `stretch`); any other is
+an error.
+
+#### `button`
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | **required** | |
+| `action` | **required** | see [Actions](#actions) |
+| `icon` | — | absolute path to an `.svg`/`.png`, an icon theme name, or a built-in icon (`"builtin:folder"`, `"builtin:folder_classic"`, `"builtin:grid_wave"`, `"builtin:battery"`) |
+| `label` | — | text next to the icon. Without it, the icon is alone and centered |
+| `color` | — | paints the icon in a single color (`"#rrggbb"` or `"#rrggbbaa"`); not valid with `builtin:battery` |
+| `anim_ms` | `300` / `450` | with the built-in icons: duration of the folders opening (300), of the `grid_wave` wave (450) or of the `battery` emptying and refilling (450); with `drag_children`, also of folding its row (200); 0-2000 |
+| `grid` | `3` | only with `builtin:grid_wave`: squares per side (2-4) |
+| `battery_colors` | `["#00ffb7", "#ffd60a", "#ff9500", "#ff2d2d"]` | only with `builtin:battery`: four colors, for 60 % and up, 30-59 %, 15-29 % and under 15 % |
+| `full_color` | `"#00ffff"` | only with `builtin:battery`: color when full |
+| `drag_children` | — | children that unfold by **dragging** the button to the right, see [below](#drag-to-unfold-drag_children) (1-12) |
+| `drag_px` | `24` | only with `drag_children`: how many px to the right you must drag for the row to stay out (8-120) |
+| `expand_width`, `collapse_after_ms`, `active_color`, `close_on_tap` | | only with `drag_children`: as in [`expandable`](#expandable), for its row (`close_on_tap` defaults to `true`) |
+
+It needs `icon`, `label` or both.
+
+```toml
+[[layers.items]]
+type = "button"
+id = "esc"
+label = "esc"
+action = { type = "key", key = "KEY_ESC" }
+
+[[layers.items]]
+type = "button"
+id = "play"
+icon = "/etc/barux/icons/play_pause.svg"
+color = "#00ffb7"
+action = { type = "key", key = "KEY_PLAYPAUSE" }
+```
+
+**Icons.** How `icon` is looked up:
+
+1. **Absolute path** (`/etc/barux/icons/play_pause.svg`): that file. If it does not
+   exist, the same name in `/usr/share/tiny-dfr/` (and the log says so).
+2. **Name** (`utilities-terminal`, `firefox`): in the icon theme of the `run_as` user
+   (GTK, `~/.config/gtk-3.0/settings.ini`; it prefers its `-Dark` variant), then
+   `hicolor`, `Adwaita` and `/usr/share/pixmaps`. Folders `apps`, `actions`,
+   `status`, `devices`, `places` and `panel`. It is not the full freedesktop
+   specification (it ignores `Inherits`).
+3. **Built-in**, drawn by code:
+   - **`builtin:folder`**: a folder made of thin lines, without fill, that opens when
+     touched (`anim_ms` to open, half of it open, and it closes by itself; the action
+     runs at once).
+   - **`builtin:folder_classic`**: the earlier filled folder, with a sheet that peeks
+     out when it opens; same animation.
+
+   `color` changes their color (default `#f2b73f`). As a child of an `expandable`
+   they are drawn closed.
+   - **`builtin:grid_wave`**: a grid of 3x3 rounded squares (`grid` = 2-4 per side),
+     centered in the button. When touched, a **diagonal wave** sweeps across it from
+     the top-left corner to the bottom-right: each square shrinks (down to ~0.55) and
+     sinks a little, and comes back, with a delay based on its row + column. The wave
+     lasts `anim_ms` (450 ms by default); a touch during the wave does not restart
+     it. When idle, 0 fps. `color` defaults to white (`#ffffff`). As a child or icon
+     of an `expandable` it is drawn still (3x3); as the icon of an `expandable` it
+     also does the wave when touched.
+   - **`builtin:battery`** (only on `button`): the system battery drawn by code,
+     centered in the button and on whole pixels. On a 24x24 grid scaled to the icon:
+     a landscape body (about 19x12) with a thick stroke (2.5) and very rounded
+     corners (radius 4), with the terminal on the right as a short, thick pill
+     separated by a small gap; inside, separated from the outline, a rounded fill
+     proportional to the charge. Fill, outline and terminal take the level's color
+     (`battery_colors`: green from 60 %, yellow 30-59, orange 15-29, red below). It
+     only changes the look: the button's `action` is yours.
+     - **Charging** (`status` = `Charging`): a small zigzag bolt with a thick,
+       rounded stroke, diagonal, centered and entirely inside the body: a quarter of
+       its width and as tall as the inside of the outline minus a margin of one grid
+       unit (1 px on the bar) at the top and bottom. It takes the level's color;
+       since it would not contrast over the fill, a transparent halo (1.5 px on the
+       bar) separates it from the fill, through which the button's background shows.
+       The halo never touches the outline, which stays closed.
+     - **Full** (100 % or `status` = `Full`): the whole body filled with
+       `full_color`, outline included, with no gap; with the charger plugged in, the
+       bolt in black over the fill (no halo: black already contrasts).
+     - **Not charging** (`Discharging`, `Not charging`, full without a charger): no
+       bolt. `Not charging` (plugged in but held back, e.g. by an 80 % limit) looks
+       like discharging, without turning full.
+     - **No battery**: an empty gray outline with a `?`. It is not an error.
+     - **When touched**, the fill empties and comes back to its level in `anim_ms`
+       (450 ms) while the bolt flashes (it grows up to 15 % and gets lighter, with
+       the halo following it; it never leaves the inside of the body); a touch during the animation does not restart it. There is no
+       other animation: no pulse while charging or with a low battery.
+     - **Data**: the `/sys/class/power_supply` entry whose `type` is `Battery` (on
+       Asahi, `macsmc-battery`; `Mains` and `USB` are ignored), with its `capacity`
+       and its `status`. Whether it is plugged in is deduced from the battery's
+       `status`, not from AC/USB `online`. With this icon on the bar it is read again
+       every 30 s (besides when plugging or unplugging and every minute); it is only
+       redrawn if something changed, so when idle it is 0 fps.
+
+     ```toml
+     [[layers.items]]
+     type = "button"
+     id = "battery_button"
+     icon = "builtin:battery"
+     width = 80
+     battery_colors = ["#00ffb7", "#ffd60a", "#ff9500", "#ff2d2d"]   # default
+     full_color = "#00ffff"
+     action = { type = "command", argv = ["qs", "ipc", "--any-display", "call", "battery", "toggle"] }
+     ```
+
+   Any other `builtin:...` name is a configuration error. With all of them, `shape`,
+   `size`, `radius`, `pressed_background` and `pressed_scale` work as with any icon.
+
+   ```toml
+   [[layers.items]]
+   type = "button"
+   id = "wallpaper"
+   icon = "builtin:grid_wave"
+   color = "#ffffff"
+   grid = 3
+   anim_ms = 450
+   width = 80
+   action = { type = "key", key = "KEY_F14" }
+   ```
+
+If it is not found, a **`?`** is drawn and the log says `icons: icon "..." not found`.
+The bar is black: use light icons or `color`.
+
+`install.sh` puts the icons from `icons/` in `/etc/barux/icons/`: `play_pause`,
+`fast_rewind`, `fast_forward`, `volume_up`, `volume_down`, `volume_off`, `mic_off`,
+`brightness_high`, `brightness_low`, `backlight_high`, `backlight_low`, `search`,
+`bolt` and the `battery_*` ones (license in `icons/README.md`).
+
+##### Drag to unfold: `drag_children`
+
+A `button` with `drag_children` is still a button (touching it runs its `action`),
+but also, **dragging it to the right** pulls out a row of children beside it, like
+an `expandable`'s. It is meant for a launcher: a tap opens your Quickshell menu, a
+drag offers a few terminal apps.
+
+What a finger that comes down on the button does:
+
+- **Tap** (it does not move more than 8 px from where it came down): on release, the
+  button's `action`, as always. Meanwhile, the button looks pressed.
+- **Drag to the right** (past 8 px, to the right and almost horizontal: at most ~27°
+  of slope, that is, twice as much horizontal travel as vertical): the row **follows
+  the finger**, out in proportion to the distance traveled (`distance / drag_px`).
+  When it reaches `drag_px` it stays out even if the finger goes back; if released
+  before that, it **goes back in** with the animation (`anim_ms`). A drag never runs
+  the button's `action`.
+- **Any other movement** of more than 8 px (vertical, to the left, too diagonal): the
+  touch is **canceled**; it does nothing even if released over the button. The
+  direction is decided when it passes 8 px and does not change afterwards.
+- A touch **canceled** by the system (palm, lost tracking) runs nothing and leaves
+  the row inside.
+
+Once out, the row works like an `expandable`'s: **tapping a child** runs its action
+(and it is reported over the socket with the child's `id`) and folds it; **tapping
+outside** folds it without doing anything else (also if it is the button itself); it
+folds by itself after `collapse_after_ms`. When idle, folded or out, 0 fps.
+
+**Look.** The row comes out **to the right of the button** (8 px apart), with the
+button's box (`background`, `radius`; if the button is a circle, the row is a pill)
+and the same height. The button does not change: a circle stays a circle. It grows
+from the button's edge like a drawer: it covers in black what it goes over, darkens
+the rest of what will end up under it, and its children slide with its right edge,
+appearing as they come out from behind the button. With no icon children and no
+background (`background = "transparent"`), only their texts show over black. Default
+width: just enough for each child to show its whole icon and text; with
+`expand_width`, that width; it never goes past the end of the bar.
+
+The children (`[[layers.items.drag_children]]`, from left to right) take the same as
+an `expandable`'s (`icon` and/or `label`, `action`, `color`, `id`, by default
+`"<button id>.<n>"`) and, like the `player`'s, they can have **their own box** with
+`shape`, `radius`, `size` (circles), `background`, `pressed_background`,
+`pressed_scale` and `text_color`. `role`, `icon_playing` and `icon_paused` are only
+for the `player`. The highlight of a pressed child without its own box is the
+button's `pressed_background`.
+
+**Strict validation**: an empty `drag_children` or one with more than 12, `drag_px`
+outside 8-120, `drag_px`/`expand_width`/`collapse_after_ms`/`active_color` without
+`drag_children`, or `drag_children`/`drag_px` on another item type are configuration
+errors.
+
+Example, a circular launcher (replace `USUARIO`; `arch.svg` is an icon of yours, it
+is not in `icons/`):
+
+```toml
+[[layers.items]]
+type = "button"
+id = "launcher"
+icon = "/etc/barux/icons/arch.svg"
+color = "#00ffb7"
+shape = "circle"
+size = 52
+background = "transparent"
+pressed_background = "#00000000"
+pressed_scale = 1.0
+action = { type = "key", key = "KEY_F13" }      # the tap: your Quickshell widget
+drag_px = 24
+collapse_after_ms = 4000
+
+[[layers.items.drag_children]]
+id = "launcher_kitty"
+icon = "kitty"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO"], detach = true }
+
+[[layers.items.drag_children]]
+label = "nvim"                                   # id "launcher.2"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/nvim"], detach = true }
+
+[[layers.items.drag_children]]
+label = "yazi"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/yazi"], detach = true }
+
+[[layers.items.drag_children]]
+label = "htop"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/usr/bin/htop"], detach = true }
+
+[[layers.items.drag_children]]
+label = "claude"
+action = { type = "command", argv = ["/usr/bin/kitty", "--directory", "/home/USUARIO", "-e", "/home/USUARIO/.local/bin/claude"], detach = true }
+```
+
+Children without an icon have a `label`. **`detach = true` is required** for apps
+that stay open: without it, the `command` timeout (10 s by default) would close the
+terminal. Paths are full because there is no shell; the environment they get
+(Wayland, Hyprland...) is explained in [Actions](#actions). With this example on the
+bar, `pressed_background = "#00000000"` means the children are not highlighted when
+pressed either: remove it or set a color if you want to see it.
+
+#### `clock`
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | `"clock"` | |
+| `format` | `"%H:%M"` | [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) format |
+| `action` | — | without an action, the touch is only reported over the socket |
+
+It is redrawn when the minute changes; every second only if the format shows seconds.
+
+```toml
+[[layers.items]]
+type = "clock"
+format = "%a %d  %H:%M"
+width = 200
+```
+
+#### `battery`
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | `"battery"` | |
+| `icon_dir` | `"/etc/barux/icons"` | folder with `battery_0_bar.svg` ... `battery_charging_full.svg` (tiny-dfr's names) |
+| `action` | — | |
+
+If icons are missing in `icon_dir`, it tries `/usr/share/tiny-dfr`; if they are not
+there either, it draws a battery of its own (red at ≤ 10 % and green while charging).
+It reads `/sys/class/power_supply` every minute and when plugging/unplugging.
+
+```toml
+[[layers.items]]
+type = "battery"
+```
+
+#### `volume` and `brightness`
+
+They show an icon and a value. **A tap unfolds them** into a wide slider over the
+bar; dragging anywhere changes the real level (the finger is followed even if it
+leaves the slider). What is underneath is darkened and does not respond; a tap
+outside folds it. On the volume one, tapping the speaker mutes/unmutes.
+
+- Volume: PipeWire's default output (`wpctl`, as `run_as`, 100 % maximum); outside
+  changes through `pactl subscribe`.
+- Brightness: the main display's backlight (`/sys/class/backlight`, not the bar's),
+  written directly by the daemon. Without a backlight, it does not unfold.
+
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `id` | `"volume"` / `"brightness"` | | |
+| `expand_width` | half the bar | (0, 4000] px | unfolded width |
+| `collapse_after_ms` | `3000` | 500-60000 | folds after this long without being touched |
+| `anim_ms` | `200` | 0-2000 | duration of unfolding/folding |
+| `color` | `"#00ffb7"` | | filled part of the slider |
+| `text_color` | white | | only the number (also when unfolded); it does not change the fill |
+| `action` | — | | also runs on tap (folded) |
+
+```toml
+[[layers.items]]
+type = "volume"
+width = 120
+expand_width = 1000
+collapse_after_ms = 3000
+anim_ms = 200
+color = "#00ffb7"
+```
+
+##### `brightness` icon: `icon_style`
+
+By default (`icon_style = "sun"`) it is the usual **sun**, with rays that grow with
+the level. With `icon_style = "circle"` it is a **ring that fills from inside**
+according to the level, drawn by code (no SVG), folded and unfolded (to the left of
+the slider). The icon's place and the rest of the item do not change.
+
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `icon_style` | `"sun"` | `"sun"`, `"circle"` | sun or circle. The other keys in this table only with `"circle"` |
+| `circle_fill` | `"radial"` | `"radial"`, `"level"`, `"sweep"`, `"moon"` | how it fills: a disc that grows from the center; a liquid that rises from the bottom with a straight top edge; a sector that turns like a clock from the top; the phases of the moon (see below) |
+| `icon_size` | `28` | 8-60 px | outer diameter. No more than the icon's place (the row height minus 16 px; with the normal row, 42): otherwise, an error on load |
+| `ring_width` | `2.5` | 0-6 px | ring thickness (`0`: no ring) |
+| `ring_gap` | `2` | 0-6 px | gap between the ring and the fill |
+| `ring_color` | `color` | | ring color (with alpha: it is a real ring, nothing shows under it) |
+| `fill_color` | `color` | | fill color |
+| `min_fill` | `0.0` | 0.0-0.3 | part of the inside shown at 0 % (so it does not disappear); from there it goes up to full at 100 % |
+| `moon_dark_color` | faint `fill_color` (alpha ~15 %) | | only with `circle_fill = "moon"`: the disc of the unlit part; `"#00000000"` removes it. In another mode, an error |
+
+The fill is **proportional to the area**: at 50 % half the inside is filled in all
+four modes (in `radial` the radius grows somewhat faster at first; in `level` the
+liquid reaches exactly halfway). There must be room inside: diameter / 2 −
+`ring_width` − `ring_gap` of at least 2 px (otherwise, an error).
+
+**`circle_fill = "moon"`.** The phases of the moon, lit from the right: at 0 % a new
+moon (only the ring and the dark disc), waxing crescent up to 50 % (first quarter:
+the right half, with a straight terminator), gibbous after that and full at 100 %.
+The lit area is also proportional to the level (at 15 %, 15 % of the disc): the phase
+is computed as f = acos(1 − 2 · level) / π and the terminator is half an ellipse of
+width `r · cos(π · f)`. The unlit part is a disc in `moon_dark_color`. `min_fill` also
+applies (default 0, to see the new moon). The animation is the same as in the other
+modes.
+
+**Animation.** While you drag the slider, the fill follows the finger with no delay.
+If the brightness changes from outside (keys, other apps), it moves to the new value
+in 150 ms (the sun, as always, in 180). About 30 fps only while it moves; when still,
+0 fps and no timers.
+
+```toml
+[[layers.items]]
+type = "brightness"
+icon_style = "circle"
+circle_fill = "level"     # or "radial", "sweep", "moon"
+icon_size = 28
+ring_width = 2.5
+ring_gap = 2
+min_fill = 0.05
+# ring_color / fill_color: default `color`
+```
+
+To see it without touching the bar, at a fixed level: `bar --png ... --brightness
+0..100` (see [section 10](#preview-without-touching-the-bar---png)). Volume does not
+(yet) have `icon_style`.
+
+#### `gif`
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | `"gif"` | |
+| `path` | **required** | **absolute** path to the `.gif` |
+| `play` | `"on_tap"` | `"on_tap"`: shows the first frame and plays it through once per tap. `"always"`: always animated |
+| `action` | — | |
+
+The GIF is read when the configuration is loaded: **if it does not exist or is not a
+valid GIF, it is a configuration error** (a reload keeps the previous one). It is
+scaled once to its slot, keeping the aspect ratio, and centered. With `"always"` the
+bar is redrawn at the GIF's rate (up to ~30 fps) **all the time**: it uses CPU
+continuously (on the tested machine, a 30 KB GIF: ~11 fps and ~2 % CPU). Several
+items with the same file share the decoding.
+
+```toml
+[[layers.items]]
+type = "gif"
+path = "/etc/barux/gifs/gato.gif"
+width = 60
+play = "on_tap"
+```
+
+Put it in a folder root can read, e.g. `/etc/barux/gifs/`.
+
+#### `text`
+
+It shows the last value a socket client sent with that key (see the
+[recipe](#showing-a-scripts-data-through-the-socket)). Empty until then. Strings are
+shown as they are; numbers and the rest, as JSON. It truncates with `…` if it does not
+fit.
+
+| Field | Default | What it does |
+|---|---|---|
+| `key` | **required** | socket key (1-64 bytes) |
+| `id` | `"text"` | |
+| `action` | — | the touch is always reported over the socket |
+
+```toml
+[[layers.items]]
+type = "text"
+id = "tiempo"
+key = "weather"
+width = 200
+```
+
+The key `volume` is reserved for the volume (it is not shown in a `text`).

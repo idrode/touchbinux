@@ -471,7 +471,7 @@ Cómo se comporta:
   temporizador de `delay_ms` solo existe mientras Fn está pulsada y la capa aún no
   ha salido.
 - Del teclado solo se lee la tecla Fn (filtro del kernel); el detalle está en
-  [SECURITY.md](SECURITY.md#tecla-fn).
+  [SECURITY.es.md](SECURITY.es.md#tecla-fn).
 
 ### Reposo: `[idle]`
 
@@ -527,7 +527,7 @@ dos apagarían).
   `off_after_s`) y Hyprland solo le contesta **«inactivo»** o **«activo otra
   vez»**. **No se lee ningún dispositivo de entrada**: el daemon no ve ninguna
   tecla ni movimiento, ni cuándo ocurren, solo esos dos avisos (ver
-  [SECURITY.md](SECURITY.md#reposo-sin-leer-el-teclado)).
+  [SECURITY.es.md](SECURITY.es.md#reposo-sin-leer-el-teclado)).
 
 Una etapa llega cuando se cumplen **las dos cosas**: sus segundos sin tocar la
 barra **y** Hyprland ha avisado de que lleva ese mismo tiempo sin entrada. Si
@@ -2463,7 +2463,7 @@ una acción `key` puede hacer lo que haga esa tecla.
 
 **El teclado** (solo con `[fn]`). El daemon abre el teclado interno en solo lectura y
 sin capturarlo, y pide al kernel que solo le pase la tecla Fn: lo que escribes no le
-llega. El detalle y cómo comprobarlo, en [SECURITY.md](SECURITY.md#tecla-fn).
+llega. El detalle y cómo comprobarlo, en [SECURITY.es.md](SECURITY.es.md#tecla-fn).
 
 **Archivos del usuario** (las carpetas de los `gif_picker`). Los lee un hilo del
 daemon que, solo para sí mismo, cambia su identidad de acceso a archivos (`setfsuid`
@@ -2496,7 +2496,7 @@ están listadas y comentadas en `dist/barux.service` con el motivo: los comandos
 de los botones heredan el sandbox y dejarían de funcionar. Ojo: por eso mismo, en
 una terminal abierta desde la barra `/usr` y `/etc` son de solo lectura (`sudo
 pacman` falla ahí). El modelo de amenazas, lo que necesita el daemon y las
-alternativas están en [SECURITY.md](SECURITY.md). Para comprobar el servicio en
+alternativas están en [SECURITY.es.md](SECURITY.es.md). Para comprobar el servicio en
 marcha: `tools/check-service.sh`.
 
 ## 9. Solución de problemas

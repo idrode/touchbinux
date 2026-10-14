@@ -1973,3 +1973,284 @@ running, the socket messages above show it on the real bar.
 #### `spacer`
 
 Empty space. Only `width` or `stretch` (default `stretch = 1`).
+
+### Actions
+
+The `action` field (an inline table). On touch, the action runs **and** a notice is
+always sent over the socket (`{"type":"tap","id":"..."}`).
+
+**`command`**: starts a program **without a shell**, as `run_as`, with a clean
+environment from its session (see below).
+
+```toml
+action = { type = "command", argv = ["notify-send", "Hola"], timeout_ms = 5000 }
+action = { type = "command", argv = ["/usr/bin/kitty", "-e", "/usr/bin/htop"], detach = true }
+```
+
+`timeout_ms`: 10000 by default, 60000 at most. When it runs out the whole process
+group is killed, so **to open applications use `detach = true`** (or `hyprctl` with
+`exec`). At most 8 commands at a time. No shell: no `~`, `$VAR`, `|` or `&&` (if you
+need them, `argv = ["sh", "-c", "..."]`).
+
+`detach = true` (default `false`): for apps that stay open (a terminal). No timeout
+(setting `timeout_ms` on it is an error), in a **session of its own** (`setsid`), it
+does not take one of the 8 command slots (up to 16 open at a time), it is reaped when
+it closes and the daemon **does not kill it on exit**. **Limit**: as a service it
+stays in `barux.service`'s cgroup, so `systemctl stop`/`restart` (also the `restart`
+after reinstalling) **close it**. If you want it to survive that, have Hyprland
+start it (`hyprctl` with `exec`), which takes it out of the service.
+
+**The commands' environment.** Neither `command` nor `hyprctl`, `wpctl`, `pactl` or
+the `capture` scripts inherit the daemon's environment (root's or the service's):
+each one gets a new one, built and checked when it is started:
+
+| Variable | Value | Only if |
+|---|---|---|
+| `HOME`, `USER`, `LOGNAME` | those of `run_as` | always |
+| `PATH` | `~/.local/bin:/usr/local/bin:/usr/bin:/bin` | always |
+| `LANG`, `LC_ALL` | the daemon's | they are set |
+| `XDG_RUNTIME_DIR` | `/run/user/<uid>` | it is a directory (not a link) owned by the user and private (no group or other permissions, as logind creates it). If not, none of the following |
+| `DBUS_SESSION_BUS_ADDRESS` | `unix:path=<runtime>/bus` | `bus` is a socket owned by the user |
+| `WAYLAND_DISPLAY` | Hyprland's (second line of its `hyprland.lock`); if that is not valid, the first `wayland-*` by name | it is a simple name (no `/`) of a socket (not a link) owned by the user inside their runtime |
+| `HYPRLAND_INSTANCE_SIGNATURE`, `XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=Hyprland` | the instance the daemon is connected to | that instance is `<runtime>/hypr/<signature>`, a directory owned by the user |
+
+What is not found is not passed, and the command is started anyway: a graphical app
+will fail as in a console without a session (the error shows in the service's log).
+**Limits**: only Hyprland's graphical session is known (another compositor would
+work only through the `wayland-*` found); with several Wayland sessions of the same
+user without Hyprland, the first one by name is used; there is no `DISPLAY` (X11 apps
+only work if they can use Wayland or if Xwayland is already in the environment some
+other way); and what comes from your shell (`~/.zshrc`, variables in `hyprland.conf`
+with `env =`) does not arrive: if an app needs it, `argv = ["sh", "-c", "..."]` or
+`hyprctl` with `exec` (which inherits Hyprland's environment).
+
+**`hyprctl`**: a `hyprctl dispatch`, with exactly one of:
+
+```toml
+action = { type = "hyprctl", workspace = 2 }                 # or "+1", "name:web"
+action = { type = "hyprctl", focus_window = "0xaaab33103270" }
+action = { type = "hyprctl", exec = ["kitty", "-e", "htop"] } # Hyprland starts the app
+action = { type = "hyprctl", raw = 'hl.dsp.focus({ workspace = "e+1" })' }
+```
+
+barux detects Hyprland's configuration provider (`hyprland: config provider Lua` in
+the log) and writes `workspace`, `focus_window` and `exec` in its syntax. **`raw` is
+passed as is**: write it for your provider (Lua: `hl.dsp...`; classic:
+`workspace e+1`). The arguments of `exec` are quoted: there is no shell expansion.
+The old `args = ["workspace", "1"]` still works (with a deprecation warning). Without
+Hyprland connected, the action is ignored and the log says so. Fixed 5 s timeout.
+
+**`key`**: presses and releases a key on a virtual keyboard (uinput):
+
+```toml
+action = { type = "key", key = "KEY_PLAYPAUSE" }
+```
+
+Names from `linux/input-event-codes.h` with code 1-255: `KEY_ESC`, `KEY_F1` ...
+`KEY_F24`, `KEY_PLAYPAUSE`, `KEY_NEXTSONG`, `KEY_PREVIOUSSONG`, `KEY_VOLUMEUP`,
+`KEY_MUTE`, `KEY_BRIGHTNESSUP`, `KEY_MICMUTE`... An unknown one is a configuration
+error. It does whatever your desktop does with that key.
+
+With `hold = true` (only on a layer's buttons, not on children or with
+`drag_children`), the key **goes down when the finger rests and up when it lifts**
+(or when it slides off the button), like a real key: it repeats if you hold it and
+combines with the modifiers you are holding on the keyboard. It does not report a
+`tap`.
+
+```toml
+action = { type = "key", key = "KEY_F5", hold = true }
+```
+
+**`keys`**: a **shortcut** (chord): modifiers and a key, by name.
+
+```toml
+action = { type = "keys", keys = "ctrl+shift+t" }
+```
+
+It presses the modifiers, presses and releases the key and releases the modifiers,
+with 8 ms between steps so the compositor registers each one (about 30 ms in total;
+the loop does not stop meanwhile: the steps go out on time). It goes to the focused
+window through the virtual keyboard, with no shell or commands. If two arrive in a
+row, the second waits for the first to finish.
+
+Names (any case, modifiers first, the key last):
+
+- modifiers: `ctrl`, `shift`, `alt`, `super`;
+- letters `a`-`z`, digits `0`-`9`, `f1`-`f24`;
+- `enter`, `tab`, `esc`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`,
+  `home`, `end`, `insert`, `delete`, `backspace`, `space`;
+- symbols: `comma`, `period`, `slash`, `backslash`, `minus`, `equal`, `semicolon`,
+  `apostrophe`, `grave`, `leftbrace`, `rightbrace`.
+
+They are **key positions** on a US keyboard (like the Linux codes): with another
+layout, a symbol is whatever that key types in it (with the Spanish one, `slash` is
+the `-` key). An unknown name is an error on load:
+`keys "ctrl+shift+tee": unknown key "tee"; known: ...`.
+
+**Modifiers of the physical keyboard.** The chord goes out through the virtual
+keyboard, which is another device: it presses and releases only its own modifiers and
+never touches the state of the physical keyboard. If you are holding Shift on the
+keyboard while you tap `ctrl+t` on the bar, the chord does not release it or repeat
+it: what the app does with both keyboards at once depends on how Hyprland combines
+their modifiers (**not checked**). If the daemon ends in the middle of a chord, it
+finishes it before exiting: a modifier is never left pressed.
+
+**`socket`**: does nothing locally; it only sends a notice over the socket (so that
+another process, such as Quickshell, decides).
+
+```toml
+action = { type = "socket" }
+```
+
+### Colors
+
+`"#rrggbb"` or `"#rrggbbaa"` (alpha). Other formats (`"red"`, `"#fff"`) are an error.
+
+| Option | Where | What it paints |
+|---|---|---|
+| `color` | `button` | the icon (or the folder) in a single color |
+| `color` | `volume`, `brightness` | the filled part of the slider |
+| `background` / `item_background` | all except `spacer` | the background (it also accepts `"transparent"`) |
+| `pressed_background` / `item_pressed_background` | all except `spacer`, `volume`, `brightness` | the background when pressed |
+| `text_color` / `item_text_color` | `button`, `clock`, `battery`, `text`, `volume`, `brightness` | all the item's text and numbers |
+
+`text_color`, in detail:
+
+- `button`: the `label`. Icons do not change (for that, `color`).
+- `clock`: the time. `text`: the value received over the socket.
+- `volume` and `brightness`: the number, folded and unfolded, and the `–` that
+  appears without a value. `color` is still the slider's fill.
+- `battery`: **the battery shows no number**; `text_color` only changes the `?` that
+  appears when there is no battery data.
+- Without `text_color`, as always: white, and gray for the no-data markers (`?`,
+  `–`). `gif` and `spacer` have no text: setting it on them is an error.
+
+```toml
+[[layers]]
+id = "main"
+item_text_color = "#ffcc00"     # all the text in amber...
+
+[[layers.items]]
+type = "volume"
+color = "#00ffb7"               # slider fill
+text_color = "#ffffff"          # ...except this number, in white
+```
+
+The colors of the battery icon and of the volume and brightness icons are fixed in
+the code (`src/widgets.rs`).
+
+### Animations: summary
+
+| What | Option | Default |
+|---|---|---|
+| Folders (`builtin:folder`, `builtin:folder_classic`) | `anim_ms` | 300 ms |
+| `builtin:grid_wave` wave | `anim_ms` | 450 ms |
+| `builtin:battery` emptying and refilling | `anim_ms` | 450 ms |
+| Unfolding volume/brightness/`expandable` | `anim_ms` | 200 ms |
+| `drag_children` row (follows the finger; folding) | the button's `anim_ms` | 200 ms |
+| Automatic fold | `collapse_after_ms` | 3000 ms |
+| GIF and `gif_picker` | `play` | `"on_tap"` |
+| Unfolding `gif_picker`, `player` and `capture` | `anim_ms` | 200 ms |
+| `workspaces`: change of active / press; strip; birth; closing | — | 150 ms; 190 ms; 380 ms; 360 ms |
+| `player` bars | — | ~30 fps only while playing |
+| `capture` recording (dot and stopwatch) | — | 2 fps only while recording |
+| `status` recording (the dot's fades, the second) | — | ~10 fps only while recording |
+| `status`: screenshot (jump; fade); end of recording (fade) | `shot_ms`, `rec_done_ms` | 250 ms; 350 ms; 350 ms |
+
+While something animates or is dragged, ~30 fps; afterwards, 0 fps.
+
+### Old format: `[[buttons]]`
+
+Without `[[layers]]`, a list of `[[buttons]]` (`id`, `label`, `icon`, `action`) forms
+the default layer, each button with an equal share of the bar (like tiny-dfr).
+
+```toml
+[[buttons]]
+id = "esc"
+label = "esc"
+action = { type = "key", key = "KEY_ESC" }
+```
+
+### Alternative: `app_keys`, a fixed slot per focus
+
+> **An alternative** to the [`workspaces` per-app buttons](#per-app-buttons-app_actions),
+> which is the recommended way: here the buttons change by themselves with the focus,
+> in a slot of their own, without touching anything. It is kept in case you prefer
+> it; it is not in the examples.
+
+A fixed-width slot that shows **different buttons depending on the app that has the
+focus** in Hyprland (by its window's class). With the [`keys`](#actions) action, each
+button sends a keyboard shortcut to that window: back/forward in the browser,
+copy/paste in the terminal...
+
+```toml
+[[layers.items]]
+type = "app_keys"
+id = "app_keys"
+width = 360
+transition_ms = 150
+# default_set = "none"
+
+[[layers.items.sets]]
+id = "browser"
+class = ["zen"]
+[[layers.items.sets.children]]
+icon = "go-previous"
+action = { type = "keys", keys = "alt+left" }
+[[layers.items.sets.children]]
+label = "Copiar"
+action = { type = "keys", keys = "ctrl+c" }
+```
+
+| Field | Default | What it does |
+|---|---|---|
+| `id` | `"app_keys"` | |
+| `width` / `stretch` | `360` | the slot; the buttons of each set share it equally, with the layer's `gap` |
+| `transition_ms` | `150` | cross-fade when the set changes (0-1000; 0 = hard switch) |
+| `default_set` | `"none"` | what shows if no class matches or nothing is focused: `"none"` (the empty slot) or the `id` of a set |
+| `[[...sets]]` | **required** (1-32) | the sets of buttons |
+
+Each set (`[[layers.items.sets]]`):
+
+| Field | What it does |
+|---|---|
+| `id` | required, unique in the item (not `"none"`) |
+| `class` | list of window classes; the **whole** class matches, case-insensitive |
+| `title_contains` | optional: also, the title must contain this text (case-insensitive). A set needs `class`, `title_contains` or both |
+| `[[...sets.children]]` | 1-12 buttons |
+
+The buttons (`[[layers.items.sets.children]]`) are like the children of a
+`drag_children`: `label` and/or `icon` (path, `builtin:` or icon theme name),
+`action` (required; any except `hold`), `id` (by default `<item>.<set>.<n>`, which is
+what arrives over the socket when it is tapped) and their box: `shape`, `radius`,
+`size`, `background`, `pressed_background`, `pressed_scale`, `text_color`, `color`.
+They are drawn exactly like a layer's buttons.
+
+- **The first set that matches wins**, in the order of the file.
+- **No polling**: it follows the Hyprland events the daemon already listens to.
+  Switching to another window of the same class, or a title change that does not
+  change the set, redraws nothing. When the set changes there is a `transition_ms`
+  cross-fade (about 30 fps only while it lasts); on start-up or reload, the current
+  set comes out without animation.
+- **Without Hyprland**, or with nothing focused: `default_set`.
+- **Tapping a button does not change the focus**: the bar is not a window; the
+  shortcut goes to the window that already had it. If the set changes with the finger
+  on it, that touch does nothing.
+- There can be several on different layers (for example, another on the idle layer).
+  The Fn layer does not accept them. The Fn layer and the idle layer take over as
+  always.
+- **Width counts**: if the layer has no room, the items at the end are not drawn and
+  the log says which (`"clock" doesn't fit`). Check with `--png`.
+- **Labels**: they are drawn with the bar's font (Noto Sans Bold), which has no arrows
+  like ◀ ▶ ↻ (they show as empty boxes). For that, theme icons are better:
+  `go-previous`, `go-next`, `view-refresh`, `tab-new`, `window-close`, `edit-undo`...
+
+**Which class an app has.** With the app open:
+
+```sh
+hyprctl clients -j | jq -r '.[] | .class' | sort -u
+```
+
+(On this machine: `zen`, `kitty`, `kitty-start`...) And to preview a set without
+switching windows: `--focus-class <clase>` (see
+[section 10](#preview-without-touching-the-bar---png)).

@@ -1,5 +1,5 @@
 [Unit]
-Description=touchbinux Touch Bar daemon
+Description=barux Touch Bar daemon
 
 # Never alongside tiny-dfr: starting one stops the other (both want DRM master on
 # the bar and an exclusive grab on the digitizer). The ordering makes tiny-dfr's
@@ -8,13 +8,19 @@ Description=touchbinux Touch Bar daemon
 Conflicts=tiny-dfr.service
 After=tiny-dfr.service
 
+# Nor alongside touchbinux, this daemon's old name (an install migrated from it may
+# still have its unit; see tools/migrate-from-touchbinux.sh). Conflicts= works both
+# ways: starting either one stops the other.
+Conflicts=touchbinux.service
+After=touchbinux.service
+
 # Same ordering as tiny-dfr: after logind and after plymouth has let go of DRM.
 After=systemd-logind.service systemd-user-sessions.service plymouth-quit.service
 
-# Display and digitizer, named by 99-touchbinux.rules. Started when the digitizer
+# Display and digitizer, named by 99-zz-barux.rules. Started when the digitizer
 # appears (see [Install]), stopped if either goes away.
-BindsTo=dev-touchbinux_display.device dev-touchbinux_touch.device
-After=dev-touchbinux_display.device dev-touchbinux_touch.device
+BindsTo=dev-barux_display.device dev-barux_touch.device
+After=dev-barux_display.device dev-barux_touch.device
 
 # Restart=on-failure, but give up after 5 failures in 60 s instead of looping.
 StartLimitIntervalSec=60
@@ -22,13 +28,13 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/touchbinux bar --config /etc/touchbinux/config.toml
+ExecStart=/usr/local/bin/barux bar --config /etc/barux/config.toml
 # SIGHUP re-reads the config (and redraws); a broken config keeps the old one.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 
-# SIGTERM to the daemon only: it blanks the bar, removes /run/touchbinux.sock,
+# SIGTERM to the daemon only: it blanks the bar, removes /run/barux.sock,
 # destroys the virtual keyboard and kills its own children. Whatever is left after
 # that (or after TimeoutStopSec) gets SIGKILL.
 KillMode=mixed
@@ -40,21 +46,21 @@ TimeoutStopSec=5
 # windows of the bar's launcher too, and whatever runs in them). So only options
 # that ordinary interactive use doesn't notice are enabled, and even those take a
 # little away from it (see docs/SECURITY.md, which also has what the daemon alone
-# needs). Check with: systemd-analyze security touchbinux.service
+# needs). Check with: systemd-analyze security barux.service
 
-# /usr, /boot, /efi and /etc read-only. The daemon only reads /etc/touchbinux (and
+# /usr, /boot, /efi and /etc read-only. The daemon only reads /etc/barux (and
 # whatever icon paths the config names). /run (socket), /dev and /sys (backlight)
 # stay writable. Commands notice it: `sudo pacman -Syu` in a terminal opened from
 # the bar fails with "read-only file system" (use any other terminal).
 ProtectSystem=full
-# /var/lib/touchbinux, created by systemd (root, 0755) and passed in
+# /var/lib/barux, created by systemd (root, 0755) and passed in
 # $STATE_DIRECTORY: choices made on the bar (a gif_picker's GIF) in state.toml.
 # The config in /etc is never written.
-StateDirectory=touchbinux
+StateDirectory=barux
 # /proc/sys and similar read-only. On this systemd (262) /sys itself stays writable:
 # tiny-dfr runs with the same option and writes its backlight in /sys/class/backlight.
 ProtectKernelTunables=true
-# No module loading (uinput is loaded at boot by modules-load.d/touchbinux.conf).
+# No module loading (uinput is loaded at boot by modules-load.d/barux.conf).
 ProtectKernelModules=true
 # No access to the kernel log (/dev/kmsg, /proc/kmsg).
 ProtectKernelLogs=true
@@ -103,4 +109,4 @@ RestrictRealtime=true
 [Install]
 # Started whenever the Touch Bar digitizer shows up (boot, or a driver rebind),
 # but only while enabled: `systemctl disable` removes this link.
-WantedBy=dev-touchbinux_touch.device
+WantedBy=dev-barux_touch.device

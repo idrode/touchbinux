@@ -1,0 +1,20 @@
+# barux: systemd device units for the Touch Bar, so barux.service can be
+# started when the digitizer appears and ordered after the display.
+#
+# Must run after tiny-dfr's 99-touchbar-*.rules, which set SYSTEMD_ALIAS on the
+# display with "=" (we append with "+=" so both aliases exist). udev reads rules
+# files from all its directories sorted by file name, byte by byte: "99-zz-" sorts
+# after "99-touchbar-", and that is what the "zz" is for. Never "100-barux.rules":
+# "100-" sorts BEFORE "99-" and tiny-dfr's "=" would wipe our alias
+# (tests/service_unit.rs checks the order with `udevadm cat`).
+
+# Display (adp on Apple Silicon, appletbdrm on T2).
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="adp|appletbdrm", TAG+="systemd", ENV{SYSTEMD_ALIAS}+="/dev/barux_display"
+
+# Digitizer: the event node barux opens. tiny-dfr's rules match the parent
+# inputN device (by its own `name` attribute), so there is no clash here.
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ATTRS{name}=="Mac14,7 Touch Bar|MacBookPro17,1 Touch Bar|Apple Inc. Touch Bar Display Touchpad", TAG+="systemd", ENV{SYSTEMD_ALIAS}+="/dev/barux_touch"
+
+# Seat isolation (keeping the bar away from Hyprland on seat0) is NOT done here: it
+# comes from tiny-dfr's 99-touchbar-seat.rules, which stays installed as the fallback.
+# If tiny-dfr is ever uninstalled, copy that file to /etc/udev/rules.d/ first.

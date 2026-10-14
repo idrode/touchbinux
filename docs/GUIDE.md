@@ -2254,3 +2254,321 @@ hyprctl clients -j | jq -r '.[] | .class' | sort -u
 (On this machine: `zen`, `kitty`, `kitty-start`...) And to preview a set without
 switching windows: `--focus-class <clase>` (see
 [section 10](#preview-without-touching-the-bar---png)).
+
+## 7. Recipes
+
+Each recipe is an item to add to `[[layers.items]]`; afterwards,
+`sudo systemctl reload barux`.
+
+### A button that opens an app
+
+Have Hyprland start it (it stays open after the tap, the timeout does not affect it
+and it survives restarting the service):
+
+```toml
+[[layers.items]]
+type = "button"
+id = "terminal"
+icon = "utilities-terminal"     # or the app's icon name, e.g. "kitty"
+action = { type = "hyprctl", exec = ["kitty"] }
+```
+
+Or as a `command` with `detach = true` (it does not depend on Hyprland, but it closes
+if the service is stopped or restarted):
+`{ type = "command", argv = ["/usr/bin/kitty"], detach = true }`. For several apps
+behind the same button, see [`drag_children`](#drag-to-unfold-drag_children).
+
+### A button that runs a command
+
+```toml
+[[layers.items]]
+type = "button"
+id = "captura"
+label = "Captura"
+action = { type = "command", argv = ["sh", "-c", "grim ~/captura-$(date +%s).png"] }
+```
+
+`grim` is an example: any program in your `PATH` (that of `run_as`, which includes
+`~/.local/bin`).
+
+### A button with a virtual key
+
+```toml
+[[layers.items]]
+type = "button"
+id = "mute-mic"
+icon = "/etc/barux/icons/mic_off.svg"
+action = { type = "key", key = "KEY_MICMUTE" }
+```
+
+### Reusing a Hyprland shortcut
+
+If you already have a shortcut, make the button press that key. The cleanest way is
+to use a key that does not exist on the keyboard (F13-F24) and bind it in Hyprland.
+
+```toml
+[[layers.items]]
+type = "button"
+id = "lanzador"
+icon = "/etc/barux/icons/search.svg"
+action = { type = "key", key = "KEY_F13" }
+```
+
+**Watch the names:** with the default keymap (xkb `evdev`), some high F keys reach
+Hyprland under another name. Checked on the test machine:
+
+| barux | Hyprland sees |
+|---|---|
+| `KEY_F13` | `XF86Tools` |
+| `KEY_F14` | `XF86Launch5` |
+| `KEY_F15` | `XF86Launch6` |
+| `KEY_F19` | `F19` |
+
+For the rest, check with `wev` (press the bar's button with `wev` open). In Hyprland
+with the Lua configuration:
+
+```lua
+hl.bind("XF86Tools", hl.dsp.exec_cmd("rofi -show drun"))
+```
+
+and with the classic configuration (*not tested*): `bind = , XF86Tools, exec, rofi -show drun`.
+
+An alternative without a key: copy the shortcut's command into a `command` or
+`hyprctl exec` action.
+
+### Notifying `status` from your scripts
+
+Optional: without notices, `status` sees recordings through their processes and
+screenshots through their folder. With notices, the recording appears and disappears
+instantly, without a process search. One line at the end of each case in the script:
+
+```sh
+echo '{"type":"status","id":"rec","state":"start"}' | socat - UNIX-CONNECT:/run/barux.sock 2>/dev/null || true
+```
+
+(`"stop"` when stopping, `{"type":"status","id":"shot"}` after a screenshot.) The
+`|| true` keeps the script working even if barux is not running.
+
+### Showing a script's data through the socket
+
+The daemon listens on `/run/barux.sock`: **line-delimited JSON** (one object per
+line, ending in `\n`). Only root and the `run_as` user can connect.
+
+**Input** (client → daemon), three types:
+
+```json
+{"type":"set","key":"weather","value":"18 °C"}
+{"type":"status","id":"rec","state":"start"}
+{"type":"idle","state":"activity"}
+```
+
+`idle` (with `[idle]`): there is activity. It wakes the bar and restarts the count.
+It is the way for your session (hypridle, a script) to keep it awake while you type,
+without the daemon reading the keyboard. Without `[idle]` in the config it replies
+with an error.
+
+`status` is for the [`status`](#status) items: `id` `"rec"` with `state` `"start"` or
+`"stop"`, or `id` `"shot"` (without `state`, or `"done"`).
+
+`key`: 1-64 bytes (at most 256 different keys). `value`: any JSON. A correct `set`
+gets no reply. An incorrect one gets a reply such as:
+
+```json
+{"message":"invalid message: unknown variant `nope`, expected one of `set`, `status`, `idle` at line 1 column 14","type":"error"}
+```
+
+**Output** (daemon → all connected clients):
+
+```json
+{"type":"tap","id":"esc"}
+{"type":"slider","id":"volume","value":57}
+{"type":"mute","id":"volume"}
+```
+
+1. Add a `text` to the config:
+
+   ```toml
+   [[layers.items]]
+   type = "text"
+   id = "tiempo"
+   key = "weather"
+   width = 200
+   action = { type = "socket" }
+   ```
+
+2. Send a value (as your user, without sudo):
+
+   ```sh
+   echo '{"type":"set","key":"weather","value":"18 °C"}' | socat - UNIX-CONNECT:/run/barux.sock
+   ```
+
+3. A script that updates it every 10 minutes:
+
+   ```sh
+   #!/bin/sh
+   while true; do
+       t=$(curl -s 'https://wttr.in/?format=%t' | tr -d '+')
+       printf '{"type":"set","key":"weather","value":"%s"}\n' "$t"
+       sleep 600
+   done | socat - UNIX-CONNECT:/run/barux.sock
+   ```
+
+   (If the value can contain quotes or backslashes, build the JSON with `jq -cn --arg v "$t" '{type:"set",key:"weather",value:$v}'`.)
+
+4. Listen to the touches and react:
+
+   ```sh
+   socat - UNIX-CONNECT:/run/barux.sock | while read -r line; do
+       case $line in
+           *'"id":"tiempo"'*) notify-send "Tiempo" "$(curl -s wttr.in/?format=3)" ;;
+       esac
+   done
+   ```
+
+Values are kept in memory: they survive a `reload` but not a restart of the daemon;
+the script must send them again. Tested: the protocol (`set` and the errors) against
+the running daemon; the `text` item with tests and `--png`, **not** on the real bar
+yet.
+
+## 8. Security
+
+**What runs as root.** The daemon (`/usr/local/bin/barux`), because it needs to be
+the *DRM master* of the bar's display, have the exclusive grab of the digitizer
+(evdev), create the virtual keyboard (`/dev/uinput`) and write the brightness in
+`/sys/class/backlight`. It also reads the icons, GIFs and fonts, and creates the
+socket.
+
+**What does NOT run as root.** Everything it launches: `command`, `hyprctl`, `wpctl`
+and `pactl` actions. They run as the session user, with their groups, a clean
+environment (nothing inherited from root; see [The commands'
+environment](#actions)), their own process group, no shell, and a timeout (except
+`command` actions with `detach`, which go in their own session, without a timeout,
+and stay open if the daemon exits). **Nothing is ever run as root**: if there is no
+valid user, commands are refused (`runner: no session user; commands disabled`).
+
+**Who the session user is** (`src/user.rs`), in order:
+
+1. `SUDO_UID`, if it was started with `sudo` (development);
+2. the user itself, if it is not run as root;
+3. `run_as` from the config, **only if the file is owned by root and not writable by
+   group or others** (otherwise, whoever could edit it would choose the user), and
+   never `root`;
+4. nobody: commands disabled.
+
+**The configuration file** is equivalent to being able to run commands as `run_as`
+and press keys in your session. Keep it `root:root` and `0644` (that is how
+`install.sh` installs it); edit it with `sudoedit`. With other permissions, `run_as`
+is ignored.
+
+**The socket** `/run/barux.sock` is `0600` and belongs to the session user; also,
+each client's credentials are checked (only root and that user). A client can set
+values to display and receive the touches; **it cannot run actions**. Limits: 32
+clients, 64 KiB lines, 1 MiB of pending output.
+
+**Virtual keys.** The virtual keyboard reaches your session like any keyboard: a
+`key` action can do whatever that key does.
+
+**The keyboard** (only with `[fn]`). The daemon opens the internal keyboard read-only
+and without grabbing it, and asks the kernel to pass it only the Fn key: what you
+type does not reach it. The details and how to check it, in
+[SECURITY.md](SECURITY.md#fn-key).
+
+**The user's files** (the `gif_picker` folders). A daemon thread reads them; for
+itself only, it changes its file access identity (`setfsuid` and `setfsgid`, which on
+Linux are per thread) to the session user's: it only opens what that user can open
+(without their supplementary groups), and the rest of the daemon stays as it was.
+Without a session user nothing is read. What the user chooses on the bar is saved in
+`/var/lib/barux/state.toml` (owned by root, `0644`), never in `/etc`.
+
+**mpv's socket** (`player`) is usually in `/tmp`, where anyone can create files.
+Before connecting, it checks that it is a socket (not a link) owned by the session
+user, and afterwards, with the other end's credentials (`SO_PEERCRED`), that the
+listening process runs as that user; if not, it is not used. Without a session user
+it does not connect. It only asks it for properties and sends it the seek bar's
+`seek` and the children's `role` commands (`playlist-prev`, `cycle pause`,
+`playlist-next`, `stop`).
+
+**Recordings** (`capture`). The daemon reads `/proc` to find a `wf-recorder` owned by
+the session user (never another one) and, when tapped to stop, checks the process's
+owner, name and start time again right before sending it `SIGINT`. It is the only
+signal it sends to a process it did not start. The capture scripts run like any
+`command` action.
+
+**The service** applies `ProtectSystem=full`, `ProtectKernelTunables`,
+`ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
+`RestrictSUIDSGID`, `SystemCallArchitectures=native` and `RestrictRealtime`, and
+`StateDirectory=barux` for the state (`/var` is still writable with
+`ProtectSystem=full`). Other protections (e.g. `ProtectHome`, `NoNewPrivileges`) are
+listed and commented in `dist/barux.service` with the reason: the buttons' commands
+inherit the sandbox and would stop working. Careful: for that same reason, in a
+terminal opened from the bar `/usr` and `/etc` are read-only (`sudo pacman` fails
+there). The threat model, what the daemon needs and the alternatives are in
+[SECURITY.md](SECURITY.md). To check the running service:
+`tools/check-service.sh`.
+
+## 9. Troubleshooting
+
+Failures seen during development and their cause.
+
+**`hyprctl` actions fail: `hyprctl: [...] failed (...)`.** With Hyprland's Lua
+provider (≥ 0.55), `hyprctl dispatch` expects a Lua expression
+(`hl.dsp.focus({ workspace = "2" })`), not the classic text (`workspace 2`). barux
+detects it (`hyprland: config provider Lua`) and translates `workspace`,
+`focus_window` and `exec`, but **not `raw`**, nor an old `args` that is not one of
+those three. If you see `assuming Lua config provider`, it could not detect it: if you
+use the classic configuration, the actions will fail (open an issue with the log
+line).
+
+**Before login there is no Hyprland and no volume.** The service starts at boot,
+before your session exists. It is normal to see `hyprland: ... waiting for it to
+start` and the `hyprctl` actions being ignored with a warning. The daemon waits
+without polling: it detects Hyprland when `/run/user/<uid>/hypr` appears and the
+volume when `/run/user/<uid>/pulse/native` appears. If they still do not come after
+logging in, check that `run_as` is the user who logs in.
+
+**`Translate ID error: '-1' is not a valid ID`** from `wpctl` right after login: there
+is no default audio output yet. It fixes itself with the next change.
+
+**The device units take a while to appear.** After installing, if
+`systemctl status dev-barux_touch.device` says `inactive (dead)`, udev has not
+applied the new rule yet. Repeat `sudo udevadm control --reload-rules` and
+`sudo udevadm trigger --action=change --property-match=ID_SEAT=seat-touchbar`, wait a
+few seconds and look again. If it is still the same: `udevadm info
+/dev/input/eventN` (the one in the log) must show `SYSTEMD_ALIAS=... /dev/barux_touch`.
+If your digitizer's name is not in `dist/99-zz-barux.rules` (`install.sh --check`
+warns about it), the service will not start by itself.
+
+**`user: ignoring run_as: ... must be owned by root and not group/world-writable`.**
+The config has another owner or other permissions (e.g. you copied it with `cp` as
+your user). Fix: `sudo chown root:root /etc/barux/config.toml && sudo chmod 644 /etc/barux/config.toml`
+and `sudo systemctl restart barux`.
+
+**`could not become DRM master (is tiny-dfr still running?)`** or
+**`grabbing ... (is tiny-dfr still running?)`**: another process has the bar.
+`systemctl status tiny-dfr barux`; if you were testing by hand, stop the service
+first (`sudo systemctl stop barux`).
+
+**`... is in use (another barux running?)`**: there is already a barux with the
+socket.
+
+**`no Touch Bar digitizer found, saw: [...]`**: the digitizer does not show up; the
+list says which devices were seen.
+
+**`Start request repeated too quickly`**: 5 failures in 60 s. Read the reason in the
+log and, after fixing it, `sudo systemctl reset-failed barux && sudo systemctl start barux`.
+
+**The service does not start after editing the config.** At start-up, an invalid
+config is fatal (on a reload it is not). Validate first:
+`barux bar --config /etc/barux/config.toml --png /tmp/x.png`.
+
+**Icons with `?`**: the log says which icon was not found. Use an absolute path or a
+name that exists in your theme (`find /usr/share/icons -name 'nombre.*'`).
+
+**No text shows**: `font: no usable .ttf/.otf font found` → `sudo pacman -S noto-fonts`
+and restart the service.
+
+**Keys do nothing**: `keys: ...; key actions disabled` (no `uinput`), or your desktop
+has nothing bound to that key (see [Reusing a shortcut](#reusing-a-hyprland-shortcut)).
+
+**Suspend**: `barux-resume.service` redraws on resume. **It has not been tested** with
+a real suspend.

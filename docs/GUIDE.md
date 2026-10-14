@@ -1590,3 +1590,386 @@ color = "#00ffb7"
 Over the socket, each chosen mode is reported with its `id`
 (`{"type":"tap","id":"capture.shot_region"}`), and touching the item with
 `{"type":"tap","id":"capture"}`.
+
+#### `workspaces`
+
+Hyprland's workspaces as **capsules**, with the behavior of the Quickshell island
+(`Workspaces.qml` and `WorkspaceBirthCanvas.qml`). No numbers, in two styles
+(`style`):
+
+- **`"dots"`** (default): an inactive workspace is a white **circle** of `dot_size`
+  px; the active one, a mint **pill** of `active_width` × `dot_size` (full radius),
+  lying down or, with `active_orientation = "vertical"`, standing up (`dot_size` ×
+  `active_width`).
+- **`"capsule"`**: the earlier look, the island's. An inactive one is a white
+  **horizontal bar**; the active one, **the same capsule turned 90°** (vertical) in
+  mint (`bar_long`, `bar_short`). It is drawn exactly as before the circles existed.
+
+Next to a capsule, a **strip with the icons** of its windows can open, pushing the
+rest. **It needs Hyprland**: while the daemon is not connected to it, the item is not
+drawn and takes no room (the others share the row as if it were not there), with no
+error; it appears once connected.
+
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `id` | `"workspaces"` | | |
+| `width` | `400` | (0, 4000] px | the **most** it takes up: its slot in the layer. The capsules go on the left; what does not fit is cut with "+N". It does not accept `stretch` |
+| `active_color` | `"#00ffb7"` | | the active capsule |
+| `inactive_color` | `"#ffffff"` | | the others, and the "+N" |
+| `style` | `"dots"` | `"dots"`, `"capsule"` | circles and pill, or the island's bars |
+| `dot_size` | `26` | 12-48 px | `dots` only: diameter of the circle and height (thickness) of the pill. No more than the row |
+| `active_width` | `64` | `dot_size`-200 px | `dots` only: length of the active pill |
+| `active_orientation` | `"horizontal"` | `"horizontal"`, `"vertical"` | `dots` only: vertically, the pill is `dot_size` wide and `active_width` high, which must fit in the row (otherwise, an error; with the default `active_width`, 64, it does not fit: lower it) |
+| `bar_long`, `bar_short` | `28`, `16` | 2-60 px | `capsule` only: the capsule's axes (14:8 as in the island). `bar_short` less than `bar_long`; `bar_long` no more than the row |
+| `gap` | `8` (`dots`), `6` (`capsule`) | 0-40 px | between capsules |
+| `strip` | `"active"` | `"active"`, `"pressed"`, `"all"`, `"none"`, `"tap"` | which strips open: the active one's always; the one of the capsule under the finger, while pressed; all; none; the active one's when its capsule is tapped ([`strip = "tap"`](#the-strip-on-tap-strip--tap)) |
+| `strip_transition_ms` | `150` | 0-600 | only with `strip = "tap"`: how long the strip takes to open and close (in the other modes, a fixed 190 ms) |
+| `strip_background` | `"#1a1d1c"` | | strip background (full radius) |
+| `icon_size` | `30` | 8-64 px | side of the window icons (no more than the row) |
+| `icon_gap` | `10` | 0-40 px | between icons |
+| `strip_pad` | `10` | 0-40 px | padding at the ends of the strip |
+| `strip_height` | row height | 2-60 px | strip height, centered in the row (e.g. `40` with 30 px icons: a 5 px margin above and below). No less than `icon_size` and no more than the row. Its icons can be touched over the whole height of the row |
+| `strip_border_color`, `strip_border_width` | no border, `0` | 0-6 px | strip border, **inside** its outline (the outer size does not change; it respects `strip_height`). It opens and closes with the strip, and the icons never cover it. `strip_pad` must be at least the thickness, and `icon_size` + 2 × thickness must fit in the strip |
+| `bar_border_color`, `bar_border_width` | no border, `0` | 0-6 px | border of the capsules, inside (the outline is the same: a ring on the circles, a pill on the active one). It follows the change of shape and the birth and closing. With a thickness of at least half of `dot_size` (or of `bar_short`) no inside is left: an error |
+| `active_border_color` | `bar_border_color` | | border of the active one; the color blends during the turn |
+| `icon_tint` | no tint | | paints the strip's icons in a single color (`"#rrggbb"`); the initials, the circle in that color |
+| `max_icons` | `6` | 1-20 | icons in a strip at most; the other windows, "+N" |
+| `class_icons` | — | | icon per window class, before the theme (see below) |
+| `show` | `"existing"` | `"existing"`, `"all"` | `existing`: the ones Hyprland has (it creates and destroys them as they are used, so they can be 1, 2, 4, 5); `all`: 1 to 10 even if empty, and any other that exists |
+| `overview_action` | — | | an [action](#actions) for the **horizontal drag** (see below) |
+| `drag_px` | `24` | 8-120 | only with `overview_action`: drag distance |
+
+A `*_border_color` without a `*_border_width` greater than 0 (or the other way
+around), a badly written color or a thickness outside 0-6 are configuration errors
+with their reason. With a translucent strip background, the border shows through it
+(the background is painted over the border).
+
+The measures of one style with the other are an error: `bar_long`/`bar_short`
+without `style = "capsule"`, or `dot_size`/`active_width`/`active_orientation` with
+it. **An earlier configuration with `bar_long` or `bar_short`** stops loading until
+`style = "capsule"` is added (to keep the bars) or they are removed (for the
+circles); the error says so.
+
+The icon strip starts 4 px after the edge of the active pill (or capsule) and, like
+`strip_height`, is centered vertically in the row.
+
+The options of the old numbered pills (`text_color`, `anim_ms`, `shape`, `radius`,
+`background`) no longer exist and are a configuration error.
+
+**Data.** It uses the connection to Hyprland the daemon already has (the event socket
+and, when connecting or resyncing, the control one); it does not open another one or
+poll. Only what is shown counts: the list of workspaces, the active one, the windows
+of each one (class and address) and the focused one. Anything else (a **title**
+change, for example) causes no redraw. Special workspaces (scratchpad, negative ids)
+are not shown.
+
+**Animations** (only while they happen, at 30 fps at most; when idle, 0 fps):
+
+- **Change of active workspace**: width, height and color of the two capsules, 150 ms
+  with a cubic *ease out* (with `dots`: the circle stretches into a pill and the pill
+  shrinks into a circle); the others move into place at the same time.
+- **Press** (the island's *hover*): while the finger is on a capsule, scale 1.15
+  (150 ms, cubic *ease out*).
+- **Strip**: it opens or closes by animating its width over 190 ms (cubic *ease
+  out*), with the icons clipped by it; it pushes the other capsules.
+- **Birth** of a workspace (380 ms): it comes out of its **neighbor** (the nearest
+  capsule to its left, or to its right if it is the first): the neighbor stretches,
+  pinches, splits in two like a drop, and both settle with a small bounce
+  (*OutBack*). Its slot in the row opens little by little (`slotT`).
+- **Closing** (360 ms): the same in reverse; if the focus moves to the neighbor, the
+  neighbor **absorbs** the active color and shape while it swallows it.
+- While a birth or a closing lasts, that drawing replaces the two capsules involved;
+  its first frame is identical to the previous rest state and its last to the one
+  after. A difference from the island: during the transition the slot of the two
+  follows the shape that is drawn (in the island, a capsule drawn horizontally in the
+  slot of a vertical one went outside it and touched the one next to it).
+- With **`dots`**, the neighbor and the new one are drawn as a circle or a pill
+  according to their state, and three things change compared to the island (with
+  `capsule` everything stays as in it): the drop comes out of the **end** of the
+  neighboring pill, not its center (otherwise it would be born inside it); it goes
+  toward the center of its slot **as it opens**, not toward its final place (a 64 px
+  pill would get into the one next to it); and a neighbor that stops being the active
+  one shrinks into a circle over its 150 ms, instead of changing at once.
+- **On start-up or on reconnecting** to Hyprland, the first list of workspaces is not
+  animated: only what appears or disappears afterwards is born or closes.
+
+**Icons.** By window class: first `class_icons` (the class in lowercase; the value,
+like a button's `icon`: a theme name or an absolute path), then the icon theme as in
+the `windows` scene (`.desktop` files by `StartupWMClass` and name, class in
+lowercase); if there is nothing, a **colored circle with the initial** (the last part
+of `org.gnome.Nautilus`: "N"), always the same color for the same class. The theme's
+PNGs are drawn at their size, centered; the SVGs, at `icon_size`. The focused window
+has a light box behind it.
+
+**If it does not fit** in `width` (with the strips that `strip` opens at rest; with
+`"pressed"`, room for the widest one; with `"tap"`, room for the active one's even if
+it is closed, as with `"active"`): first icons are removed from the strips (plus
+"+N"), and then workspaces, starting with the one farthest from the active one, with
+a "+N" at the end. The active one is always shown.
+
+**Touches.** Each capsule's touch area takes the whole height of the row and at least
+**36 px** of width even if what is drawn is smaller; where they overlap, the nearest
+capsule wins. They are sent to Hyprland through its control socket (`.socket.sock`),
+without running `hyprctl`, with the syntax of its provider (Lua or classic) and
+checking the arguments (the id digits only; the address, `0x` and hexadecimal):
+
+- **a capsule**: `dispatch workspace <id>`;
+- **an icon in a strip**: `dispatch focuswindow address:0x...`;
+- as with a button, if the finger leaves what it touched, nothing is sent. An
+  exception meant for `strip = "pressed"`: you press the capsule, its strip opens,
+  and releasing over one of its icons focuses that window.
+
+Over barux's socket it is reported with
+`{"type":"workspace","id":"workspaces","value":"4"}` and
+`{"type":"focuswindow","id":"workspaces","value":"0x..."}`.
+
+**Drag (`overview_action`).** With it, a horizontal drag (to either side) of at least
+`drag_px` over the item runs that action on release (and reports
+`{"type":"overview","id":"workspaces"}`), with the mechanics of the
+[launcher](#drag-to-unfold-drag_children): up to 8 px it is a tap; more, almost
+horizontal, it is the drag (if released before `drag_px`, nothing); in any other
+direction, the touch is canceled. Without `overview_action` there is no gesture.
+
+```toml
+[[layers.items]]
+type = "workspaces"
+width = 520
+style = "dots"          # or "capsule" (with bar_long/bar_short)
+dot_size = 26
+active_width = 64
+active_color = "#00ffb7"
+inactive_color = "#ffffff"
+strip = "active"
+max_icons = 6
+class_icons = { "kitty" = "utilities-terminal", "zen" = "zen-browser" }
+overview_action = { type = "key", key = "KEY_F15" }   # e.g. a Hyprland bind
+```
+
+##### The strip on tap: `strip = "tap"`
+
+At rest, the bar only shows the workspaces; windows appear when asked for, on three
+levels:
+
+| Level | What you see | How you get there |
+|---|---|---|
+| 0 | the workspaces (circles and the active pill) | at rest |
+| 1 | also, the strip with the icons of the active one's windows, next to its pill | tap the **active** pill |
+| 2 | the app's buttons (`app_actions`) with its icon as a handle, in the item's place | tap the icon of an app in the strip that has buttons |
+
+- **Tapping another workspace** switches to it, as always, and unfolds nothing.
+- **Tapping the active pill** opens its strip; tapping it again closes it. The active
+  one is never told "switch to yourself" (with Hyprland's
+  `workspace_back_and_forth` that would take you to the previous one). If it has no
+  windows, nothing happens (only the press bounce).
+- **An icon in the strip** focuses that window; if its class has `app_actions`, its
+  buttons unfold (level 2); if not, the strip stays open.
+- **The handle** (the app's icon on level 2) goes back to the strip, with its timer
+  starting over.
+
+**Timer.** The strip closes by itself after `collapse_after_ms` (5000 by default)
+without touching the item; each touch restarts it and a resting finger stops it. With
+the buttons out, the buttons' timer counts; if it runs out, everything folds back to
+level 0.
+
+**Everything folds back to level 0** when the timer runs out; when switching
+workspaces (keyboard, mouse or tapping another one); if the buttons' window closes or
+the workspace is left without windows; with `close_on_tap = true`, when a button is
+pressed; and with the Fn layer or idle, at once and without animation. If the **focus
+moves to another app's window** with the buttons out, it goes back to the strip
+(level 1) with the timer running again.
+
+**Look.** The strip is the same as with `strip = "active"` (background, icons, border,
+`strip_height`, `icon_size`...): it opens next to the pill pushing the other
+workspaces, in `strip_transition_ms` (150 ms) at ~30 fps, and when still it looks the
+same as in `"active"`. The item's width never changes: the strip's slot is reserved
+(see "If it does not fit" above), so at rest there is free space to the right of the
+workspaces. The level 2 buttons are the ones from
+[`app_actions`](#per-app-buttons-app_actions), with their cross-fade.
+
+**Cost.** At rest (level 0), nothing: no frames and no timers. With the strip or the
+buttons out and still, a single pending wake-up (the timer's). There are frames only
+while something moves.
+
+```toml
+[[layers.items]]
+type = "workspaces"
+width = 520
+strip = "tap"
+collapse_after_ms = 5000      # the strip (and the buttons) close after this without a touch
+strip_transition_ms = 150     # when opening and closing the strip (0-600)
+# + the [[layers.items.app_actions]] you want (see below)
+```
+
+To see it without Hyprland: `bar --png ... --level 0|1|2` (level 2 with `--expand
+<clase>`; see [section 10](#preview-without-touching-the-bar---png)).
+
+**Trying it on the bar:** after `./install.sh` and restarting the service, tap the
+active pill (the strip opens), wait 5 s (it closes), open it and tap kitty (or the app
+with buttons: level 2), tap the handle (back to the strip), switch workspaces with the
+keyboard (everything closes). The journal (`journalctl -u barux -f`) says
+`workspaces: "kitty" buttons out` when the buttons unfold.
+
+##### Per-app buttons: `app_actions`
+
+When you **tap an app's icon** in the strip, besides giving it the focus (as always:
+if it is on another workspace, Hyprland switches to it), **its buttons unfold** in
+the item's place: the app's icon stays on the left as a handle, and to its right the
+buttons for that app, with the [`keys`](#actions) action to send it shortcuts. The
+capsules and the strip are hidden while it is unfolded and come back when it folds.
+The item's width does not change: the rest of the bar does not move.
+
+```toml
+[[layers.items]]
+type = "workspaces"
+width = 520
+collapse_after_ms = 5000      # folds by itself after this long without a touch
+close_on_tap = false          # true: pressing a button also folds it
+app_transition_ms = 150       # when unfolding and folding (0-1000)
+
+[[layers.items.app_actions]]
+class = ["zen"]               # whole class, case-insensitive
+[[layers.items.app_actions.children]]
+icon = "go-previous"          # path, icon theme name or builtin:
+action = { type = "keys", keys = "alt+left" }
+[[layers.items.app_actions.children]]
+label = "Copiar"
+action = { type = "keys", keys = "ctrl+c" }
+```
+
+| Field (in `workspaces`) | Default | What it does |
+|---|---|---|
+| `[[...app_actions]]` | — | the apps with buttons (1-32) |
+| `collapse_after_ms` | `5000` | time without touching anything in the unfolded row until it folds by itself (500-60000). Each touch restarts it. With `strip = "tap"` it is also the strip's (and it is valid without `app_actions`) |
+| `close_on_tap` | `false` | whether pressing a button folds it |
+| `app_transition_ms` | `150` | duration of unfolding and folding (0-1000) |
+
+Each `[[layers.items.app_actions]]`:
+
+| Field | What it does |
+|---|---|
+| `class` | list of window classes (required); each class only in one entry (or with a different `title_contains`) |
+| `title_contains` | optional: also, the title contains this text (case-insensitive). It is checked when the icon is tapped |
+| `[[...app_actions.children]]` | 1-12 buttons, like the children of a `drag_children`: `label` and/or `icon`, `action`, `id` (by default `<item>.<first class>.<n>`, e.g. `workspaces.zen.1`, which is what arrives over the socket) and their box (`shape`, `radius`, `size`, `background`, `pressed_background`, `pressed_scale`, `text_color`, `color`, `border_*`). No `hold` |
+
+**When it folds** (with `strip = "tap"`, see [above](#the-strip-on-tap-strip--tap)
+what happens with the strip): when tapping the handle (the app's icon); after
+`collapse_after_ms` without a touch; with `close_on_tap = true`, when a button is
+pressed; when the focus moves to a window of **another** app (to another window of
+the same one, no) or to another workspace; if the window closes or changes class. The
+Fn layer and idle fold it at once, without animation.
+
+**Keys go to that window.** The buttons only work once Hyprland has confirmed that
+the window has the focus; a tap before that (if the focus event has not arrived yet)
+does nothing, so as not to send keys to another window. The log says so:
+`workspaces: "zen" hasn't got the focus yet: tap ignored`.
+
+**If they do not fit.** On load it checks that each app's buttons fit in the item's
+width minus the handle (the row height plus 8 px): each icon-only button needs 40 px,
+one with text the text plus 8 px on each side, plus the layer's `gap` between them.
+If not, it is an error that says how much is needed: with the item at 400 px, `the
+app_actions of "obsidian" need 399 px for their 4 buttons and there are 334 (the
+item's width 400 minus 66 for the app's icon); make the item at least 465 px wide, or use fewer or shorter buttons`. With six icon buttons or four
+short-word ones, **520 px** (the usual width) is enough.
+
+**Other notes:**
+
+- With `strip = "none"` there are no icons to tap: `app_actions` is an error there.
+  With `strip = "active"` only the active workspace's are shown (and can be tapped);
+  with `"all"`, everyone's; with `"tap"`, the active one's once its strip is open.
+- Without buttons for that class, tapping the icon only focuses, as before.
+- When idle it costs nothing: unfolded and still, only the moment of the automatic
+  fold is pending (a single timer); folded, nothing. While unfolding, about 30 frames
+  per second.
+- The bar's font has no arrows (◀ ↻...): use theme icons (`go-previous`, `go-next`,
+  `view-refresh`, `tab-new`, `window-close`, `edit-undo`...) or text. An app's class:
+  `hyprctl clients -j | jq -r '.[] | .class' | sort -u`.
+- To see it without Hyprland: `bar --png ... --expand <clase>` (see
+  [section 10](#preview-without-touching-the-bar---png)).
+
+`config.example.toml` includes, in the `workspaces` block, the ones for zen, kitty,
+obsidian and Telegram (and slots for Signal and Renoise).
+
+#### `status`
+
+It shows what is going on, **without ever launching anything**: for now a **screen
+recording** (a red dot and the time) and a **screenshot** just taken (a camera). It
+has no action, no background and no button: touching it does nothing (it is not even
+reported over the socket). It is meant to grow (notifications, messages...) with more
+states through the same socket message.
+
+| Field | Default | Range | What it does |
+|---|---|---|---|
+| `id` | `"status"` | | |
+| `width` | `120` | (0, 4000] px | its slot (fixed width; it does not accept `stretch`) |
+| `idle` | `"reserve"` | `"reserve"`, `"hidden"` | with nothing to show: keeps its slot empty, or takes up nothing (the others close up) |
+| `rec_color` | `"#ff0000"` | | the recording dot |
+| `shot_color` | `"#00ffb7"` | | the screenshot camera |
+| `text_color` | `"#ffffff"` (or the layer's `item_text_color`) | | the time |
+| `shot_watch` | `"~/Pictures/Screenshots"` | absolute path or `~/...` | folder whose new files are screenshots. `~` is the `run_as` user's home, never root's. `""`: watches nothing |
+| `rec_processes` | `["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]` | up to 8 names | processes that record. `[]`: does not look for them |
+| `rec_poll_ms` | `2000` | 250-60000 | how often it looks for those processes while there are none |
+| `rec_done_ms` | `4000` | 0-60000 | how long the final duration is shown when a recording ends (0: not at all) |
+| `shot_ms` | `2000` | 0-30000 | how long the camera is shown after a screenshot (0: never) |
+
+With just `type = "status"` it works with all the default values.
+
+**How it knows what is going on** (without polling anything at rest, except as noted):
+
+1. **The socket**, if your scripts report it (optional): `{"type":"status","id":"rec",
+   "state":"start"}`, `... "state":"stop"}` and `{"type":"status","id":"shot"}`. As
+   soon as a recording notice arrives, the socket rules: it stops looking for
+   processes (until the configuration is reloaded). Other `id`s or `state`s get an
+   error reply with the reason.
+2. **The screenshot folder** (`shot_watch`), with inotify: a file that is closed after
+   being written (as `grim` does) or that is moved in is a screenshot. Hidden files
+   (`.something`) and temporary ones (`~`, `.tmp`, `.part`, `.partial`, `.swp`,
+   `.crdownload`...) are ignored. If the folder does not exist yet, it waits for it to
+   appear in its parent folder (like the script's `mkdir -p`). A screenshot reported
+   over the socket and seen in the folder counts once.
+3. **The processes** (`rec_processes`): every `rec_poll_ms` it looks in `/proc` for
+   the `run_as` user's processes with those names (the first 15 characters are
+   compared, which is what the kernel keeps: `gpu-screen-reco`). As soon as it finds
+   one it stops looking and follows it with a **pidfd**, which notifies at once when
+   it ends, without polling. The time comes from the process's start time, so it is
+   correct even if the daemon restarts in the middle of a recording. Without `run_as`
+   (or `sudo`) it looks for nothing.
+
+**How it looks**
+
+- **Recording**: a `rec_color` dot that fades out and in smoothly once per second,
+  and the time `mm:ss` (`h:mm:ss` from one hour on). It is redrawn only during the
+  dot's two fades (0.3 s of each second, at 30 fps) and when the second changes:
+  about 10 frames per second.
+- **Recording finished**: the still dot and the final duration for `rec_done_ms`,
+  with a 0.35 s fade-out. Still: 0 fps.
+- **Screenshot**: a `shot_color` camera that appears with a small scale jump
+  (0.25 s), stays still and fades out at the end of `shot_ms`.
+- **Both at once**: the recording rules; the screenshot is a 0.7 s flash on top.
+- **At rest**: nothing, 0 fps, no timers (only the process search, if there is one:
+  about 0.4 ms every 2 s).
+- With `idle = "hidden"`, when it starts showing something the row is rearranged to
+  make room for it, and when the fade ends the slot closes. The rearranging is
+  **instant**: what animates is the item's content. Sliding the neighbors would mean
+  repainting the bar's whole fixed layer on every frame.
+
+```toml
+[[layers.items]]
+id = "status"
+type = "status"
+width = 120
+idle = "reserve"            # reserve | hidden
+rec_color = "#ff0000"
+shot_color = "#00ffb7"
+shot_watch = "~/Pictures/Screenshots"
+rec_processes = ["wf-recorder", "wl-screenrec", "gpu-screen-recorder"]
+rec_done_ms = 4000
+shot_ms = 2000
+```
+
+To see it without recording or taking anything: `barux bar --config <archivo> --png
+<salida.png> --status rec` (or `rec_done`, `shot`, `rec_shot`). With the daemon
+running, the socket messages above show it on the real bar.
+
+#### `spacer`
+
+Empty space. Only `width` or `stretch` (default `stretch = 1`).

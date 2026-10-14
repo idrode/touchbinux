@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Checks the running touchbinux service: that its sandbox is the one in
-# dist/touchbinux.service and that, inside it, the daemon still did everything it
+# Checks the running barux service: that its sandbox is the one in
+# dist/barux.service and that, inside it, the daemon still did everything it
 # does at start-up. Needs no root (the journal needs the wheel/adm/systemd-journal
-# group, as on Arch). Run it after `systemctl restart touchbinux`, with Hyprland up.
+# group, as on Arch). Run it after `systemctl restart barux`, with Hyprland up.
 #
 # Usage: tools/check-service.sh [--no-hypr] [--no-mpv]
 #   --no-hypr   don't require "hyprland: connected" (no Hyprland session)
@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-UNIT=touchbinux.service
+UNIT=barux.service
 want_hypr=true
 want_mpv=auto
 for arg in "$@"; do
@@ -34,7 +34,7 @@ prop() { systemctl show "$UNIT" -p "$1" --value; }
 echo "==> Unit"
 check "active" '[[ $(prop ActiveState) == active ]]'
 installed=$(systemctl show "$UNIT" -p FragmentPath --value)
-check "installed unit ($installed) is dist/touchbinux.service" 'cmp -s "$installed" dist/touchbinux.service'
+check "installed unit ($installed) is dist/barux.service" 'cmp -s "$installed" dist/barux.service'
 check "unit file loaded (no daemon-reload pending)" '[[ $(prop NeedDaemonReload) == no ]]'
 for kv in ProtectSystem=full ProtectKernelTunables=yes ProtectKernelModules=yes \
     ProtectKernelLogs=yes ProtectControlGroups=yes RestrictSUIDSGID=yes \
@@ -73,7 +73,7 @@ else
     expect() { pattern=$2; check "$1" 'grep -qE -- "$pattern" <<<"$log"'; }
     expect "DRM card opened" '^using /dev/dri/card'
     expect "digitizer grabbed (evdev)" '^touch: .*\(grabbed\)'
-    expect "socket listening, handed to the user" '^ipc: listening on /run/touchbinux.sock .*owner uid [1-9]'
+    expect "socket listening, handed to the user" '^ipc: listening on /run/barux.sock .*owner uid [1-9]'
     expect "virtual keyboard (uinput)" '^keys: virtual keyboard created'
     expect "backlight found" '^backlight: /sys/class/backlight/'
     expect "commands as the session user" '^runner: commands run as '

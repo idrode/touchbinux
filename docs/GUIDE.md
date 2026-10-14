@@ -1,5 +1,7 @@
 English | [Español](GUIA.md)
 
+*The English version is the reference; the Spanish one may lag behind.*
+
 # barux guide
 
 A guide to installing, using, customizing and modifying barux. If anything it says

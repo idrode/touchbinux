@@ -1,5 +1,7 @@
 English | [Español](README.es.md)
 
+*The English version is the reference; the Spanish one may lag behind.*
+
 # barux
 
 A Rust daemon for the Touch Bar of Apple Silicon MacBook Pros running

@@ -1,5 +1,7 @@
 [English](README.md) | Español
 
+*La versión en inglés es la de referencia; la española puede ir con retraso.*
+
 # barux
 
 Daemon en Rust para la Touch Bar de los MacBook Pro con Apple Silicon en

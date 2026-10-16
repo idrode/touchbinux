@@ -1539,6 +1539,18 @@ impl App {
         }
     }
 
+    /// A swipe across the folded player: its `swipe_action`.
+    fn on_swipe(&mut self, item: &str) {
+        let action = self
+            .config
+            .player()
+            .filter(|p| p.id() == Some(item))
+            .and_then(|p| p.swipe_action.clone());
+        if let Some(a) = action {
+            self.run_action(&a);
+        }
+    }
+
     fn run_action(&mut self, action: &Action) {
         match action {
             Action::Command { argv, detach: true, .. } => {
@@ -2488,6 +2500,7 @@ fn ui_event_json(ev: &UiEvent) -> Value {
         UiEvent::Workspace(id, ws) => json!({"type": "workspace", "id": id, "value": ws}),
         UiEvent::FocusWindow(id, addr) => json!({"type": "focuswindow", "id": id, "value": addr}),
         UiEvent::Overview(id) => json!({"type": "overview", "id": id}),
+        UiEvent::Swipe(id) => json!({"type": "swipe", "id": id}),
     }
 }
 
@@ -2944,6 +2957,7 @@ fn run(
                                 dirty |= app.open_app_row(item, addr, true);
                             }
                             UiEvent::Overview(item) => app.on_overview(item),
+                            UiEvent::Swipe(item) => app.on_swipe(item),
                         }
                     }
                 }

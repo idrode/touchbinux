@@ -1393,6 +1393,9 @@ arrastre.
 | `collapse_after_ms`, `anim_ms`, `active_color`, `action` | como en `expandable` | |
 | `close_on_tap` | `false` | tocar un hijo (anterior, play/pausa...) **no** lo pliega: se puede pulsar varias veces seguidas. Cada toque y cada arrastre de la barra reinicia el plazo de `collapse_after_ms`; se pliega al vencer, al tocar fuera o al tocar su icono. Con `true`, se pliega al tocar un hijo, como un `expandable` |
 | `shape`, `radius`, `background`, `size`, `pressed_background` | | como en `expandable` |
+| `swipe_action` | ninguna | una [acción](#acciones) para un **deslizamiento horizontal** sobre el icono plegado (ver abajo) |
+| `swipe_direction` | `"any"` | solo con `swipe_action`: `"any"`, `"left"` o `"right"` |
+| `drag_px` | `24` | solo con `swipe_action`: recorrido del deslizamiento, px (8-120) |
 
 **Nombre de la pista.** Con `show_title` (por defecto), entre los hijos y la barra
 de posición, en una sola línea: **"Artista – Título"** si mpv da las etiquetas
@@ -1450,6 +1453,26 @@ action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
 
 Por el socket de barux, cada salto se avisa como
 `{"type":"seek","id":"player","value":61.24}`.
+
+**Deslizamiento (`swipe_action`).** Con él, un deslizamiento horizontal de al menos
+`drag_px` sobre el icono **plegado** ejecuta esa acción al soltar (y avisa
+`{"type":"swipe","id":"player"}`), con la mecánica del
+[arrastre de workspaces](#workspaces): hasta 8 px es un toque; más, casi horizontal y
+hacia `swipe_direction`, es el deslizamiento (si se suelta antes de `drag_px`, nada);
+en cualquier otra dirección, el toque se cancela. Un deslizamiento nunca despliega el
+player, y un toque nunca ejecuta la acción. Mientras el dedo está encima, el icono se
+ve pulsado y **un toque lo despliega al soltar** (sin `swipe_action`, como siempre,
+en cuanto baja el dedo). Desplegado, el player recibe sus toques como siempre (hijos,
+barra de posición): no hay deslizamiento. Sin `swipe_action` no hay gesto. Por
+ejemplo, para abrir el panel del reproductor de Quickshell:
+
+```toml
+swipe_action = { type = "command", argv = ["/usr/bin/qs", "ipc", "--any-display", "call", "player", "toggle"] }
+```
+
+`qs ipc` necesita el `IpcHandler` correspondiente en la config de Quickshell; lo
+alcanza porque los comandos reciben el `XDG_RUNTIME_DIR` de la sesión (ver
+[Acciones](#acciones)).
 
 **Hijos del `player`: `role`, iconos por estado y estilo propio.** Además de los
 campos de un hijo de `expandable`, los del `player` admiten:

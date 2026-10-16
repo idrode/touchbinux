@@ -1396,6 +1396,9 @@ bar. Without a duration (a stream, or nothing loaded) it is **disabled**: gray,
 | `collapse_after_ms`, `anim_ms`, `active_color`, `action` | as in `expandable` | |
 | `close_on_tap` | `false` | tapping a child (previous, play/pause...) does **not** fold it: you can press it several times in a row. Each tap and each drag of the bar restarts the `collapse_after_ms` timer; it folds when it runs out, when tapping outside or when tapping its icon. With `true`, it folds when a child is tapped, like an `expandable` |
 | `shape`, `radius`, `background`, `size`, `pressed_background` | | as in `expandable` |
+| `swipe_action` | none | an [action](#actions) for a **horizontal swipe** across the folded icon (see below) |
+| `swipe_direction` | `"any"` | only with `swipe_action`: `"any"`, `"left"` or `"right"` |
+| `drag_px` | `24` | only with `swipe_action`: swipe distance, px (8-120) |
 
 **Track name.** With `show_title` (the default), between the children and the seek
 bar, on a single line: **"Artist – Title"** if mpv gives the `artist` and `title`
@@ -1452,6 +1455,25 @@ action = { type = "command", argv = ["/home/ana/.local/bin/mpvctl", "next"] }
 
 Over barux's socket, each seek is reported as
 `{"type":"seek","id":"player","value":61.24}`.
+
+**Swipe (`swipe_action`).** With it, a horizontal swipe of at least `drag_px` across
+the **folded** icon runs that action on release (and reports
+`{"type":"swipe","id":"player"}`), with the mechanics of the
+[workspaces drag](#workspaces): up to 8 px it is a tap; more, almost horizontal and
+in `swipe_direction`, it is the swipe (released before `drag_px`, nothing); in any
+other direction the touch is canceled. A swipe never unfolds the player, and a tap
+never runs the action. While the finger is down the icon shows the pressed look,
+and **a tap unfolds it on release** (without `swipe_action`, as before, as soon as
+the finger comes down). Unfolded, the player takes its touches as always (children,
+seek bar): there is no swipe. Without `swipe_action` there is no gesture. For
+example, to open Quickshell's player panel:
+
+```toml
+swipe_action = { type = "command", argv = ["/usr/bin/qs", "ipc", "--any-display", "call", "player", "toggle"] }
+```
+
+`qs ipc` needs a matching `IpcHandler` in your Quickshell config; it reaches it
+because commands get the session's `XDG_RUNTIME_DIR` (see [Actions](#actions)).
 
 **The `player`'s children: `role`, per-state icons and their own style.** Besides the
 fields of an `expandable`'s child, the `player`'s accept:

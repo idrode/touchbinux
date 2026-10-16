@@ -535,6 +535,11 @@ format = "%H:%M"
 # title_color = "#ffffff"          # default text_color, else white
 # close_on_tap = false             # default: children don't fold it; every tap
 #                                  # (and seek) restarts collapse_after_ms
+# swipe_action = { type = "command", argv = ["/usr/bin/qs", "ipc", "--any-display", "call", "player", "toggle"] }
+#                                  # a horizontal swipe across the folded icon runs it
+#                                  # (a tap still unfolds it, on release)
+# swipe_direction = "any"          # only with swipe_action: "any", "left" or "right"
+# drag_px = 24                     # only with swipe_action: swipe distance, px
 #
 # [[layers.items.children]]
 # icon = "/etc/barux/icons/play_pause.svg"

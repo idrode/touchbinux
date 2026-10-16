@@ -12,10 +12,12 @@ use crate::{
     config::{
         BUILTIN_BATTERY, BUILTIN_FOLDER, BUILTIN_FOLDER_CLASSIC, BUILTIN_GRID_WAVE,
         Action, DEFAULT_APP_COLLAPSE_MS, DEFAULT_CIRCLE_SIZE, DEFAULT_MAX_ICONS, DEFAULT_RING_GAP,
-        DEFAULT_RING_WIDTH, IconStyle, ItemConfig, WsStrip, WsStyle,
+        DEFAULT_RING_WIDTH, IconStyle, ItemConfig, SwipeDirection, WsStrip, WsStyle,
         ItemKind, LayerConfig,
     },
-    expandable::{self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still},
+    expandable::{
+        self, Child, DEFAULT_ACTIVE, Expandable, Glyph, Part, Spec, StateGlyphs, Still, Swipe,
+    },
     expander::{DEFAULT_ANIM, DEFAULT_COLLAPSE_AFTER, DEFAULT_FILL, Expander, Fold, expanded_rect},
     frame::Frame,
     gif::{Gif, GifPlayer, Play},
@@ -126,6 +128,8 @@ pub enum UiEvent {
     FocusWindow(String, String),
     /// A workspaces item's horizontal drag (item id): its `overview_action`.
     Overview(String),
+    /// A swipe across the folded player (item id): its `swipe_action`.
+    Swipe(String),
 }
 
 /// What the daemon needs to fill a gif_picker in: its id, the box its GIF must fit
@@ -177,6 +181,25 @@ enum PullState {
     Out,
     /// Moved some other way (up, down, left, too diagonal): does nothing.
     Cancelled,
+}
+
+/// A sideways drag that counts once it goes `px` (a workspaces item's overview, a
+/// player's swipe): where a finger that came down `(dx, dy)` ago is now. Within
+/// `TAP_SLOP` it is still a tap; then mostly sideways (within ~27 degrees) and
+/// `direction`'s way, or nothing. Once it counts it stays counted.
+fn sideways(state: PullState, (dx, dy): (f32, f32), px: f32, direction: SwipeDirection) -> PullState {
+    match state {
+        PullState::Tap if dx.hypot(dy) <= TAP_SLOP => PullState::Tap,
+        PullState::Tap | PullState::Pulling if dx.abs() >= 2.0 * dy.abs() && direction.allows(dx) => {
+            if dx.abs() >= px {
+                PullState::Out
+            } else {
+                PullState::Pulling
+            }
+        }
+        PullState::Tap => PullState::Cancelled,
+        s => s,
+    }
 }
 
 /// Horizontal slider showing an integer 0-100.
@@ -322,6 +345,9 @@ enum Capture {
     ExpanderMute(usize, bool),
     /// Tap on a folded expandable (it unfolds); whether the finger is still on it.
     MenuTap(usize, bool),
+    /// On the folded player with a `swipe_action`: where the finger came down, and
+    /// what it is doing (`Tap`: unfolds it when it lifts; `Out`: the swipe).
+    MenuSwipe(usize, (f32, f32), PullState),
     /// On a part of an unfolded expandable; whether the finger is still on that part.
     Menu(usize, Part, bool),
     /// On a button with `drag_children`: where the finger came down, and what it
@@ -485,8 +511,10 @@ impl Scene {
             }
         }
         for (i, m) in self.menus.iter().enumerate() {
-            if active != Some(Unfolded::Menu(i)) {
-                m.draw(canvas, t, font, None, live);
+            match self.capture {
+                Capture::MenuSwipe(j, _, PullState::Tap) if j == i => m.draw_pressed(canvas, t, font, live),
+                _ if active != Some(Unfolded::Menu(i)) => m.draw(canvas, t, font, None, live),
+                _ => {}
             }
         }
         if let Some(u) = active {
@@ -812,6 +840,10 @@ impl Scene {
         let i = self.menus.iter().position(|m| contains(m.rect, x, y))?;
         let m = &mut self.menus[i];
         m.fold.touch_down();
+        if m.swipe.is_some() {
+            // A tap or a swipe: it only knows when the finger lifts.
+            return Some(Capture::MenuSwipe(i, (x, y), PullState::Tap));
+        }
         if m.enabled {
             m.fold.expand(t);
         }
@@ -975,19 +1007,10 @@ impl Scene {
                 let (w, drag) = &self.workspaces[i];
                 let hover = w.hit(x, y, t);
                 let (dx, dy) = (x - from.0, y - from.1);
-                let next = match (*drag, state) {
+                let next = match *drag {
                     // No gesture: a press, as on a button (off it, no highlight).
-                    (None, s) => s,
-                    (Some(_), PullState::Tap) if dx.hypot(dy) <= TAP_SLOP => PullState::Tap,
-                    (Some(px), PullState::Tap | PullState::Pulling) if dx.abs() >= 2.0 * dy.abs() => {
-                        if dx.abs() >= px {
-                            PullState::Out
-                        } else {
-                            PullState::Pulling
-                        }
-                    }
-                    (Some(_), PullState::Tap) => PullState::Cancelled,
-                    (_, s) => s,
+                    None => state,
+                    Some(px) => sideways(state, (dx, dy), px, SwipeDirection::Any),
                 };
                 changed |= hover != self.ws_hover;
                 self.ws_hover = hover;
@@ -1019,6 +1042,12 @@ impl Scene {
             }
             (Phase::Move, Capture::MenuTap(i, _)) => {
                 self.capture = Capture::MenuTap(i, contains(self.menus[i].rect, x, y));
+            }
+            (Phase::Move, Capture::MenuSwipe(i, from, state)) => {
+                if let Some(s) = self.menus[i].swipe {
+                    let next = sideways(state, (x - from.0, y - from.1), s.px, s.direction);
+                    self.capture = Capture::MenuSwipe(i, from, next);
+                }
             }
             (Phase::Move, Capture::Menu(i, Part::Seek, _)) => {
                 // Follows the finger wherever it goes, like the sliders.
@@ -1128,6 +1157,23 @@ impl Scene {
                             changed |= m.on_tap(t);
                         }
                     }
+                    Capture::MenuSwipe(i, _, state) => {
+                        let m = &mut self.menus[i];
+                        let up = phase == Phase::Up;
+                        match state {
+                            PullState::Tap if up && contains(m.rect, x, y) => {
+                                if m.enabled {
+                                    m.fold.expand(t);
+                                }
+                                out.push(UiEvent::Tap(m.id.clone()));
+                                m.on_tap(t);
+                            }
+                            PullState::Out if up => out.push(UiEvent::Swipe(m.id.clone())),
+                            _ => {}
+                        }
+                        m.fold.touch_up(t);
+                        changed = true;
+                    }
                     Capture::Menu(i, Part::Seek, _) => {
                         // Seeks only now, when the finger lifts; a cancelled touch
                         // (e.g. a palm) doesn't.
@@ -1234,6 +1280,11 @@ impl Scene {
                 expander(i).map_or(Capture::None, |j| Capture::ExpanderMute(j, inside))
             }
             Capture::MenuTap(i, inside) => menu(i).map_or(Capture::None, |j| Capture::MenuTap(j, inside)),
+            // Without its swipe now (config changed): ignored until it lifts.
+            Capture::MenuSwipe(i, from, state) => match menu(i) {
+                Some(j) if self.menus[j].swipe.is_some() => Capture::MenuSwipe(j, from, state),
+                _ => Capture::Blocked,
+            },
             Capture::Menu(i, part, inside) => match (menu(i), part) {
                 // A child is followed by id: the new row may list them differently.
                 (Some(j), Part::Child(c)) => {
@@ -2159,9 +2210,12 @@ pub fn bar_with(
                     let color = item.title_color.map(|c| c.0).or(frame.text);
                     TitleView::new(color, item.title_scroll.unwrap_or(false))
                 });
-                scene
-                    .menus
-                    .push(Expandable::new(id, rect, spec, children, font));
+                let mut player = Expandable::new(id, rect, spec, children, font);
+                player.swipe = item.swipe_action.as_ref().map(|_| Swipe {
+                    px: item.drag_px(),
+                    direction: item.swipe_direction.unwrap_or_default(),
+                });
+                scene.menus.push(player);
             }
             ItemKind::Capture => {
                 let color = item.color.map_or(ICON, |c| c.0);
@@ -3429,6 +3483,120 @@ mod tests {
             &format!("seek_color = \"#ff0000\"\n        collapse_after_ms = 5000\n        {extra}"),
         );
         menu_scene(font, &toml)
+    }
+
+    #[test]
+    fn sideways_tells_taps_from_swipes() {
+        let any = SwipeDirection::Any;
+        let step = |moves: &[(f32, f32)], dir| {
+            moves.iter().fold(PullState::Tap, |s, &d| sideways(s, d, 40.0, dir))
+        };
+        assert_eq!(step(&[(5.0, 5.0)], any), PullState::Tap, "within the slop");
+        assert_eq!(step(&[(20.0, 0.0)], any), PullState::Pulling, "not far enough yet");
+        assert_eq!(step(&[(20.0, 0.0), (40.0, 3.0)], any), PullState::Out);
+        assert_eq!(step(&[(-40.0, 0.0)], any), PullState::Out, "either way");
+        assert_eq!(step(&[(10.0, 10.0), (40.0, 0.0)], any), PullState::Cancelled, "diagonal first");
+        assert_eq!(step(&[(0.0, 30.0)], any), PullState::Cancelled, "vertical");
+        // Once out it stays out, even back where it started.
+        assert_eq!(step(&[(40.0, 0.0), (0.0, 0.0)], any), PullState::Out);
+        // One way only.
+        assert_eq!(step(&[(40.0, 0.0)], SwipeDirection::Left), PullState::Cancelled);
+        assert_eq!(step(&[(-40.0, 0.0)], SwipeDirection::Left), PullState::Out);
+        assert_eq!(step(&[(20.0, 0.0), (-40.0, 0.0)], SwipeDirection::Right), PullState::Pulling);
+    }
+
+    /// Down on the folded player at `t0` ms, moves by each offset, lifts there.
+    fn swipe_player(s: &mut Scene, font: &Font, t0: u64, moves: &[(f32, f32)]) -> Vec<UiEvent> {
+        let (x, y) = mid(s.menus[0].rect);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, (x, y), MS(t0), font, &mut out);
+        let mut at = (x, y);
+        for (n, (dx, dy)) in moves.iter().enumerate() {
+            at = (x + dx, y + dy);
+            s.handle_touch(Phase::Move, at, MS(t0 + 10 + n as u64 * 10), font, &mut out);
+        }
+        s.handle_touch(Phase::Up, at, MS(t0 + 100), font, &mut out);
+        out
+    }
+
+    #[test]
+    fn player_swipe_runs_its_action_and_never_the_tap() {
+        let Some(font) = font() else { return };
+        let swipe = "swipe_action = { type = \"socket\" }\n        drag_px = 40";
+        let mut s = player_scene(&font, swipe);
+        let live = live();
+        s.advance(MS(0), &live);
+        let r = s.menus[0].rect;
+
+        // A tap: pressed (not unfolded) while down, unfolds when it lifts.
+        let edge = (r.x + 3.0, r.y + r.h / 2.0);
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        let before = pixel(&c, edge.0, edge.1);
+        let mut out = Vec::new();
+        assert!(s.handle_touch(Phase::Down, mid(r), MS(0), &font, &mut out));
+        assert!(!s.player_open());
+        assert!(s.capture == Capture::MenuSwipe(0, mid(r), PullState::Tap));
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        assert!(pixel(&c, edge.0, edge.1)[0] > before[0], "the default veil");
+        // Moving on, it is no longer a tap: no highlight.
+        s.handle_touch(Phase::Move, (mid(r).0 + 20.0, mid(r).1), MS(10), &font, &mut out);
+        s.draw(&mut c, MS(10), &font, &live).unwrap();
+        assert_eq!(pixel(&c, edge.0, edge.1), before);
+        s.handle_touch(Phase::Cancel, mid(r), MS(20), &font, &mut out);
+        assert!(out.is_empty() && !s.player_open());
+        s.handle_touch(Phase::Down, mid(r), MS(30), &font, &mut out);
+        s.handle_touch(Phase::Up, mid(r), MS(50), &font, &mut out);
+        assert_eq!(out, vec![UiEvent::Tap("player".into())]);
+        assert!(s.player_open());
+        // Unfolded, a sideways drag is its own business (here, its seek bar): no swipe.
+        let row = s.menus[0].open_rect;
+        let mut out = Vec::new();
+        let y = row.y + row.h / 2.0;
+        s.handle_touch(Phase::Down, (row.x + row.w - 60.0, y), MS(500), &font, &mut out);
+        s.handle_touch(Phase::Move, (row.x + row.w - 5.0, y), MS(510), &font, &mut out);
+        s.handle_touch(Phase::Up, (row.x + row.w - 5.0, y), MS(520), &font, &mut out);
+        assert!(!out.iter().any(|e| matches!(e, UiEvent::Swipe(_) | UiEvent::Tap(_))), "{out:?}");
+        assert!(s.player_open());
+        s.menus[0].fold.close_now();
+        s.advance(MS(1000), &live);
+
+        // A swipe either way: the swipe alone, and it stays folded.
+        for dx in [15.0, -15.0] {
+            let moves = [(dx, 0.0), (dx * 2.0, 2.0), (dx * 3.0, 0.0)];
+            assert_eq!(swipe_player(&mut s, &font, 1000, &moves), vec![UiEvent::Swipe("player".into())]);
+            assert!(!s.menus[0].fold.is_active(MS(1100)));
+        }
+        // Short of drag_px, vertical or diagonal: nothing at all.
+        for moves in [&[(30.0, 0.0)][..], &[(0.0, 20.0)], &[(15.0, 15.0), (60.0, 15.0)]] {
+            assert_eq!(swipe_player(&mut s, &font, 2000, moves), vec![], "{moves:?}");
+            assert!(!s.player_open());
+        }
+
+        // One way only: the other is nothing.
+        let mut s = player_scene(&font, &format!("{swipe}\n        swipe_direction = \"left\""));
+        s.advance(MS(0), &live);
+        assert_eq!(swipe_player(&mut s, &font, 0, &[(20.0, 0.0), (50.0, 0.0)]), vec![]);
+        assert_eq!(
+            swipe_player(&mut s, &font, 200, &[(-20.0, 0.0), (-50.0, 0.0)]),
+            vec![UiEvent::Swipe("player".into())]
+        );
+
+        // A pressed_background replaces the veil, under the icon.
+        let mut s = player_scene(&font, &format!("{swipe}\n        pressed_background = \"#ff0000\""));
+        s.advance(MS(0), &live);
+        let r = s.menus[0].rect;
+        s.handle_touch(Phase::Down, mid(r), MS(0), &font, &mut Vec::new());
+        let mut c = Canvas::new(W, H).unwrap();
+        s.draw(&mut c, MS(0), &font, &live).unwrap();
+        assert_eq!(pixel(&c, r.x + 3.0, r.y + r.h / 2.0), [0xff, 0, 0, 0xff]);
+
+        // Without swipe_action nothing changes: it unfolds as the finger comes down.
+        let mut s = player_scene(&font, "");
+        s.advance(MS(0), &live);
+        let mut out = Vec::new();
+        s.handle_touch(Phase::Down, mid(s.menus[0].rect), MS(0), &font, &mut out);
+        assert!(s.player_open());
     }
 
     #[test]

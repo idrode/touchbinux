@@ -10,6 +10,7 @@ use crate::{
     border::Border,
     anim::{Animated, ease_in_out},
     capture::{RecLook, Recording},
+    config::SwipeDirection,
     canvas::{AlphaMask, Canvas, Font, Image, Rect, Rgba},
     expander::{Fold, expanded_rect, lerp_rect},
     frame::{DEFAULT_PRESSED, Frame, Shape},
@@ -269,6 +270,16 @@ pub struct Expandable {
     /// is nothing, and it grows to the right from beside the button, which stays
     /// as it is (a circle keeps its shape).
     pulled_from: Option<Rect>,
+    /// The player's `swipe_action`: a swipe across it while folded runs it, so a
+    /// tap unfolds it only when the finger lifts.
+    pub swipe: Option<Swipe>,
+}
+
+/// How far (`drag_px`) and which way a swipe must go.
+#[derive(Clone, Copy, Debug)]
+pub struct Swipe {
+    pub px: f32,
+    pub direction: SwipeDirection,
 }
 
 /// What `Expandable::new` needs besides its id, rect and children.
@@ -317,6 +328,7 @@ impl Expandable {
             rec_look: spec.rec,
             recording: None,
             pulled_from: spec.pulled.then_some(rect),
+            swipe: None,
         };
         e.place(font);
         e
@@ -598,14 +610,38 @@ impl Expandable {
         pressed: Option<usize>,
         live: &Live,
     ) {
+        self.draw_as(canvas, t, font, pressed, live, false);
+    }
+
+    /// Folded under a finger that may still be a tap (the player with a
+    /// `swipe_action`): drawn with a button's pressed look.
+    pub fn draw_pressed(&self, canvas: &mut Canvas, t: Duration, font: &Font, live: &Live) {
+        self.draw_as(canvas, t, font, None, live, true);
+    }
+
+    /// `draw`, and with `held` the folded item pressed: its `pressed_background`
+    /// under the icon, else the default veil over it.
+    fn draw_as(
+        &self,
+        canvas: &mut Canvas,
+        t: Duration,
+        font: &Font,
+        pressed: Option<usize>,
+        live: &Live,
+        held: bool,
+    ) {
         let k = self.fold.progress(t);
         if self.pulled_from.is_some() && k <= 0.0 {
             return; // folded into its button, which draws itself
         }
         let r = self.current_rect(t);
-        self.frame.draw_background(canvas, r);
+        if held && self.frame.pressed.is_some() {
+            self.frame.draw_pressed_background(canvas, r);
+        } else {
+            self.frame.draw_background(canvas, r);
+        }
         if let Some(b) = &self.border {
-            b.draw(canvas, &self.frame, r, false, 1.0);
+            b.draw(canvas, &self.frame, r, held && self.frame.pressed.is_some(), 1.0);
         }
         if let (Some(look), Some(rec)) = (self.rec_look, self.recording) {
             rec.draw(canvas, r, self.frame.corner(r), t, font, look);
@@ -662,6 +698,12 @@ impl Expandable {
                 px,
                 fade(text, folded),
             );
+        }
+        if held && self.frame.pressed.is_none() {
+            self.frame.draw_pressed_veil(canvas, r);
+            if let Some(b) = self.border.filter(|b| b.pressed.is_some()) {
+                b.draw(canvas, &self.frame, r, true, 1.0);
+            }
         }
         let unfolded = (k - 0.4) / 0.6;
         if unfolded <= 0.0 {

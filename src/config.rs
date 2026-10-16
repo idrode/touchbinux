@@ -567,6 +567,28 @@ pub enum WsShow {
     All,
 }
 
+/// player: which way a swipe across its folded icon must go for `swipe_action`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SwipeDirection {
+    /// Left or right.
+    #[default]
+    Any,
+    Left,
+    Right,
+}
+
+impl SwipeDirection {
+    /// Whether a horizontal movement of `dx` px goes this way.
+    pub fn allows(self, dx: f32) -> bool {
+        match self {
+            SwipeDirection::Any => true,
+            SwipeDirection::Left => dx < 0.0,
+            SwipeDirection::Right => dx > 0.0,
+        }
+    }
+}
+
 impl ItemKind {
     pub fn name(self) -> &'static str {
         match self {
@@ -705,7 +727,8 @@ pub struct ItemConfig {
     #[serde(default)]
     pub drag_children: Option<Vec<ChildConfig>>,
     /// button with `drag_children`: how far right (px) the finger must go for the
-    /// row to stay out (default `DEFAULT_DRAG_PX`).
+    /// row to stay out; workspaces and player: how far sideways for their drag or
+    /// swipe to count (default `DEFAULT_DRAG_PX`).
     #[serde(default)]
     pub drag_px: Option<f32>,
     /// expandable: background of the children the daemon marks as active;
@@ -852,6 +875,13 @@ pub struct ItemConfig {
     /// is no gesture.
     #[serde(default)]
     pub overview_action: Option<Action>,
+    /// player: run by a horizontal swipe across its folded icon (`drag_px`,
+    /// `swipe_direction`); a tap still unfolds it. Without it there is no gesture.
+    #[serde(default)]
+    pub swipe_action: Option<Action>,
+    /// player: "any" (default), "left" or "right".
+    #[serde(default)]
+    pub swipe_direction: Option<SwipeDirection>,
     /// status: "reserve" (default) or "hidden" with nothing to show.
     #[serde(default)]
     pub idle: Option<StatusIdle>,
@@ -1240,6 +1270,8 @@ impl ItemConfig {
             class_icons: None,
             show: None,
             overview_action: None,
+            swipe_action: None,
+            swipe_direction: None,
             active_color: None,
             dir: None,
             thumb_size: None,
@@ -1574,6 +1606,9 @@ impl ItemConfig {
                 "title_scroll",
                 "title_color",
                 "close_on_tap",
+                "swipe_action",
+                "swipe_direction",
+                "drag_px",
             ],
             ItemKind::Capture => &[
                 "id",
@@ -1704,6 +1739,8 @@ impl ItemConfig {
             ("strip", self.strip.is_some()),
             ("show", self.show.is_some()),
             ("overview_action", self.overview_action.is_some()),
+            ("swipe_action", self.swipe_action.is_some()),
+            ("swipe_direction", self.swipe_direction.is_some()),
             ("active_color", self.active_color.is_some()),
             ("dir", self.dir.is_some()),
             ("thumb_size", self.thumb_size.is_some()),
@@ -1848,6 +1885,7 @@ impl ItemConfig {
             if self.seek_height.is_some_and(|h| !SEEK_HEIGHT.contains(&h)) {
                 bail!("{what}: seek_height must be in {SEEK_HEIGHT:?} px");
             }
+            self.validate_swipe(&what)?;
         }
         if self.kind == ItemKind::Workspaces {
             self.validate_workspaces(&what)?;
@@ -2107,6 +2145,30 @@ impl ItemConfig {
                 bail!("{what}: `drag_px` only applies with `overview_action`")
             }
             None => {}
+        }
+        if self.drag_px.is_some_and(|px| !DRAG_PX.contains(&px)) {
+            bail!("{what}: drag_px must be in {DRAG_PX:?} px");
+        }
+        Ok(())
+    }
+
+    /// player: `swipe_action` and what only applies with it.
+    fn validate_swipe(&self, what: &str) -> Result<()> {
+        match &self.swipe_action {
+            Some(a) if a.held_key().is_some() => {
+                bail!("{what}: swipe_action can't `hold` a key (a swipe has no finger on a key)")
+            }
+            Some(a) => validate_action(&format!("{what}: swipe_action"), a)?,
+            None => {
+                for (field, set) in [
+                    ("drag_px", self.drag_px.is_some()),
+                    ("swipe_direction", self.swipe_direction.is_some()),
+                ] {
+                    if set {
+                        bail!("{what}: `{field}` only applies with `swipe_action`");
+                    }
+                }
+            }
         }
         if self.drag_px.is_some_and(|px| !DRAG_PX.contains(&px)) {
             bail!("{what}: drag_px must be in {DRAG_PX:?} px");
@@ -4254,6 +4316,49 @@ mod tests {
         let two = format!("{}\n[[layers.items]]\ntype='player'\nid='p2'", item(""));
         let err = format!("{:#}", parse(&two).unwrap_err());
         assert!(err.contains("only one `player`"), "{err}");
+    }
+
+    #[test]
+    fn player_swipe_action() {
+        let item = |body: &str| format!("[[layers]]\nid='m'\n[[layers.items]]\ntype='player'\n{body}");
+        // Absent: no gesture, nothing else changes.
+        let bare = parse(&item("")).unwrap();
+        let p = bare.player().unwrap();
+        assert!(p.swipe_action.is_none() && p.swipe_direction.is_none());
+        // A command, with its threshold and direction.
+        let c = parse(&item(
+            "swipe_action = { type = 'command', argv = ['/usr/bin/qs', 'ipc', 'call', 'player', 'toggle'] }\n\
+             swipe_direction = 'left'\ndrag_px = 40",
+        ))
+        .unwrap();
+        let p = c.player().unwrap();
+        assert!(matches!(&p.swipe_action, Some(Action::Command { argv, .. }) if argv[3] == "player"));
+        assert_eq!((p.swipe_direction, p.drag_px()), (Some(SwipeDirection::Left), 40.0));
+        // A key, with the defaults.
+        let c = parse(&item("swipe_action = { type = 'key', key = 'KEY_F20' }")).unwrap();
+        let p = c.player().unwrap();
+        assert!(matches!(p.swipe_action, Some(Action::Key { .. })));
+        assert_eq!((p.swipe_direction, p.drag_px()), (None, DEFAULT_DRAG_PX));
+        for body in [
+            "swipe_action = { type = 'key', key = 'KEY_NOPE' }",
+            "swipe_action = { type = 'command', argv = [] }",
+            "swipe_action = { type = 'key', key = 'KEY_F20', hold = true }",
+            "swipe_action = { type = 'command', argv = ['/bin/true'], wat = 1 }",
+            "swipe_action = { type = 'key', key = 'KEY_F20' }\nswipe_direction = 'up'",
+            "swipe_action = { type = 'key', key = 'KEY_F20' }\ndrag_px = 7",
+            "swipe_action = { type = 'key', key = 'KEY_F20' }\nswipe_px = 30",
+            // What only applies with it.
+            "drag_px = 30",
+            "swipe_direction = 'right'",
+        ] {
+            assert!(parse(&item(body)).is_err(), "accepted: {body}");
+        }
+        let err = format!("{:#}", parse(&item("drag_px = 30")).unwrap_err());
+        assert!(err.contains("only applies with `swipe_action`"), "{err}");
+        // Only the player has it.
+        let other = "[[layers]]\nid='m'\n[[layers.items]]\ntype='expandable'\nid='e'\nicon='x'\n\
+                     swipe_action = { type = 'key', key = 'KEY_F20' }";
+        assert!(parse(other).is_err());
     }
 
     /// The shipped example must load anywhere: valid, no files of its own, and every
